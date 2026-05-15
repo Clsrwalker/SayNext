@@ -1,4 +1,99 @@
-# Remote Deployment With SQLite + Ollama
+# Remote Deployment Notes
+
+SayNext currently supports two operating modes behind one stable Mentra URL:
+
+```text
+https://saynext.167.172.153.109.sslip.io
+```
+
+## Current Two-Mode Setup
+
+### Local Mode
+
+Use this most of the time to save money.
+
+```text
+MentraOS -> VPS Caddy -> VPS frps -> local frpc -> local SayNext -> local Ollama
+```
+
+Requirements on the local Windows machine:
+
+```powershell
+cd D:\SayNext
+$env:Path += ";C:\Users\Admin\.bun\bin"
+bun run dev
+
+$env:Path += ";$env:LOCALAPPDATA\Programs\Ollama"
+ollama serve
+
+Start-Process "$env:USERPROFILE\.saynext\frp\frpc.exe" `
+  -ArgumentList "-c `"$env:USERPROFILE\.saynext\frp\frpc.toml`"" `
+  -WindowStyle Hidden
+```
+
+Switch the VPS to local mode:
+
+```bash
+ssh root@167.172.153.109
+saynext-local-mode
+saynext-mode-status
+```
+
+### Travel Mode
+
+Use this when the local computer is not available.
+
+```text
+MentraOS -> VPS Caddy -> VPS SayNext -> OpenAI API
+```
+
+Switch the VPS to travel mode:
+
+```bash
+ssh root@167.172.153.109
+saynext-travel-mode
+saynext-mode-status
+```
+
+Switch back when local is available:
+
+```bash
+saynext-local-mode
+```
+
+The VPS has a 1 GB swap file so the 512 MB Droplet can run the Bun app more safely.
+
+## VPS Services
+
+```bash
+systemctl status caddy
+systemctl status frps
+systemctl status saynext
+```
+
+In local mode:
+
+```text
+frps: active
+saynext: inactive
+caddy -> 127.0.0.1:8080
+```
+
+In travel mode:
+
+```text
+frps: inactive
+saynext: active
+caddy -> 127.0.0.1:3000
+```
+
+Check public health:
+
+```powershell
+curl.exe --ssl-no-revoke https://saynext.167.172.153.109.sslip.io/api/health
+```
+
+## Old Full Remote Ollama Plan
 
 This deployment removes ngrok/local tunnel from the runtime path.
 
