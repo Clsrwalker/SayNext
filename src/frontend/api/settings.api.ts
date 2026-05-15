@@ -3,10 +3,12 @@
 const getApiUrl = () => window.location.origin;
 
 export type FrequencyMode = 'low' | 'medium' | 'high';
+export type OutputLanguage = 'english' | 'chinese';
 
 export interface MergeSettings {
   userId: string;
   frequency: FrequencyMode;
+  outputLanguage: OutputLanguage;
   pausedForReading: boolean;
   theme: 'light' | 'dark';
 }
@@ -54,6 +56,16 @@ export const updateFrequency = async (
   frequency: FrequencyMode
 ): Promise<MergeSettings> => {
   return updateUserSettings(userId, { frequency });
+};
+
+/**
+ * Update only the output language setting
+ */
+export const updateOutputLanguage = async (
+  userId: string,
+  outputLanguage: OutputLanguage
+): Promise<MergeSettings> => {
+  return updateUserSettings(userId, { outputLanguage });
 };
 
 /**

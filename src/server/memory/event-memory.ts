@@ -74,12 +74,11 @@ function makeTitle(scene: string, transcripts: string[]): string {
 
 function makeSummary(scene: string, transcripts: string[], aiReplies: string[]): string {
   const recent = transcripts.slice(-4).map((text) => text.replace(/\s+/g, " ").trim());
-  const latestReply = aiReplies.at(-1);
 
   return [
     `Scene: ${scene}.`,
     recent.length ? `Recent context: ${recent.join(" / ")}` : "",
-    latestReply ? `Last SayNext output: ${latestReply}` : "",
+    aiReplies.length ? `SayNext outputs shown: ${aiReplies.length}` : "",
   ].filter(Boolean).join(" ");
 }
 

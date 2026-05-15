@@ -1,6 +1,6 @@
 import { AppSession } from '@mentra/sdk';
 import { Action, AgentType, type AgentResponse, type AgentInsight, type Conversation, type AgentRoute } from "../types";
-import { processConversation } from "./initial-agent";
+import { processConversation, type OutputLanguage } from "./initial-agent";
 import { routeToSpecialist } from "./specialist-agents";
 import { INSIGHTS_HISTORY_LENGTH, TRANSCRIPT_HISTORY_LENGTH, INSIGHT_CACHE_SIZE, SIMILARITY_THRESHOLD, INSIGHT_DISPLAY_DURATION_MS, MANUAL_PAUSE_DISPLAY_DURATION_MS } from '../../config';
 import { findBestMatch } from 'string-similarity';
@@ -26,18 +26,26 @@ export class MergeResponseHandler {
   private processingSeq: number = 0;
   private recentInsightCache: string[] = [];
   public frequency: 'low' | 'medium' | 'high';
+  public outputLanguage: OutputLanguage;
 
   // Callback for when an insight is generated (for webview SSE broadcasting)
   public onInsight?: (insight: { text: string; timestamp: number; agentType: string; reasoning: string }) => void;
   public onStatus?: (event: { type: string; [key: string]: unknown }) => void;
 
-  constructor(session: AppSession, userId: string, locationManager: LocationManager, initialFrequency: 'low' | 'medium' | 'high' = 'high') {
+  constructor(
+    session: AppSession,
+    userId: string,
+    locationManager: LocationManager,
+    initialFrequency: 'low' | 'medium' | 'high' = 'high',
+    initialOutputLanguage: OutputLanguage = "english",
+  ) {
     this.session = session;
     this.userId = userId;
     this.locationManager = locationManager;
     this.conversation = [];
     this.eventMemory = new EventMemoryManager(userId);
     this.frequency = initialFrequency;
+    this.outputLanguage = initialOutputLanguage;
   }
 
   /**
@@ -75,7 +83,7 @@ export class MergeResponseHandler {
       .sort((a, b) => a.timestamp - b.timestamp);
 
     // Get Initial Agent's decision, passing the current frequency
-    const response = await processConversation(context, this.frequency, eventSnapshot);
+    const response = await processConversation(context, this.frequency, eventSnapshot, this.outputLanguage);
 
     if (requestSeq !== this.processingSeq && this.currentDisplayText) {
       this.session.logger.info(`Dropping stale AI response for older transcript: "${text}"`);

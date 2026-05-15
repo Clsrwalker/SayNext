@@ -16,6 +16,7 @@ export const getSettings = (c: Context) => {
   return c.json({
     userId,
     frequency: user?.getFrequency() || 'high',
+    outputLanguage: user?.getOutputLanguage() || 'english',
     pausedForReading: user?.isPausedForReading() || false,
     theme: 'light', // Default, frontend manages theme via localStorage
   });
@@ -27,7 +28,7 @@ export const getSettings = (c: Context) => {
 export const updateSettings = async (c: Context) => {
   try {
     const body = await c.req.json();
-    const { userId, frequency, theme, pausedForReading, control, displayText } = body;
+    const { userId, frequency, outputLanguage, theme, pausedForReading, control, displayText } = body;
 
     if (!userId) {
       return c.json({ error: "userId is required" }, 400);
@@ -38,6 +39,12 @@ export const updateSettings = async (c: Context) => {
     if (frequency && ['low', 'medium', 'high'].includes(frequency)) {
       if (user) {
         user.setFrequency(frequency);
+      }
+    }
+
+    if (outputLanguage && ['english', 'chinese'].includes(outputLanguage)) {
+      if (user) {
+        user.setOutputLanguage(outputLanguage);
       }
     }
 
@@ -54,6 +61,7 @@ export const updateSettings = async (c: Context) => {
     return c.json({
       userId,
       frequency: user?.getFrequency() || frequency || 'high',
+      outputLanguage: user?.getOutputLanguage() || outputLanguage || 'english',
       pausedForReading: user?.isPausedForReading() || false,
       theme: theme || 'light',
     });

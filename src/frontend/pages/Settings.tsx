@@ -2,7 +2,14 @@ import { useRef, useState, useEffect } from 'react';
 import Header from '../components/Header';
 import SettingItem from '../ui/setting-item';
 import ToggleSwitch from '../ui/toggle-switch';
-import { fetchUserSettings, updateFrequency, updateTheme, type FrequencyMode } from '../api/settings.api';
+import {
+  fetchUserSettings,
+  updateFrequency,
+  updateOutputLanguage,
+  updateTheme,
+  type FrequencyMode,
+  type OutputLanguage,
+} from '../api/settings.api';
 
 interface SettingsProps {
   onBack: () => void;
@@ -20,12 +27,18 @@ const FREQUENCY_LABELS: Record<FrequencyMode, string> = {
 
 const FREQUENCY_ORDER: FrequencyMode[] = ['low', 'medium', 'high'];
 
+const OUTPUT_LANGUAGE_LABELS: Record<OutputLanguage, string> = {
+  english: 'English',
+  chinese: 'Chinese',
+};
+
 /**
  * Settings page - frequency toggle (LOW/MED/HIGH) + theme toggle
  */
 function Settings({ onBack, onOpenSampleReview, isDarkMode, onToggleDarkMode, userId }: SettingsProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [frequency, setFrequency] = useState<FrequencyMode>('high');
+  const [outputLanguage, setOutputLanguage] = useState<OutputLanguage>('english');
   const [isLoadingSettings, setIsLoadingSettings] = useState(true);
 
   // Fetch user settings on mount
@@ -34,6 +47,7 @@ function Settings({ onBack, onOpenSampleReview, isDarkMode, onToggleDarkMode, us
       try {
         const settings = await fetchUserSettings(userId);
         setFrequency((settings.frequency as FrequencyMode) || 'high');
+        setOutputLanguage(settings.outputLanguage === 'chinese' ? 'chinese' : 'english');
       } catch (error) {
         console.error('Failed to load settings:', error);
       } finally {
@@ -56,6 +70,19 @@ function Settings({ onBack, onOpenSampleReview, isDarkMode, onToggleDarkMode, us
     } catch (error) {
       console.error('Failed to update frequency:', error);
       setFrequency(frequency); // revert
+    }
+  };
+
+  const handleOutputLanguageToggle = async () => {
+    const newLanguage: OutputLanguage = outputLanguage === 'english' ? 'chinese' : 'english';
+    setOutputLanguage(newLanguage);
+
+    try {
+      await updateOutputLanguage(userId, newLanguage);
+      console.log('Output language synced:', newLanguage);
+    } catch (error) {
+      console.error('Failed to update output language:', error);
+      setOutputLanguage(outputLanguage);
     }
   };
 
@@ -120,6 +147,24 @@ function Settings({ onBack, onOpenSampleReview, isDarkMode, onToggleDarkMode, us
               }}
             >
               {FREQUENCY_LABELS[frequency]}
+            </button>
+          }
+        />
+
+        <SettingItem
+          isFirstItem={false}
+          isLastItem={false}
+          settingItemName="Reply Language"
+          customContent={
+            <button
+              onClick={handleOutputLanguageToggle}
+              className="px-[12px] py-[6px] rounded-full text-[13px] font-semibold transition-all duration-300"
+              style={{
+                backgroundColor: 'var(--secondary-foreground)',
+                color: 'var(--primary-foreground)',
+              }}
+            >
+              {OUTPUT_LANGUAGE_LABELS[outputLanguage]}
             </button>
           }
         />

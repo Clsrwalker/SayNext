@@ -2,9 +2,17 @@ import { AppSession } from "@mentra/sdk";
 import { InsightHistoryManager, type InsightEntry } from "../manager/InsightHistoryManager";
 import { LocationManager } from "../manager/LocationManager";
 import { MergeResponseHandler } from "../mastra/agents";
+import type { OutputLanguage } from "../mastra/agents/initial-agent";
 import { UTTERANCE_TIMEOUT_MS } from "../config";
 
 const MAX_EVENT_QUEUE_SIZE = 100;
+const LOW_VALUE_UTTERANCE_PATTERN = /^(and|so|then|but|or|uh|um|erm|hmm|mm|ah|oh|okay|ok|right|yeah|yes|no|嗯|呃|啊|哦|噢|唔|然后|所以)[\s.,!?。！？]*$/i;
+
+function isLowValueUtterance(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return true;
+  return LOW_VALUE_UTTERANCE_PATTERN.test(normalized);
+}
 
 /**
  * User — per-user state container.
@@ -73,8 +81,9 @@ export class User {
     // Unsubscribe any existing listeners from a previous session
     this.unsubscribeEventListeners();
 
-    // Load frequency from SimpleStorage synchronously before setting up listeners
+    // Load settings from SimpleStorage synchronously before setting up listeners
     let frequency: 'low' | 'medium' | 'high' = 'high';
+    let outputLanguage: OutputLanguage = 'english';
     try {
       const value = await session.simpleStorage.get('insight_frequency');
       frequency = (value as 'low' | 'medium' | 'high') || 'high';
@@ -82,9 +91,16 @@ export class User {
     } catch (err) {
       session.logger.error(`Failed to load frequency setting: ${err}`);
     }
+    try {
+      const value = await session.simpleStorage.get('output_language');
+      outputLanguage = value === 'chinese' ? 'chinese' : 'english';
+      session.logger.info(`Initial output language: ${outputLanguage}`);
+    } catch (err) {
+      session.logger.error(`Failed to load output language setting: ${err}`);
+    }
 
     // Create the response handler BEFORE setting up transcription listener
-    this.responseHandler = new MergeResponseHandler(session, this.userId, this.location, frequency);
+    this.responseHandler = new MergeResponseHandler(session, this.userId, this.location, frequency, outputLanguage);
     this.wireInsightCallback();
 
     // Set up transcription listener — responseHandler is guaranteed to exist
@@ -137,6 +153,12 @@ export class User {
 
       const textToProcess = this.currentUtteranceBuffer.trim();
       if (textToProcess.length > 0) {
+        if (isLowValueUtterance(textToProcess)) {
+          session.logger.info(`Skipping low-value utterance: "${textToProcess}"`);
+          this.currentUtteranceBuffer = "";
+          return;
+        }
+
         if (textToProcess === this.lastProcessedUtterance) {
           session.logger.info(`Skipping duplicate utterance: "${textToProcess}"`);
           this.currentUtteranceBuffer = "";
@@ -209,6 +231,25 @@ export class User {
   /** Get current frequency */
   getFrequency(): 'low' | 'medium' | 'high' {
     return this.responseHandler?.frequency || 'high';
+  }
+
+  /** Update output language setting */
+  setOutputLanguage(outputLanguage: OutputLanguage): void {
+    if (this.responseHandler) {
+      this.responseHandler.outputLanguage = outputLanguage;
+      console.log(`[User] Output language updated to ${outputLanguage} for ${this.userId}`);
+    }
+
+    if (this.appSession) {
+      this.appSession.simpleStorage.set('output_language', outputLanguage).catch((err) => {
+        console.error(`[User] Failed to save output language to SimpleStorage: ${err}`);
+      });
+    }
+  }
+
+  /** Get current output language */
+  getOutputLanguage(): OutputLanguage {
+    return this.responseHandler?.outputLanguage || 'english';
   }
 
   /** Pause AI processing while the user reads the current suggestion */

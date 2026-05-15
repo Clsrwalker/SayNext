@@ -65,8 +65,8 @@ Output behavior:
 - If there is no useful thing to say, output only a short acknowledgement like "Yeah, that makes sense."
 - The final output must contain ONLY the sentence or short response Xiang should say out loud.
 - Do not include scene analysis, explanations, translations, labels, bullet points, multiple options, or phrases like "you can say".
-- Use simple, natural spoken English for English conversations.
-- Use natural Chinese if the conversation is in Chinese and Chinese is more appropriate.
+- Use simple, natural spoken English by default.
+- Use Chinese only when the output language setting is Chinese.
 - Keep the reply casual but polite, clear, realistic, and easy to say.
 - Do not make Xiang sound like a senior engineer.
 - Do not invent fake experience or exaggerate his ability.
@@ -273,8 +273,49 @@ function getLatestTranscript(conversation: Conversation): string {
   return "";
 }
 
-function getFastInterviewResponse(transcript: string, timestamp: number): AgentResponse | null {
+export type OutputLanguage = "english" | "chinese";
+
+function getFastDirectResponse(transcript: string, timestamp: number, outputLanguage: OutputLanguage): AgentResponse | null {
+  const trimmed = transcript.trim();
+  const useChinese = outputLanguage === "chinese";
+
+  if (/^(?:\u54c8\u55bd|\u4f60\u597d|\u55e8|hello|hi|hey)(?:\s*(?:\u54c8\u55bd|\u4f60\u597d|\u55e8|hello|hi|hey))*[\s\u3002.!！]*$/i.test(trimmed)) {
+    return createInsight(
+      useChinese ? "\u54c8\u55bd\u3002" : "Hey.",
+      "Fast response for simple greeting",
+      timestamp,
+      0.95,
+    );
+  }
+
+  if (/^(?:\u5582|\u5728\u5417|can you hear me|are you there)[\s\u3002.!?！？]*$/i.test(trimmed)) {
+    return createInsight(
+      useChinese ? "\u5728\u7684\u3002" : "Yeah, I can hear you.",
+      "Fast response for connection check",
+      timestamp,
+      0.95,
+    );
+  }
+
+  if (
+    /^(what'?s|what is|may i have|can i have|could you tell me|tell me)\s+(your\s+)?name[\s?!.]*$/i.test(trimmed) ||
+    /^(?:\u4f60\u53eb\u4ec0\u4e48|\u4f60\u7684\u540d\u5b57|\u8bf7\u95ee\u4f60\u53eb\u4ec0\u4e48)[\s\u3002?？!！]*$/i.test(trimmed)
+  ) {
+    return createInsight(
+      useChinese ? "\u6211\u53eb Xiang Li\u3002" : "My name is Xiang Li.",
+      "Fast response for name question",
+      timestamp,
+      0.95,
+    );
+  }
+
+  return null;
+}
+
+function getFastInterviewResponse(transcript: string, timestamp: number, outputLanguage: OutputLanguage): AgentResponse | null {
   const normalized = transcript.toLowerCase();
+  const directResponse = getFastDirectResponse(transcript, timestamp, outputLanguage);
+  if (directResponse) return directResponse;
 
   if (/^(哈喽|你好|嗨|hello|hi|hey)[\s。.!！]*\1?[\s。.!！]*$/i.test(transcript.trim())) {
     return createInsight(
@@ -364,11 +405,12 @@ export async function processConversation(
   conversation: Conversation,
   frequency: 'low' | 'medium' | 'high' = 'high',
   eventMemory?: EventMemorySnapshot,
+  outputLanguage: OutputLanguage = "english",
 ): Promise<AgentResponse> {
   const currentTimestamp = Date.now();
   const currentDate = new Date(currentTimestamp).toISOString();
   const latestTranscript = getLatestTranscript(conversation);
-  const fastResponse = getFastInterviewResponse(latestTranscript, currentTimestamp);
+  const fastResponse = getFastInterviewResponse(latestTranscript, currentTimestamp, outputLanguage);
   if (fastResponse) {
     if (fastResponse.type === Action.INSIGHT) {
       console.log(`[SayNext] Fast response: ${fastResponse.output}`);
@@ -384,9 +426,8 @@ export async function processConversation(
         formattedHistoryLines.push(`Transcript: "${item.text}"`);
         break;
       case 'insight':
-        if (!/^\s*\{/.test(item.output)) {
-          formattedHistoryLines.push(`Previous suggestion: "${item.output}"`);
-        }
+        // Previous suggestions are model outputs, not conversation audio.
+        // Keeping them out of the prompt prevents the model from replying to itself.
         break;
       case 'silent':
         formattedHistoryLines.push(`Previous non-response: "${item.reasoning}"`);
@@ -413,9 +454,9 @@ export async function processConversation(
 
   console.log("\n--- SayNext Agent Context ---\n", formattedHistory, "\n-----------------------------\n");
   const prompt = `Current date and time is ${currentDate}.
-Use the recent conversation below to decide what is useful for Xiang to say next.
-Focus most on the latest complete transcript, but use the recent context to understand whether it is a question, lecture, feedback, small talk, or service/advisor conversation.
-Previous suggestions are only memory of what was shown before; do not treat them as things the interviewer said.
+The latest transcript is the current trigger. It has the highest priority.
+Use older transcripts only to resolve pronouns or understand the broad situation.
+If the latest transcript is self-contained, do not continue an older topic.
 Use the active event memory to understand the current situation over time, but do not repeat it verbatim.
 Internal decision policy:
 1. Decide whether Xiang is expected to speak now.
@@ -424,12 +465,19 @@ Internal decision policy:
 4. Output exactly one short speakable response.
 
 If the latest transcript contains a direct question, answer that question directly.
+If the latest transcript asks a new simple question, answer only that question and ignore unrelated older context.
 If the direct question is professional or technical, give a real technical answer first: principle, trade-off, debugging step, design choice, or concrete tool/service. Keep it natural, but do not make it vague.
 If the latest transcript is a classroom lecture statement, do not repeat it. Add a small useful supplement only if it helps: a generic example, a trade-off, a clearer explanation, or a clarification question. Do not connect it to Xiang's projects unless the speaker explicitly asks about Xiang's project.
 If no useful response is needed, output a short natural acknowledgement.
 Use Xiang's profile as hard personalization context. Do not invent details outside it.
 Do not use the personal sample library for this response. Rely only on the profile, active event memory, and recent conversation.
 Keep any reasoning private.
+Output language setting: ${outputLanguage}.
+You must write the output in ${outputLanguage === "chinese" ? "Chinese" : "English"}, even if the transcript contains another language.
+
+--- LATEST TRANSCRIPT ---
+Transcript: "${latestTranscript}"
+--- END LATEST TRANSCRIPT ---
 
 --- XIANG PROFILE ---
 ${formattedProfile}
