@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import { extname } from "node:path";
 import type { PrenoteFileRecord } from "../data/conversation-logger";
 
-const PRENOTE_MODEL = process.env.PRENOTE_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const PRENOTE_PROVIDER = (process.env.PRENOTE_PROVIDER || "auto").toLowerCase();
+const OPENAI_PRENOTE_MODEL = process.env.PRENOTE_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OLLAMA_PRENOTE_MODEL = process.env.PRENOTE_OLLAMA_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:14b-instruct";
+const PRENOTE_VISION_MODEL = process.env.PRENOTE_VISION_MODEL || "";
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 30000);
 const PRENOTE_MAX_PROCESS_CHARS = Number(process.env.PRENOTE_MAX_PROCESS_CHARS || 180000);
 
 export interface ExtractedFileContent {
@@ -114,7 +119,7 @@ async function callOpenAIResponses(content: any[]): Promise<string> {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: PRENOTE_MODEL,
+      model: OPENAI_PRENOTE_MODEL,
       input: [{ role: "user", content }],
       temperature: 0.1,
     }),
@@ -137,6 +142,54 @@ async function callOpenAIResponses(content: any[]): Promise<string> {
   return texts.join("\n").trim();
 }
 
+async function callOllamaGenerate(prompt: string, options: { model?: string; images?: string[] } = {}): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+
+  const response = await fetch(`${OLLAMA_BASE_URL.replace(/\/$/, "")}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: controller.signal,
+    body: JSON.stringify({
+      model: options.model || OLLAMA_PRENOTE_MODEL,
+      prompt,
+      images: options.images,
+      stream: false,
+      options: {
+        temperature: 0.1,
+        top_p: 0.9,
+        num_ctx: 8192,
+        num_predict: 1800,
+      },
+    }),
+  }).finally(() => clearTimeout(timeout));
+
+  if (!response.ok) {
+    throw new Error(`Ollama prenote request failed: ${response.status} ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  return String(data.response ?? "").trim();
+}
+
+async function callPrenoteTextModel(prompt: string): Promise<{ text: string; model: string }> {
+  const shouldUseOpenAI =
+    PRENOTE_PROVIDER === "openai" ||
+    (PRENOTE_PROVIDER === "auto" && Boolean(process.env.OPENAI_API_KEY));
+
+  if (shouldUseOpenAI) {
+    return {
+      text: await callOpenAIResponses([{ type: "input_text", text: prompt }]),
+      model: OPENAI_PRENOTE_MODEL,
+    };
+  }
+
+  return {
+    text: await callOllamaGenerate(prompt),
+    model: `ollama:${OLLAMA_PRENOTE_MODEL}`,
+  };
+}
+
 async function extractImageWithOpenAI(buffer: Buffer, mimeType: string, fileName: string): Promise<string> {
   const imageUrl = `data:${mimeType || "image/png"};base64,${buffer.toString("base64")}`;
   return callOpenAIResponses([
@@ -148,12 +201,27 @@ async function extractImageWithOpenAI(buffer: Buffer, mimeType: string, fileName
   ]);
 }
 
+async function extractImageText(buffer: Buffer, mimeType: string, fileName: string): Promise<string> {
+  if (process.env.OPENAI_API_KEY) {
+    return extractImageWithOpenAI(buffer, mimeType, fileName);
+  }
+
+  if (PRENOTE_VISION_MODEL) {
+    return callOllamaGenerate(
+      `Extract all readable text from this image and describe important visual context for a conversation assistant. File name: ${fileName}. Return concise plain text.`,
+      { model: PRENOTE_VISION_MODEL, images: [buffer.toString("base64")] },
+    );
+  }
+
+  throw new Error("Image OCR needs OPENAI_API_KEY or PRENOTE_VISION_MODEL with a local vision model.");
+}
+
 export async function extractTextFromFile(buffer: Buffer, fileName: string, mimeType: string): Promise<ExtractedFileContent> {
   try {
     const ext = extensionOf(fileName);
 
     if (mimeType.startsWith("image/") || ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "heic"].includes(ext)) {
-      return { text: normalizeWhitespace(await extractImageWithOpenAI(buffer, mimeType, fileName)), status: "ready" };
+      return { text: normalizeWhitespace(await extractImageText(buffer, mimeType, fileName)), status: "ready" };
     }
 
     if (mimeType === "application/pdf" || ext === "pdf") {
@@ -275,7 +343,8 @@ Material:
 ${prepared.text}`;
 
   try {
-    const responseText = await callOpenAIResponses([{ type: "input_text", text: prompt }]);
+    const modelResponse = await callPrenoteTextModel(prompt);
+    const responseText = modelResponse.text;
     const jsonText = extractJsonObject(responseText);
     const parsed = jsonText ? JSON.parse(jsonText) : null;
     const runtimeContext = typeof parsed?.runtime_context === "string"
@@ -286,7 +355,7 @@ ${prepared.text}`;
       extractedText: fullText,
       processedJson: jsonText ?? JSON.stringify({ title: input.title, responseText }),
       runtimeContext,
-      model: PRENOTE_MODEL,
+      model: modelResponse.model,
       contentHash,
     };
   } catch (error) {
