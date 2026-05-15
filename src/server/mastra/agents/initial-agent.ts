@@ -209,7 +209,7 @@ function includesAny(text: string, keywords: string[]): boolean {
 
 function looksLikeQuestion(text: string): boolean {
   const normalized = text.trim().toLowerCase();
-  return /[?£¿]\s*$/.test(normalized) || /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|tell me|describe|explain)\b/.test(normalized);
+  return /[?ï¼Ÿ]\s*$/.test(normalized) || /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|tell me|describe|explain)\b/.test(normalized);
 }
 
 function detectPromptMode(latestTranscript: string, eventMemory?: EventMemorySnapshot): PromptMode {
@@ -383,6 +383,7 @@ export async function processConversation(
   frequency: 'low' | 'medium' | 'high' = 'high',
   eventMemory?: EventMemorySnapshot,
   outputLanguage: OutputLanguage = "english",
+  activePrenoteContext = "",
 ): Promise<AgentResponse> {
   const currentTimestamp = Date.now();
   const currentDate = new Date(currentTimestamp).toISOString();
@@ -414,6 +415,7 @@ export async function processConversation(
   const retrievedSamples: { id: string }[] = [];
   const formattedProfile = buildCompactXiangProfile(promptMode);
   const formattedEventMemory = formatCompactEventMemory(eventMemory);
+  const formattedPrenoteContext = activePrenoteContext.trim() || "No active prenote.";
 
   console.log("\n--- SayNext Agent Context ---\n", formattedHistory, "\n-----------------------------\n");
   const prompt = `Time: ${currentDate}
@@ -427,6 +429,7 @@ Task:
 - If it is professional, technical, or academic, give a rigorous concept answer first. Be specific about mechanism, trade-off, assumption, tool, or example.
 - If it is lecture/explanation and not a direct question, give a professional knowledge supplement or useful question, not a conversational reply.
 - If it is casual, keep it natural and grounded.
+- Use active prenote memory as prepared context when relevant. It is stronger than generic knowledge, but do not force it if unrelated.
 - Do not use the personal sample library.
 
 --- LATEST TRANSCRIPT ---
@@ -440,6 +443,10 @@ ${formattedProfile}
 --- ACTIVE EVENT MEMORY ---
 ${formattedEventMemory}
 --- END ACTIVE EVENT MEMORY ---
+
+--- ACTIVE PRENOTE MEMORY ---
+${formattedPrenoteContext}
+--- END ACTIVE PRENOTE MEMORY ---
 
 ${formattedHistory}`;
 

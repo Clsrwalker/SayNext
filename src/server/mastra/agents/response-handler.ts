@@ -82,8 +82,10 @@ export class MergeResponseHandler {
     const context: Conversation = [...recentTranscripts, ...recentInsights]
       .sort((a, b) => a.timestamp - b.timestamp);
 
+    const activePrenoteContext = conversationLogger.getActivePrenoteRuntimeContext(this.userId);
+
     // Get Initial Agent's decision, passing the current frequency
-    const response = await processConversation(context, this.frequency, eventSnapshot, this.outputLanguage);
+    const response = await processConversation(context, this.frequency, eventSnapshot, this.outputLanguage, activePrenoteContext);
 
     if (requestSeq !== this.processingSeq && this.currentDisplayText) {
       this.session.logger.info(`Dropping stale AI response for older transcript: "${text}"`);

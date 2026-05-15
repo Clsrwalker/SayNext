@@ -13,6 +13,7 @@ import {
   processConversationEventForPersonalization,
   processConversationSampleForPersonalization,
 } from "../api/personalization-pipeline";
+import { createPrenote, deletePrenote, getPrenote, listPrenotes, updatePrenote } from "../api/prenotes";
 
 export const api = new Hono();
 
@@ -36,3 +37,10 @@ api.get("/personalization-pipeline/runs", listPersonalizationPipelineRuns);
 api.post("/personalization-pipeline/samples/:id", processConversationSampleForPersonalization);
 api.post("/personalization-pipeline/events/:id", processConversationEventForPersonalization);
 api.get("/personal-memory", listPersonalMemoryItems);
+
+// Prenotes: prepared scene/context memory
+api.get("/prenotes", listPrenotes);
+api.post("/prenotes", createPrenote);
+api.get("/prenotes/:id", getPrenote);
+api.patch("/prenotes/:id", updatePrenote);
+api.delete("/prenotes/:id", deletePrenote);

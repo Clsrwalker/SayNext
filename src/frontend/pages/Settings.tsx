@@ -14,6 +14,7 @@ import {
 interface SettingsProps {
   onBack: () => void;
   onOpenSampleReview: () => void;
+  onOpenPrenotes: () => void;
   isDarkMode: boolean;
   onToggleDarkMode: () => void;
   userId: string;
@@ -35,7 +36,7 @@ const OUTPUT_LANGUAGE_LABELS: Record<OutputLanguage, string> = {
 /**
  * Settings page - frequency toggle (LOW/MED/HIGH) + theme toggle
  */
-function Settings({ onBack, onOpenSampleReview, isDarkMode, onToggleDarkMode, userId }: SettingsProps) {
+function Settings({ onBack, onOpenSampleReview, onOpenPrenotes, isDarkMode, onToggleDarkMode, userId }: SettingsProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [frequency, setFrequency] = useState<FrequencyMode>('high');
   const [outputLanguage, setOutputLanguage] = useState<OutputLanguage>('english');
@@ -165,6 +166,24 @@ function Settings({ onBack, onOpenSampleReview, isDarkMode, onToggleDarkMode, us
               }}
             >
               {OUTPUT_LANGUAGE_LABELS[outputLanguage]}
+            </button>
+          }
+        />
+
+        <SettingItem
+          isFirstItem={false}
+          isLastItem={false}
+          settingItemName="Prenote"
+          customContent={
+            <button
+              onClick={onOpenPrenotes}
+              className="px-[12px] py-[6px] rounded-full text-[13px] font-semibold transition-all duration-300"
+              style={{
+                backgroundColor: 'var(--secondary-foreground)',
+                color: 'var(--primary-foreground)',
+              }}
+            >
+              Manage
             </button>
           }
         />

@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 
@@ -154,6 +154,66 @@ export interface CreatePersonalMemoryItemInput {
   status?: "active" | "archived";
 }
 
+export interface PrenoteRecord {
+  id: number;
+  userId: string;
+  title: string;
+  description: string;
+  status: string;
+  isActive: boolean;
+  sourceText: string;
+  extractedText: string;
+  processedJson: string;
+  runtimeContext: string;
+  model: string | null;
+  contentHash: string;
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PrenoteFileRecord {
+  id: number;
+  prenoteId: number;
+  fileName: string;
+  mimeType: string;
+  filePath: string;
+  sizeBytes: number;
+  extractedText: string;
+  status: string;
+  error: string;
+  createdAt: string;
+}
+
+export interface CreatePrenoteInput {
+  userId: string;
+  title: string;
+  description?: string;
+  sourceText?: string;
+  contentHash?: string;
+}
+
+export interface UpdatePrenoteProcessingInput {
+  status: "processing" | "ready" | "error";
+  extractedText?: string;
+  processedJson?: string;
+  runtimeContext?: string;
+  model?: string | null;
+  contentHash?: string;
+  error?: string;
+}
+
+export interface CreatePrenoteFileInput {
+  prenoteId: number;
+  fileName: string;
+  mimeType: string;
+  filePath: string;
+  sizeBytes: number;
+  extractedText?: string;
+  status?: "ready" | "error";
+  error?: string;
+}
+
 const DEFAULT_DB_PATH = join(process.cwd(), "data", "saynext.sqlite");
 
 function boolFromDb(value: number | null): boolean | null {
@@ -260,6 +320,41 @@ function mapPersonalMemoryItemRecord(row: any): PersonalMemoryItemRecord {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapPrenoteRecord(row: any): PrenoteRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    title: row.title,
+    description: row.description || "",
+    status: row.status,
+    isActive: Boolean(row.is_active),
+    sourceText: row.source_text || "",
+    extractedText: row.extracted_text || "",
+    processedJson: row.processed_json || "{}",
+    runtimeContext: row.runtime_context || "",
+    model: row.model,
+    contentHash: row.content_hash || "",
+    error: row.error || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapPrenoteFileRecord(row: any): PrenoteFileRecord {
+  return {
+    id: row.id,
+    prenoteId: row.prenote_id,
+    fileName: row.file_name,
+    mimeType: row.mime_type || "",
+    filePath: row.file_path,
+    sizeBytes: row.size_bytes || 0,
+    extractedText: row.extracted_text || "",
+    status: row.status,
+    error: row.error || "",
+    createdAt: row.created_at,
   };
 }
 
@@ -393,6 +488,46 @@ class ConversationLogger {
     `);
 
     db.run("CREATE INDEX IF NOT EXISTS idx_personal_memory_user ON personal_memory_items(user_id, status, updated_at DESC)");
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS prenotes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'processing',
+        is_active INTEGER NOT NULL DEFAULT 0,
+        source_text TEXT NOT NULL DEFAULT '',
+        extracted_text TEXT NOT NULL DEFAULT '',
+        processed_json TEXT NOT NULL DEFAULT '{}',
+        runtime_context TEXT NOT NULL DEFAULT '',
+        model TEXT,
+        content_hash TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    db.run("CREATE INDEX IF NOT EXISTS idx_prenotes_user_active ON prenotes(user_id, is_active, updated_at DESC)");
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS prenote_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prenote_id INTEGER NOT NULL,
+        file_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL DEFAULT '',
+        file_path TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL DEFAULT 0,
+        extracted_text TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'ready',
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(prenote_id) REFERENCES prenotes(id) ON DELETE CASCADE
+      )
+    `);
+
+    db.run("CREATE INDEX IF NOT EXISTS idx_prenote_files_prenote ON prenote_files(prenote_id)");
     this.initialized = true;
   }
 
@@ -676,6 +811,172 @@ class ConversationLogger {
       .all(userId, safeLimit);
 
     return rows.map(mapPersonalMemoryItemRecord);
+  }
+
+  createPrenote(input: CreatePrenoteInput): PrenoteRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const result = this.getDb()
+      .query(`
+        INSERT INTO prenotes (user_id, title, description, source_text, content_hash)
+        VALUES (?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.userId,
+        input.title,
+        input.description ?? "",
+        input.sourceText ?? "",
+        input.contentHash ?? "",
+      );
+
+    return this.getPrenote(Number(result.lastInsertRowid));
+  }
+
+  getPrenote(id: number): PrenoteRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const row = this.getDb()
+      .query("SELECT * FROM prenotes WHERE id = ?")
+      .get(id);
+
+    return row ? mapPrenoteRecord(row) : null;
+  }
+
+  listPrenotes(userId: string): PrenoteRecord[] {
+    if (!this.isEnabled()) return [];
+
+    const rows = this.getDb()
+      .query("SELECT * FROM prenotes WHERE user_id = ? ORDER BY is_active DESC, updated_at DESC")
+      .all(userId);
+
+    return rows.map(mapPrenoteRecord);
+  }
+
+  updatePrenoteProcessing(id: number, input: UpdatePrenoteProcessingInput): PrenoteRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const existing = this.getPrenote(id);
+    if (!existing) return null;
+
+    this.getDb()
+      .query(`
+        UPDATE prenotes
+        SET
+          status = ?,
+          extracted_text = ?,
+          processed_json = ?,
+          runtime_context = ?,
+          model = ?,
+          content_hash = ?,
+          error = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      .run(
+        input.status,
+        input.extractedText ?? existing.extractedText,
+        input.processedJson ?? existing.processedJson,
+        input.runtimeContext ?? existing.runtimeContext,
+        input.model ?? existing.model,
+        input.contentHash ?? existing.contentHash,
+        input.error ?? "",
+        id,
+      );
+
+    return this.getPrenote(id);
+  }
+
+  setActivePrenote(userId: string, id: number | null): PrenoteRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const db = this.getDb();
+    db.query("UPDATE prenotes SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").run(userId);
+
+    if (id === null) return null;
+
+    db.query("UPDATE prenotes SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?").run(userId, id);
+    return this.getPrenote(id);
+  }
+
+  getActivePrenote(userId: string): PrenoteRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const row = this.getDb()
+      .query("SELECT * FROM prenotes WHERE user_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1")
+      .get(userId);
+
+    return row ? mapPrenoteRecord(row) : null;
+  }
+
+  getActivePrenoteRuntimeContext(userId: string): string {
+    const prenote = this.getActivePrenote(userId);
+    if (!prenote || prenote.status !== "ready") return "";
+    return prenote.runtimeContext || prenote.processedJson || "";
+  }
+
+  deletePrenote(userId: string, id: number): boolean {
+    if (!this.isEnabled()) return false;
+
+    const prenote = this.getPrenote(id);
+    if (!prenote || prenote.userId !== userId) return false;
+
+    const files = this.listPrenoteFiles(id);
+    this.getDb().query("DELETE FROM prenotes WHERE id = ? AND user_id = ?").run(id, userId);
+
+    for (const file of files) {
+      try {
+        rmSync(file.filePath, { force: true });
+      } catch {
+        // Best-effort cleanup only.
+      }
+    }
+
+    return true;
+  }
+
+  createPrenoteFile(input: CreatePrenoteFileInput): PrenoteFileRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const result = this.getDb()
+      .query(`
+        INSERT INTO prenote_files (
+          prenote_id, file_name, mime_type, file_path, size_bytes,
+          extracted_text, status, error
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.prenoteId,
+        input.fileName,
+        input.mimeType,
+        input.filePath,
+        input.sizeBytes,
+        input.extractedText ?? "",
+        input.status ?? "ready",
+        input.error ?? "",
+      );
+
+    return this.getPrenoteFile(Number(result.lastInsertRowid));
+  }
+
+  getPrenoteFile(id: number): PrenoteFileRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const row = this.getDb()
+      .query("SELECT * FROM prenote_files WHERE id = ?")
+      .get(id);
+
+    return row ? mapPrenoteFileRecord(row) : null;
+  }
+
+  listPrenoteFiles(prenoteId: number): PrenoteFileRecord[] {
+    if (!this.isEnabled()) return [];
+
+    const rows = this.getDb()
+      .query("SELECT * FROM prenote_files WHERE prenote_id = ? ORDER BY id ASC")
+      .all(prenoteId);
+
+    return rows.map(mapPrenoteFileRecord);
   }
 }
 

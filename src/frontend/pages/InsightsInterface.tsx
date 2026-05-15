@@ -10,6 +10,7 @@ import MentraLogoAnimation from '../../public/figma-parth-assets/anim/Mentralogo
 import MergeLogo from '../../public/assets/icons/merge_logo.png';
 import Settings from './Settings';
 import SampleReview from './SampleReview';
+import PrenoteManager from './PrenoteManager';
 import Header from '../components/Header';
 import BottomHeader from '../components/BottomHeader';
 import { useTheme } from '../App';
@@ -152,7 +153,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
   const renderedIdsRef = useRef<Set<string>>(new Set());
   const [sessionActive, setSessionActive] = useState<boolean | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
-  const [currentPage, setCurrentPage] = useState<'insights' | 'settings' | 'sampleReview'>('insights');
+  const [currentPage, setCurrentPage] = useState<'insights' | 'settings' | 'sampleReview' | 'prenotes'>('insights');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sseRef = useRef<EventSource | null>(null);
@@ -336,9 +337,19 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
       <Settings
         onBack={() => setCurrentPage('insights')}
         onOpenSampleReview={() => setCurrentPage('sampleReview')}
+        onOpenPrenotes={() => setCurrentPage('prenotes')}
         isDarkMode={isDarkMode}
         onToggleDarkMode={toggleTheme}
         userId={userId}
+      />
+    );
+  }
+
+  if (currentPage === 'prenotes') {
+    return (
+      <PrenoteManager
+        userId={userId}
+        onBack={() => setCurrentPage('settings')}
       />
     );
   }

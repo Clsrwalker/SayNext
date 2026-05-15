@@ -1,0 +1,160 @@
+import type { Context } from "hono";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { conversationLogger, type PrenoteRecord } from "../data/conversation-logger";
+import { extractTextFromFile, processPrenote } from "../prenotes/prenote-processor";
+
+const PRENOTE_UPLOAD_DIR = process.env.PRENOTE_UPLOAD_DIR || join(process.cwd(), "data", "prenote-files");
+
+function safePathPart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 120) || "file";
+}
+
+function serializePrenote(prenote: PrenoteRecord) {
+  return {
+    ...prenote,
+    files: conversationLogger.listPrenoteFiles(prenote.id).map((file) => ({
+      id: file.id,
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      sizeBytes: file.sizeBytes,
+      status: file.status,
+      error: file.error,
+      extractedTextLength: file.extractedText.length,
+      createdAt: file.createdAt,
+    })),
+    sourceTextLength: prenote.sourceText.length,
+    extractedTextLength: prenote.extractedText.length,
+    runtimeContextLength: prenote.runtimeContext.length,
+  };
+}
+
+function getUserId(c: Context): string | null {
+  return c.req.query("userId") || null;
+}
+
+export const listPrenotes = (c: Context) => {
+  const userId = getUserId(c);
+  if (!userId) return c.json({ error: "userId is required" }, 400);
+
+  const prenotes = conversationLogger.listPrenotes(userId).map(serializePrenote);
+  return c.json({ prenotes });
+};
+
+export const getPrenote = (c: Context) => {
+  const userId = getUserId(c);
+  const id = Number(c.req.param("id"));
+  if (!userId) return c.json({ error: "userId is required" }, 400);
+  if (!Number.isFinite(id)) return c.json({ error: "Invalid prenote id" }, 400);
+
+  const prenote = conversationLogger.getPrenote(id);
+  if (!prenote || prenote.userId !== userId) return c.json({ error: "Prenote not found" }, 404);
+
+  return c.json({ prenote: serializePrenote(prenote) });
+};
+
+export const createPrenote = async (c: Context) => {
+  const formData = await c.req.raw.formData();
+  const userId = String(formData.get("userId") || "").trim();
+  const title = String(formData.get("title") || "").trim();
+  const description = String(formData.get("description") || "").trim();
+  const sourceText = String(formData.get("sourceText") || "").trim();
+  const setActive = String(formData.get("setActive") || "true") !== "false";
+
+  if (!userId) return c.json({ error: "userId is required" }, 400);
+  if (!title) return c.json({ error: "title is required" }, 400);
+
+  const prenote = conversationLogger.createPrenote({ userId, title, description, sourceText });
+  if (!prenote) return c.json({ error: "Prenote storage is disabled" }, 503);
+
+  const files = formData.getAll("files").filter((item): item is File => item instanceof File && item.size > 0);
+  const uploadedFiles = [];
+
+  for (const file of files) {
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const safeName = safePathPart(file.name || "upload");
+    const relativeDir = join(safePathPart(userId), String(prenote.id));
+    const dir = join(PRENOTE_UPLOAD_DIR, relativeDir);
+    mkdirSync(dir, { recursive: true });
+
+    const filePath = join(dir, `${randomUUID()}-${safeName}`);
+    writeFileSync(filePath, buffer);
+
+    const extracted = await extractTextFromFile(buffer, file.name || safeName, file.type || "");
+    const record = conversationLogger.createPrenoteFile({
+      prenoteId: prenote.id,
+      fileName: file.name || safeName,
+      mimeType: file.type || "",
+      filePath,
+      sizeBytes: file.size,
+      extractedText: extracted.text,
+      status: extracted.status,
+      error: extracted.error ?? "",
+    });
+
+    if (record) uploadedFiles.push(record);
+  }
+
+  const processed = await processPrenote({
+    title,
+    description,
+    sourceText,
+    files: uploadedFiles,
+  });
+
+  const extractionErrors = uploadedFiles.filter((file) => file.status === "error").map((file) => `${file.fileName}: ${file.error}`);
+  const updated = conversationLogger.updatePrenoteProcessing(prenote.id, {
+    status: "ready",
+    extractedText: processed.extractedText,
+    processedJson: processed.processedJson,
+    runtimeContext: processed.runtimeContext,
+    model: processed.model,
+    contentHash: processed.contentHash,
+    error: extractionErrors.join("\n"),
+  });
+
+  if (setActive) {
+    conversationLogger.setActivePrenote(userId, prenote.id);
+  }
+
+  const finalPrenote = conversationLogger.getPrenote(prenote.id) ?? updated ?? prenote;
+  return c.json({ prenote: serializePrenote(finalPrenote) }, 201);
+};
+
+export const updatePrenote = async (c: Context) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id)) return c.json({ error: "Invalid prenote id" }, 400);
+
+  const body = await c.req.json();
+  const userId = String(body.userId || "").trim();
+  if (!userId) return c.json({ error: "userId is required" }, 400);
+
+  const prenote = conversationLogger.getPrenote(id);
+  if (!prenote || prenote.userId !== userId) return c.json({ error: "Prenote not found" }, 404);
+
+  if (body.active === true) {
+    const active = conversationLogger.setActivePrenote(userId, id);
+    return c.json({ prenote: active ? serializePrenote(active) : null });
+  }
+
+  if (body.active === false) {
+    conversationLogger.setActivePrenote(userId, null);
+    return c.json({ prenote: serializePrenote(conversationLogger.getPrenote(id) ?? prenote) });
+  }
+
+  return c.json({ prenote: serializePrenote(prenote) });
+};
+
+export const deletePrenote = async (c: Context) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json().catch(() => ({}));
+  const userId = String(body.userId || c.req.query("userId") || "").trim();
+  if (!userId) return c.json({ error: "userId is required" }, 400);
+  if (!Number.isFinite(id)) return c.json({ error: "Invalid prenote id" }, 400);
+
+  const deleted = conversationLogger.deletePrenote(userId, id);
+  if (!deleted) return c.json({ error: "Prenote not found" }, 404);
+
+  return c.json({ ok: true });
+};
