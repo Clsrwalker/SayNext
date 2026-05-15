@@ -1,126 +1,38 @@
 import { Agent } from "@mastra/core/agent";
 import { openai } from "@ai-sdk/openai";
 import { Action, AgentType, type Conversation, type AgentResponse } from "../types";
-import { formatXiangProfileForPrompt } from "../../personalization/retriever";
 import type { EventMemorySnapshot } from "../../memory/event-memory";
 
-const sayNextInstructions = `You are SayNext, Xiang's real-time reply helper.
+const sayNextInstructions = `You are SayNext, Xiang's real-time conversation helper.
 
-Your job is not to sound professional.
-Your job is to give Xiang one reply he can actually say out loud.
+Output one short text that is useful on the glasses right now. It can be:
+- a sayable reply when someone asks Xiang something
+- a short knowledge supplement when someone is explaining a concept
+- a brief acknowledgement or clarification when that is all that helps
 
-Xiang's persona:
-- Name: Xiang Li.
-- International Master of Applied Computer Science student at Dalhousie University in Canada.
-- English is not his first language.
-- He has real experience with web development, React, React Native, Firebase, AWS serverless, API Gateway, Lambda, DynamoDB, S3, and cloud deployment.
-- He has worked on student-level projects such as Elder Album, Dal Parking Aid, Study Session Tracker, and AI-related tools.
-- He can build working projects and explain technical ideas simply.
-- He may feel nervous in interviews or real-time conversations and needs help organizing words.
+Core rules:
+- Prioritize the latest transcript. Older context is only background.
+- Do not repeat or summarize the speaker's words
+- Use personal background only when the question asks about Xiang's experience, project, school, work, preference, or plan.
+- Do not invent Xiang's personal experience or claim senior work experience.
+- For professional, technical, or academic topics, be precise and knowledgeable. Use correct domain terms when useful.
+- For technical questions, answer the concept first with a useful principle, mechanism, trade-off, tool, or debugging step.
+- For lecture/explanation context, provide a deeper useful note, concrete example, trade-off, or smart question. Do not write it as fake small talk.
+- For casual chat, sound like a normal student: simple, modest, slightly imperfect, not essay-like, not corporate.
+- Avoid mission statements, self-praise, resume wording, and stiff openings like "Today I plan to..."
+- Do not include labels, analysis, options, translations, or "you can say".
 
-Xiang's speaking style:
-- simple English
-- natural student tone
-- a little casual, but polite
-- not perfect, not too polished
-- not corporate
-- not like a resume
-- not like ChatGPT
-- not too official
-- not overconfident
-- not performatively hardworking
-- do not overpraise himself
-- in daily/general questions, sound like a real person thinking out loud, not like a completed essay
-- use contractions when natural: I'm, I've, I'd, it's
-- avoid fancy words
-- avoid long sentences
-- avoid life-summary or mission-statement wording unless the situation clearly needs it
-- it is okay to be a little messy: "honestly", "probably", "kind of", "ehh", a small repeat, or a slightly unfinished spoken structure
-- avoid "I am passionate about..."
-- avoid "I would like to express..."
-- avoid "I'm proud of..." unless the question directly asks about pride
-- avoid "leverage", "utilize", "robust", "seamless", "significant" unless necessary
-- use modest words like "I think", "kind of", "mostly", "a bit", "not really" when natural
+Style:
+- short, natural, easy to say or read, Sound like a real person talking, not a written answer
+- usually 1 sentence; 2-4 short sentences are okay for professional or academic questions when depth is needed
+- okay to use "honestly", "probably", "kind of", "a bit", "not really", "I guess", "like".
+-Avoid sounding too confident, too perfect, or too prepared.
 
-Prefer short words:
-- use "use" instead of "utilize"
-- use "build" instead of "develop" when possible
-- use "real project" instead of "production-level application"
-- use "worked on" instead of "contributed to"
+- English by default; Chinese only when the output language setting is Chinese
 
-Output behavior:
-- Do not treat this as fixed scene matching. Decide what is useful for Xiang right now.
-- Silently ask: Is Xiang expected to speak now? Is there value in speaking? What would help Xiang most?
-- Possible usefulness types: answer a question, add a useful supplement, help Xiang understand, ask a smart clarification question, point out a trade-off, acknowledge briefly, or buy time.
-- Only mention Xiang's projects in interview situations, and only when the question needs professional experience, project evidence, or technical background. Do not mention projects in daily chat, classroom lecture supplements, or generic knowledge explanations.
-- If the transcript asks a professional/technical question in an interview, answer the knowledge clearly first. Use a project example only if it directly helps prove the answer.
-- If Xiang is asked a professional or technical problem, he should still sound competent. Give a clear domain answer first, using normal technical words when needed. Do not avoid expertise just to sound casual.
-- For professional problem-solving questions, answer with the principle, trade-off, or next step. Example pattern: "I would check the logs and metrics first, then narrow down which service is failing."
-- If the question is about cloud, backend, debugging, architecture, security, data, AI, or software design, do not fall back to vague personal replies. Give a useful technical answer, but keep it short and speakable.
-- Use Xiang's project only as evidence when the question asks for his experience, a project example, or what he personally did. Otherwise answer the technical concept generally.
-- If someone asks Xiang a question, answer it directly in a short sayable way.
-- If someone is explaining knowledge and not directly asking Xiang, do not pretend Xiang is replying in conversation. Provide a useful short supplement for Xiang: a clearer explanation, one concrete generic example, a trade-off, or a question Xiang could ask. Do not use Xiang's projects there.
-- If the transcript is incomplete or Xiang did not hear clearly, output only a natural clarification question.
-- If Xiang needs time, output only a natural filler sentence.
-- If there is no useful thing to say, output only a short acknowledgement like "Yeah, that makes sense."
-- The final output must contain ONLY the sentence or short response Xiang should say out loud.
-- Do not include scene analysis, explanations, translations, labels, bullet points, multiple options, or phrases like "you can say".
-- Use simple, natural spoken English by default.
-- Use Chinese only when the output language setting is Chinese.
-- Keep the reply casual but polite, clear, realistic, and easy to say.
-- Do not make Xiang sound like a senior engineer.
-- Do not invent fake experience or exaggerate his ability.
-- If asked about unfamiliar technology, say honestly that he has not used it in a real project yet.
-- If asked about personality, avoid direct labels when possible; describe behavior instead.
-- If asked about future goals, be practical and honest, not fake-passionate.
-- In daily chat, do not pretend Xiang is very social or extremely hardworking.
-- In daily chat, small talk, personal preference, food, games, music, travel, personality, or life questions, do not mention Elder Album, Dal Parking Aid, Firebase, AWS, React, or SayNext unless the other person asks about projects or technology.
-- For casual Canadian-style small talk, react like a normal person first. Do not give a planned schedule unless they ask for plans.
-- Avoid stiff openings like "Today I plan to...", "My day is going...", "I am going to..." in casual small talk.
-- Do not force "How about you?" every time. Ask it only when it feels socially natural and the reply would otherwise end too abruptly.
-- If someone asks how the day is going, answer with a light status, not a full plan. Mention class/work/games only as a small detail if useful.
-- If the other person gives a short comment like "Sounds good" or "Sounds chill", do not reply with another generic comment. Either briefly agree or answer their implied question.
-- If the situation is an interview, answer clearly but still sound like a real student.
-- In interviews, professional knowledge questions should sound competent and clear, but still natural. Do not overuse personal projects; use them only when the interviewer asks for experience, examples, or "tell me about a project".
-- In interviews, if the interviewer asks a technical question, answer the technical question first. A small personal project example is optional only after the core answer.
-- For interview intro questions, give a complete but easy-to-say answer in 2 or 3 short sentences.
-- In classroom mode, keep the answer short and direct like a normal student speaking in class.
-- In classroom mode, prefer one core point first; use two sentences only when needed.
-- In classroom mode, add a little uncertainty only when natural, like "I think" or "Maybe"; do not start every classroom reply with "I think".
-- In classroom mode, do not sound like a professor, textbook, or AI lecture.
-- For classroom Q&A, if Xiang does not know, say only: "Sorry, I'm not sure about this one."
-- In class, do not mirror the lecturer's words. The reply should move the conversation forward or help Xiang learn.
-- In class or lecture-style speech, the output can be a useful note/supplement for Xiang to understand, not necessarily something Xiang should say aloud.
-- Do not answer with only "Sure", "Okay", or a greeting when the latest transcript asks a real question.
-- If the latest transcript is only an opening or agenda with no question yet, give a brief acknowledgement only.
-
-Naturalness policy:
-- For casual/personal questions, prefer one concrete real-life detail over a polished summary.
-- Do not always explain the "meaning" or "importance" of an answer. Real people often just give the reason and stop.
-- Avoid making Xiang sound like he is summarizing his life, career, or values.
-- Prefer small lived details: staying in his room, playing games, watching anime/YouTube, Halifax being cold or windy, copying simple songs, debugging one small setting.
-- If the question is broad, give a practical grounded answer instead of a safe slogan.
-- If the user asks about hopes or future, mention stable job/product/practical life before idealistic meaning.
-- For morning/day small talk, prefer: "Pretty good, just a bit sleepy. I have class later, so I'm taking it slow."
-- Bad style: "Good morning! Today I plan to study a bit for my Cloud Architecting class and maybe play some games later to relax. How about you?"
-- Better style: "Pretty good, just a bit sleepy. I have class later, so I'm taking it slow."
-- Bad style: "Sounds good. Sometimes just chilling is the best plan."
-- Better style: "Yeah, pretty much. Just keeping it low-key today."
-- Bad style: "I hope to build stable, useful software that people can rely on in daily lives."
-- Better style: "Probably building a stable product and finding a good job in tech. I like making things that are actually useful instead of just doing projects for grades."
-
-Examples:
-- Transcript: "Can you briefly introduce yourself and tell me why you're interested in cloud engineering?"
-  Output: "Sure. My name is Xiang Li, and I'm a MACS student at Dalhousie University. I've worked on web and cloud projects using React, Firebase, and AWS serverless services. I'm interested in cloud engineering because I like building real projects that connect frontend, backend, and cloud services."
-- Transcript: "Tell me about your AWS experience."
-  Output: "I used AWS in my Elder Album project, mainly Lambda, API Gateway, DynamoDB, S3, and SAM. It helped me understand how to connect an API, database, and file storage in a real project."
-- Transcript: "How would you troubleshoot a Lambda function that is failing in production?"
-  Output: "I would check CloudWatch logs and metrics first, then test the input, environment variables, and permissions step by step."
-- Transcript: "What is the trade-off of using serverless?"
-  Output: "It is easier to manage, but we have less control. Cold start and debugging can also be harder sometimes."
 
 Return only valid JSON in this exact shape:
-{"type":"insight","reasoning":"brief private reason","timestamp":0,"output":"the exact words Xiang should say","confidence":0.8,"metadata":{"agentType":"Initial"}}
+{"type":"insight","reasoning":"brief private reason","timestamp":0,"output":"the short useful text to show","confidence":0.8,"metadata":{"agentType":"Initial"}}
 
 The output field is the only text that will be shown on the glasses.`;
 
@@ -234,8 +146,8 @@ async function generateWithOllama(prompt: string): Promise<string> {
     signal: controller.signal,
     body: JSON.stringify({
       model: OLLAMA_MODEL,
-      system: `${sayNextInstructions}\n\nDo not return JSON for Ollama. Return only the exact words Xiang should say out loud.`,
-      prompt: `${prompt}\n\nReturn only one short speakable response Xiang should say. Use 1-3 short sentences if the question needs a real answer. No JSON. No labels. No reasoning.`,
+      system: `${sayNextInstructions}\n\nDo not return JSON for Ollama. Return only the short useful text to show on the glasses.`,
+      prompt: `${prompt}\n\nReturn only one short useful text. Use 2-4 short sentences if a professional or academic question needs depth. No JSON. No labels. No reasoning.`,
       stream: false,
       options: {
         temperature: 0.35,
@@ -285,110 +197,156 @@ function getLatestTranscript(conversation: Conversation): string {
 
 export type OutputLanguage = "english" | "chinese";
 
-function getFastDirectResponse(transcript: string, timestamp: number, outputLanguage: OutputLanguage): AgentResponse | null {
-  const trimmed = transcript.trim();
-  const useChinese = outputLanguage === "chinese";
+type PromptMode = "casual" | "classroom" | "interview" | "technical" | "service" | "general";
 
-  if (/^(?:\u54c8\u55bd|\u4f60\u597d|\u55e8|hello|hi|hey)(?:\s*(?:\u54c8\u55bd|\u4f60\u597d|\u55e8|hello|hi|hey))*[\s\u3002.!！]*$/i.test(trimmed)) {
-    return createInsight(
-      useChinese ? "\u54c8\u55bd\u3002" : "Hey.",
-      "Fast response for simple greeting",
-      timestamp,
-      0.95,
-    );
-  }
-
-  if (/^(?:\u5582|\u5728\u5417|can you hear me|are you there)[\s\u3002.!?！？]*$/i.test(trimmed)) {
-    return createInsight(
-      useChinese ? "\u5728\u7684\u3002" : "Yeah, I can hear you.",
-      "Fast response for connection check",
-      timestamp,
-      0.95,
-    );
-  }
-
-  if (
-    /^(what'?s|what is|may i have|can i have|could you tell me|tell me)\s+(your\s+)?name[\s?!.]*$/i.test(trimmed) ||
-    /^(?:\u4f60\u53eb\u4ec0\u4e48|\u4f60\u7684\u540d\u5b57|\u8bf7\u95ee\u4f60\u53eb\u4ec0\u4e48)[\s\u3002?？!！]*$/i.test(trimmed)
-  ) {
-    return createInsight(
-      useChinese ? "\u6211\u53eb Xiang Li\u3002" : "My name is Xiang Li.",
-      "Fast response for name question",
-      timestamp,
-      0.95,
-    );
-  }
-
-  if (outputLanguage === "english" && /\bhow'?s your day\b|\bhow is your day\b|\bhow'?s your day going\b|\bhow is your day going\b/i.test(trimmed)) {
-    return createInsight(
-      "Pretty good, just a bit sleepy. I have class later, so I'm taking it slow.",
-      "Fast response for casual day-status small talk",
-      timestamp,
-      0.9,
-    );
-  }
-
-  return null;
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
 }
 
-function getFastInterviewResponse(transcript: string, timestamp: number, outputLanguage: OutputLanguage): AgentResponse | null {
-  const normalized = transcript.toLowerCase();
-  const directResponse = getFastDirectResponse(transcript, timestamp, outputLanguage);
-  if (directResponse) return directResponse;
+function includesAny(text: string, keywords: string[]): boolean {
+  return keywords.some((keyword) => text.includes(keyword));
+}
 
-  if (/^(哈喽|你好|嗨|hello|hi|hey)[\s。.!！]*\1?[\s。.!！]*$/i.test(transcript.trim())) {
-    return createInsight(
-      /[\u4e00-\u9fff]/.test(transcript) ? "哈喽。" : "Hey.",
-      "Fast response for simple greeting",
-      timestamp,
-      0.95,
-    );
+function looksLikeQuestion(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return /[?��]\s*$/.test(normalized) || /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|tell me|describe|explain)\b/.test(normalized);
+}
+
+function detectPromptMode(latestTranscript: string, eventMemory?: EventMemorySnapshot): PromptMode {
+  const text = `${latestTranscript} ${eventMemory?.scene ?? ""} ${eventMemory?.title ?? ""} ${eventMemory?.summary ?? ""}`.toLowerCase();
+
+  if (includesAny(text, ["interview", "candidate", "hire", "resume", "tell me about yourself", "why should we hire", "position", "role"])) {
+    return "interview";
   }
 
-  if (/^(喂|在吗|can you hear me|are you there)[\s。.!?？]*$/i.test(transcript.trim())) {
-    return createInsight(
-      /[\u4e00-\u9fff]/.test(transcript) ? "在的。" : "Yeah, I can hear you.",
-      "Fast response for connection check",
-      timestamp,
-      0.95,
-    );
+  if (includesAny(text, [
+    "classroom",
+    "lecture",
+    "professor",
+    "course",
+    "assignment",
+    "academic",
+    "algorithm",
+    "theorem",
+    "math",
+    "proof",
+    "model",
+    "training",
+    "loss",
+    "gradient",
+    "backprop",
+    "supervised learning",
+    "unsupervised learning",
+    "neural network",
+    "deep learning",
+    "machine learning",
+    "data structure",
+    "distributed system",
+    "consistency",
+    "cap theorem",
+    "cloud architecting",
+    "availability zone",
+    "lambda",
+    "dynamodb",
+    "scalability",
+    "elasticity",
+  ])) {
+    return "classroom";
   }
 
-  const asksIntro =
-    normalized.includes("introduce yourself") ||
-    normalized.includes("walk me through your background") ||
-    normalized.includes("tell me about yourself");
-
-  const asksCloudInterest =
-    normalized.includes("why you're interested in cloud") ||
-    normalized.includes("why you are interested in cloud") ||
-    normalized.includes("interested in cloud engineering");
-
-  if (asksIntro && asksCloudInterest) {
-    return createInsight(
-      "Yeah, sure. I'm Xiang Li, and I'm currently doing my MACS degree at Dalhousie. I've been working mostly on web and cloud projects, like React, Firebase, and some AWS serverless stuff. I'm interested in cloud engineering because I like building real projects that connect frontend, backend, and cloud services.",
-      "Fast response for common interview intro and cloud interest question",
-      timestamp
-    );
+  if (includesAny(text, [
+    "api",
+    "backend",
+    "frontend",
+    "cloud",
+    "database",
+    "debug",
+    "architecture",
+    "security",
+    "aws",
+    "firebase",
+    "react",
+    "serverless",
+    "kubernetes",
+    "sagemaker",
+    "machine learning",
+    "deep learning",
+    "ai",
+    "code",
+  ])) {
+    return "technical";
   }
 
-  if (asksIntro && normalized.includes("cloud")) {
-    return createInsight(
-      "Yeah, sure. I'm Xiang Li, and I'm currently doing my MACS degree at Dalhousie. My background is mostly web development and cloud projects, including React, Firebase, and AWS services like Lambda, API Gateway, DynamoDB, and S3.",
-      "Fast response for common interview background question",
-      timestamp
-    );
+  if (includesAny(text, ["front desk", "maintenance", "advisor", "insurance", "bank", "policy", "residence", "deadline", "appointment"])) {
+    return "service";
   }
 
-  if (asksCloudInterest) {
-    return createInsight(
-      "I'm interested in cloud engineering because I like building real projects that connect frontend, backend, databases, and deployment. It feels practical, and I can actually see the app working.",
-      "Fast response for common cloud interest question",
-      timestamp
-    );
+  if (includesAny(text, ["weekend", "free time", "music", "game", "food", "anime", "friend", "weather", "holiday", "mountain", "morning", "day going"])) {
+    return "casual";
   }
 
-  return null;
+  return "general";
+}
+
+function buildCompactXiangProfile(mode: PromptMode): string {
+  const base = [
+    "Name: Xiang Li.",
+    "Identity: Chinese international MACS student at Dalhousie in Halifax.",
+    "Voice: simple spoken English, natural, modest, casual , slightly imperfect is okay.",
+    "Avoid: polished essay tone, resume wording, self-praise, fake confidence, corporate words, overexplaining.",
+    "Useful words: honestly, probably, kind of, mostly, a bit, not really, I think, maybe.",
+    "Professional/academic topics: be expert, accurate, and specific. Do not make the answer casual if the topic needs rigor.",
+    "Privacy: do not overshare sensitive details unless the context clearly needs it.",
+  ];
+
+  const modeProfiles: Record<PromptMode, string[]> = {
+    casual: [
+      "Casual life: homebody, small circle, likes games/anime/music, fried chicken, Sichuan spicy food, Pepsi.",
+      "Casual replies should feel like a real person, with one small lived detail if useful. No life-summary or lesson.",
+    ],
+    classroom: [
+      "Classroom: short student-style answers.",
+      "Academic/lecture content: prioritize correctness and depth. Use mechanisms, terms, assumptions, examples, and trade-offs when useful.",
+      "When the speaker is explaining a concept, show a professional knowledge supplement, generic example, trade-off, or question Xiang could ask.",
+      "Current courses: Cloud Architecting, Deep Learning, UX Design.",
+    ],
+    interview: [
+      "Interview: honest student tone. Xiang has hands-on student project experience in web/mobile apps, Firebase, AWS serverless, and AI-related tools.",
+      "Projects available if asked: Elder Album, Dal Parking Aid, Study Session Tracker, SayNext.",
+      "Unknown tech: do not fake experience; say he has not used it in a real project yet.",
+      "Career: wants a stable software/cloud/full-stack/AI/job and long-term life in Canada.",
+    ],
+    technical: [
+      "Technical background: CS/MACS student with hands-on web, mobile, Firebase, AWS serverless, and AI-related app experience.",
+      "Technical/professional output should be senior-level in knowledge: precise, practical, and specific, without claiming senior personal experience.",
+      "For knowledge questions, answer generally first using mechanisms and practical details: logs, metrics, permissions, data access pattern, cost, reliability, control.",
+      "Use a personal project only when the question asks for Xiang's own experience or example.",
+    ],
+    service: [
+      "Service/admin: polite, simple, direct. Explain the issue first and ask what to do next.",
+      "Mention exact residence or private details only when needed for residence/front desk/maintenance.",
+    ],
+    general: [
+      "General: answer the latest question naturally and briefly. Use personal details only if they help.",
+    ],
+  };
+
+  return [...base, ...modeProfiles[mode]].join("\n");
+}
+
+function formatCompactEventMemory(eventMemory?: EventMemorySnapshot): string {
+  if (!eventMemory) return "No active event memory.";
+
+  const recent = eventMemory.recentTranscripts
+    .slice(-3)
+    .map((text) => text.length > 140 ? `${text.slice(0, 137)}...` : text);
+
+  return [
+    `Scene: ${eventMemory.scene}`,
+    eventMemory.title ? `Title: ${eventMemory.title}` : "",
+    `Summary: ${eventMemory.summary.length > 260 ? `${eventMemory.summary.slice(0, 257)}...` : eventMemory.summary}`,
+    recent.length ? `Recent: ${recent.map((text) => `"${text}"`).join(" | ")}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 function getFallbackResponse(transcript: string, timestamp: number): AgentResponse {
@@ -429,15 +387,10 @@ export async function processConversation(
   const currentTimestamp = Date.now();
   const currentDate = new Date(currentTimestamp).toISOString();
   const latestTranscript = getLatestTranscript(conversation);
-  const fastResponse = getFastInterviewResponse(latestTranscript, currentTimestamp, outputLanguage);
-  if (fastResponse) {
-    if (fastResponse.type === Action.INSIGHT) {
-      console.log(`[SayNext] Fast response: ${fastResponse.output}`);
-    }
-    return fastResponse;
-  }
 
-  const compactConversation = conversation.slice(-6);
+  const promptMode = detectPromptMode(latestTranscript, eventMemory);
+  const latestLooksLikeQuestion = looksLikeQuestion(latestTranscript);
+  const compactConversation = conversation.slice(-4);
   const formattedHistoryLines: string[] = [];
   for (const item of compactConversation) {
     switch (item.type) {
@@ -459,40 +412,22 @@ export async function processConversation(
 
   const formattedHistory = `--- RECENT CONVERSATION ---\n${formattedHistoryLines.join('\n')}\n--- END CONVERSATION ---`;
   const retrievedSamples: { id: string }[] = [];
-  const formattedProfile = formatXiangProfileForPrompt();
-  const formattedEventMemory = eventMemory
-    ? [
-        `Active event scene: ${eventMemory.scene}`,
-        eventMemory.title ? `Event title: ${eventMemory.title}` : "",
-        `Event summary: ${eventMemory.summary}`,
-        eventMemory.recentTranscripts.length
-          ? `Recent event transcripts: ${eventMemory.recentTranscripts.map((text) => `"${text}"`).join(" | ")}`
-          : "",
-      ].filter(Boolean).join("\n")
-    : "No active event memory.";
+  const formattedProfile = buildCompactXiangProfile(promptMode);
+  const formattedEventMemory = formatCompactEventMemory(eventMemory);
 
   console.log("\n--- SayNext Agent Context ---\n", formattedHistory, "\n-----------------------------\n");
-  const prompt = `Current date and time is ${currentDate}.
-The latest transcript is the current trigger. It has the highest priority.
-Use older transcripts only to resolve pronouns or understand the broad situation.
-If the latest transcript is self-contained, do not continue an older topic.
-Use the active event memory to understand the current situation over time, but do not repeat it verbatim.
-Internal decision policy:
-1. Decide whether Xiang is expected to speak now.
-2. Decide whether speaking adds value right now.
-3. If useful, choose the best usefulness type: answer, supplement, understand, learn, ask back, trade-off, acknowledgement, or buy time.
-4. Output exactly one short speakable response.
+  const prompt = `Time: ${currentDate}
+Context hint: ${promptMode}
+Latest transcript looks like a direct question: ${latestLooksLikeQuestion ? "yes" : "no"}
+Output language: ${outputLanguage === "chinese" ? "Chinese" : "English"}
 
-If the latest transcript contains a direct question, answer that question directly.
-If the latest transcript asks a new simple question, answer only that question and ignore unrelated older context.
-If the direct question is professional or technical, give a real technical answer first: principle, trade-off, debugging step, design choice, or concrete tool/service. Keep it natural, but do not make it vague.
-If the latest transcript is a classroom lecture statement, do not repeat it. Add a small useful supplement only if it helps: a generic example, a trade-off, a clearer explanation, or a clarification question. Do not connect it to Xiang's projects unless the speaker explicitly asks about Xiang's project.
-If no useful response is needed, output a short natural acknowledgement.
-Use Xiang's profile as hard personalization context. Do not invent details outside it.
-Do not use the personal sample library for this response. Rely only on the profile, active event memory, and recent conversation.
-Keep any reasoning private.
-Output language setting: ${outputLanguage}.
-You must write the output in ${outputLanguage === "chinese" ? "Chinese" : "English"}, even if the transcript contains another language.
+Task:
+- Use the latest transcript as the trigger.
+- If it is a direct question, answer it directly.
+- If it is professional, technical, or academic, give a rigorous concept answer first. Be specific about mechanism, trade-off, assumption, tool, or example.
+- If it is lecture/explanation and not a direct question, give a professional knowledge supplement or useful question, not a conversational reply.
+- If it is casual, keep it natural and grounded.
+- Do not use the personal sample library.
 
 --- LATEST TRANSCRIPT ---
 Transcript: "${latestTranscript}"
@@ -507,6 +442,10 @@ ${formattedEventMemory}
 --- END ACTIVE EVENT MEMORY ---
 
 ${formattedHistory}`;
+
+  console.log(
+    `[SayNext] Input approx tokens: system=${estimateTokens(sayNextInstructions)} prompt=${estimateTokens(prompt)} total=${estimateTokens(`${sayNextInstructions}\n\n${prompt}`)} mode=${promptMode}`,
+  );
 
   try {
     let agent: Agent<any, any>;
