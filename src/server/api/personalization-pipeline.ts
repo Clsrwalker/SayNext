@@ -6,6 +6,18 @@ function shouldForce(c: Context): boolean {
   return c.req.query("force") === "true";
 }
 
+function isPipelineEnabled(): boolean {
+  return process.env.PERSONALIZATION_PIPELINE_ENABLED === "true";
+}
+
+function pipelineDisabledResponse(c: Context) {
+  return c.json({
+    enabled: false,
+    error: "personalization pipeline is disabled",
+    message: "Set PERSONALIZATION_PIPELINE_ENABLED=true to run this manually.",
+  }, 409);
+}
+
 async function processPipelineInput(input: PipelineRunInput) {
   try {
     const pipeline = await runPersonalizationPipeline(input);
@@ -62,6 +74,10 @@ async function processPipelineInput(input: PipelineRunInput) {
 }
 
 export const processConversationSampleForPersonalization = async (c: Context) => {
+  if (!isPipelineEnabled()) {
+    return pipelineDisabledResponse(c);
+  }
+
   const id = Number(c.req.param("id"));
 
   if (!Number.isInteger(id) || id <= 0) {
@@ -91,6 +107,10 @@ export const processConversationSampleForPersonalization = async (c: Context) =>
 };
 
 export const processConversationEventForPersonalization = async (c: Context) => {
+  if (!isPipelineEnabled()) {
+    return pipelineDisabledResponse(c);
+  }
+
   const id = c.req.param("id");
   if (!id) {
     return c.json({ error: "event id is required" }, 400);

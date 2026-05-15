@@ -2,6 +2,14 @@
 
 This pipeline is offline and local-first. The realtime SayNext path should only save raw data and stay fast. A background/manual process uses Ollama to turn noisy transcript and output into training examples, review items, and personal memory.
 
+The pipeline is disabled by default. To run it manually, set:
+
+```env
+PERSONALIZATION_PIPELINE_ENABLED=true
+```
+
+Keep it disabled during normal realtime SayNext use.
+
 ## Realtime Path
 
 1. Mentra transcript arrives.
@@ -54,5 +62,6 @@ Use Ollama through:
 
 - `PIPELINE_OLLAMA_MODEL`, falling back to `OLLAMA_MODEL`
 - `PIPELINE_OLLAMA_TIMEOUT_MS`, default 90 seconds
+- `PERSONALIZATION_PIPELINE_ENABLED=true` to allow manual processing API calls
 
 The realtime model and pipeline model can be different. For example, realtime can use a smaller/faster model and pipeline can use `qwen2.5:14b-instruct`.

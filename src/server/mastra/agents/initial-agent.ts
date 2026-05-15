@@ -1,7 +1,7 @@
 import { Agent } from "@mastra/core/agent";
 import { openai } from "@ai-sdk/openai";
 import { Action, AgentType, type Conversation, type AgentResponse } from "../types";
-import { formatRetrievedSamples, formatXiangProfileForPrompt, retrievePersonalSamples } from "../../personalization/retriever";
+import { formatXiangProfileForPrompt } from "../../personalization/retriever";
 import type { EventMemorySnapshot } from "../../memory/event-memory";
 
 const sayNextInstructions = `You are SayNext, Xiang's real-time reply helper.
@@ -398,8 +398,7 @@ export async function processConversation(
   }
 
   const formattedHistory = `--- RECENT CONVERSATION ---\n${formattedHistoryLines.join('\n')}\n--- END CONVERSATION ---`;
-  const retrievedSamples = retrievePersonalSamples(latestTranscript, 2);
-  const formattedSamples = formatRetrievedSamples(retrievedSamples);
+  const retrievedSamples: { id: string }[] = [];
   const formattedProfile = formatXiangProfileForPrompt();
   const formattedEventMemory = eventMemory
     ? [
@@ -413,10 +412,6 @@ export async function processConversation(
     : "No active event memory.";
 
   console.log("\n--- SayNext Agent Context ---\n", formattedHistory, "\n-----------------------------\n");
-  if (retrievedSamples.length > 0) {
-    console.log("\n--- SayNext Retrieved Samples ---\n", formattedSamples, "\n---------------------------------\n");
-  }
-
   const prompt = `Current date and time is ${currentDate}.
 Use the recent conversation below to decide what is useful for Xiang to say next.
 Focus most on the latest complete transcript, but use the recent context to understand whether it is a question, lecture, feedback, small talk, or service/advisor conversation.
@@ -432,18 +427,13 @@ If the latest transcript contains a direct question, answer that question direct
 If the direct question is professional or technical, give a real technical answer first: principle, trade-off, debugging step, design choice, or concrete tool/service. Keep it natural, but do not make it vague.
 If the latest transcript is a classroom lecture statement, do not repeat it. Add a small useful supplement only if it helps: a generic example, a trade-off, a clearer explanation, or a clarification question. Do not connect it to Xiang's projects unless the speaker explicitly asks about Xiang's project.
 If no useful response is needed, output a short natural acknowledgement.
-Use the personal examples when they are relevant for style and grounding, but do not copy them if the current transcript is different.
-The examples show Xiang's preferred style and background, not fixed templates.
 Use Xiang's profile as hard personalization context. Do not invent details outside it.
+Do not use the personal sample library for this response. Rely only on the profile, active event memory, and recent conversation.
 Keep any reasoning private.
 
 --- XIANG PROFILE ---
 ${formattedProfile}
 --- END XIANG PROFILE ---
-
---- PERSONAL STYLE/BACKGROUND REFERENCES ---
-${formattedSamples}
---- END PERSONAL STYLE/BACKGROUND REFERENCES ---
 
 --- ACTIVE EVENT MEMORY ---
 ${formattedEventMemory}
