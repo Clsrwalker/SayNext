@@ -41,11 +41,6 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
   }, [userId]);
 
   const handleCreate = async () => {
-    if (!title.trim()) {
-      setError("Title is required.");
-      return;
-    }
-
     const files = fileInputRef.current?.files;
     if (!sourceText.trim() && (!files || files.length === 0)) {
       setError("Add text or upload at least one file.");
@@ -131,7 +126,7 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
             <input
               value={title}
               onChange={(event) => setTitle(event.target.value)}
-              placeholder="Title"
+              placeholder="Title optional"
               className="w-full rounded-[6px] px-3 py-2 text-[15px] outline-none"
               style={{ backgroundColor: "var(--background)", color: "var(--secondary-foreground)" }}
             />

@@ -34,6 +34,30 @@ function getUserId(c: Context): string | null {
   return c.req.query("userId") || null;
 }
 
+function stripExtension(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, "").trim();
+}
+
+function inferPrenoteTitle(input: { title: string; sourceText: string; files: File[] }): string {
+  if (input.title.trim()) return input.title.trim();
+
+  const firstFile = input.files[0];
+  if (firstFile?.name) {
+    return stripExtension(firstFile.name).slice(0, 80) || "Uploaded prenote";
+  }
+
+  const firstLine = input.sourceText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  if (firstLine) {
+    return firstLine.slice(0, 80);
+  }
+
+  return `Prenote ${new Date().toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+}
+
 export const listPrenotes = (c: Context) => {
   const userId = getUserId(c);
   if (!userId) return c.json({ error: "userId is required" }, 400);
@@ -61,14 +85,15 @@ export const createPrenote = async (c: Context) => {
   const description = String(formData.get("description") || "").trim();
   const sourceText = String(formData.get("sourceText") || "").trim();
   const setActive = String(formData.get("setActive") || "true") !== "false";
+  const files = formData.getAll("files").filter((item): item is File => item instanceof File && item.size > 0);
+  const inferredTitle = inferPrenoteTitle({ title, sourceText, files });
 
   if (!userId) return c.json({ error: "userId is required" }, 400);
-  if (!title) return c.json({ error: "title is required" }, 400);
+  if (!sourceText && files.length === 0) return c.json({ error: "Add text or upload at least one file" }, 400);
 
-  const prenote = conversationLogger.createPrenote({ userId, title, description, sourceText });
+  const prenote = conversationLogger.createPrenote({ userId, title: inferredTitle, description, sourceText });
   if (!prenote) return c.json({ error: "Prenote storage is disabled" }, 503);
 
-  const files = formData.getAll("files").filter((item): item is File => item instanceof File && item.size > 0);
   const uploadedFiles = [];
 
   for (const file of files) {
@@ -97,7 +122,7 @@ export const createPrenote = async (c: Context) => {
   }
 
   const processed = await processPrenote({
-    title,
+    title: inferredTitle,
     description,
     sourceText,
     files: uploadedFiles,
