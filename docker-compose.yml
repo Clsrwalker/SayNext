@@ -1,0 +1,41 @@
+services:
+  saynext:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      PACKAGE_NAME: ${PACKAGE_NAME}
+      MENTRAOS_API_KEY: ${MENTRAOS_API_KEY}
+      COOKIE_SECRET: ${COOKIE_SECRET}
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:14b-instruct}
+      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-30000}
+      PIPELINE_OLLAMA_MODEL: ${PIPELINE_OLLAMA_MODEL:-qwen2.5:14b-instruct}
+      PIPELINE_OLLAMA_TIMEOUT_MS: ${PIPELINE_OLLAMA_TIMEOUT_MS:-90000}
+      DATA_LOGGING_ENABLED: ${DATA_LOGGING_ENABLED:-true}
+      SAYNEXT_DB_PATH: /data/saynext.sqlite
+      SERPAPI_API_KEY: ${SERPAPI_API_KEY:-}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      GOOGLE_WEATHER_API_KEY: ${GOOGLE_WEATHER_API_KEY:-}
+    volumes:
+      - saynext_data:/data
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
+volumes:
+  saynext_data:
+  ollama_data:
