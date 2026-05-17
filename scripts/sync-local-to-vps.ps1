@@ -16,6 +16,27 @@ function Run($Description, $ScriptBlock) {
   & $ScriptBlock
 }
 
+function Invoke-RemoteBash([string]$ScriptText) {
+  $tempDir = Join-Path $env:TEMP "saynext-sync"
+  New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+  $localScript = Join-Path $tempDir ("remote-" + [Guid]::NewGuid().ToString("N") + ".sh")
+  $remoteScript = "/tmp/" + [IO.Path]::GetFileName($localScript)
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [IO.File]::WriteAllText($localScript, $ScriptText.Replace("`r`n", "`n"), $utf8NoBom)
+  try {
+    scp $localScript "${VpsHost}:$remoteScript"
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to upload remote script: $localScript"
+    }
+    ssh $VpsHost "bash '$remoteScript'; status=`$?; rm -f '$remoteScript'; exit `$status"
+    if ($LASTEXITCODE -ne 0) {
+      throw "Remote script failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    Remove-Item -LiteralPath $localScript -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Test-LocalPort3000 {
   try {
     $connection = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction Stop | Select-Object -First 1
@@ -137,21 +158,18 @@ Run "Restore requested VPS mode" {
 set -e
 cd '$VpsAppDir'
 touch .env
-set_env() {
-  key="`$1"
-  value="`$2"
-  if grep -q "^`$key=" .env; then
-    sed -i "s|^`$key=.*|`$key=`$value|" .env
-  else
-    printf '\n%s=%s\n' "`$key" "`$value" >> .env
-  fi
-}
-set_env SAYNEXT_RUNTIME_MODE travel
-set_env LLM_PROVIDER openai
-set_env SESSION_MEMORY_PROVIDER openai
-set_env SESSION_MEMORY_BATCH_ENABLED false
+tmp=".env.tmp"
+grep -v -E '^(SAYNEXT_RUNTIME_MODE|LLM_PROVIDER|SESSION_MEMORY_PROVIDER|SESSION_MEMORY_BATCH_ENABLED)=' .env > "`$tmp" || true
+mv "`$tmp" .env
+cat >> .env <<'EOF'
+SAYNEXT_RUNTIME_MODE=travel
+LLM_PROVIDER=openai
+SESSION_MEMORY_PROVIDER=openai
+SESSION_MEMORY_BATCH_ENABLED=false
+EOF
+chmod 600 .env
 "@
-    ssh $VpsHost $setTravelEnv
+    Invoke-RemoteBash $setTravelEnv
     ssh $VpsHost "saynext-travel-mode && saynext-mode-status"
   } elseif ($remoteWasActive -eq "active") {
     ssh $VpsHost "systemctl start saynext && saynext-mode-status"
