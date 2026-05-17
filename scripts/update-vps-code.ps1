@@ -26,7 +26,7 @@ if (-not $ForceArchiveDeploy) {
 }
 
 if ($remoteIsGit) {
-  $installCommand = "bun install"
+  $installCommand = 'BUN_BIN=/root/.bun/bin/bun; [ -x "$BUN_BIN" ] || BUN_BIN=bun; "$BUN_BIN" install'
   if ($SkipInstall) {
     $installCommand = "echo 'Skipping bun install'"
   }
@@ -46,6 +46,8 @@ fi
   $remoteScript = @"
 set -e
 cd '$VpsAppDir'
+BUN_BIN=/root/.bun/bin/bun
+[ -x "`$BUN_BIN" ] || BUN_BIN=bun
 git pull --ff-only
 $installCommand
 $restartCommand
@@ -89,7 +91,12 @@ if [ -f .env ]; then chmod 600 .env; fi
 if ($SkipInstall) {
   $remoteInstall += "`necho 'Skipping bun install'`n"
 } else {
-  $remoteInstall += "`nbun install`n"
+  $remoteInstall += @'
+
+BUN_BIN=/root/.bun/bin/bun
+[ -x "$BUN_BIN" ] || BUN_BIN=bun
+"$BUN_BIN" install
+'@
 }
 
 if ($NoRestart) {
