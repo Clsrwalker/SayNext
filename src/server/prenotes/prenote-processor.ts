@@ -310,7 +310,7 @@ export async function processPrenote(input: ProcessPrenoteInput): Promise<Proces
   }
 
   const prepared = truncateForProcessing(fullText);
-  const prompt = `You are preparing a PreNote memory for SayNext, a real-time glasses conversation assistant.
+  const prompt = `You are preparing a PreNote memory for SayNext, a real-time mobile conversation assistant.
 
 Read the material carefully. Clean noisy text, understand the scene, and produce a runtime memory that can be inserted into future prompts.
 

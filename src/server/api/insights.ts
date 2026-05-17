@@ -44,8 +44,10 @@ export const insightStream = (c: Context) => {
         // Send connected event
         send(JSON.stringify({ type: 'connected' }));
 
-        // Send existing insight history
-        const recentInsights = user.insightHistory.getRecentInsights(50);
+        // Send existing insight history only while the glasses session is still active.
+        // Closing/reopening the MiniApp should start with a clean screen; exports stay in SQLite.
+        const isActive = user.appSession !== null;
+        const recentInsights = isActive ? user.insightHistory.getRecentInsights(50) : [];
         const insightMessages = recentInsights.map((insight) => ({
           id: insight.id,
           text: insight.text,
@@ -56,7 +58,6 @@ export const insightStream = (c: Context) => {
         send(JSON.stringify({ type: 'history', insights: insightMessages }));
 
         // Send current session status
-        const isActive = user.appSession !== null;
         send(JSON.stringify({ type: 'session_heartbeat', active: isActive }));
 
         // Register SSE client for real-time updates

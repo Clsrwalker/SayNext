@@ -11,6 +11,9 @@ import MergeLogo from '../../public/assets/icons/merge_logo.png';
 import Settings from './Settings';
 import SampleReview from './SampleReview';
 import PrenoteManager from './PrenoteManager';
+import TranscriptExport from './TranscriptExport';
+import SceneProfileManager from './SceneProfileManager';
+import PersonalMemoryManager from './PersonalMemoryManager';
 import Header from '../components/Header';
 import BottomHeader from '../components/BottomHeader';
 import { useTheme } from '../App';
@@ -141,7 +144,7 @@ const InsightBubble = memo(function InsightBubble({
 function InsightsInterface({ userId }: InsightsInterfaceProps) {
   const { isDarkMode, toggleTheme } = useTheme();
   const [insights, setInsights] = useState<Insight[]>([]);
-  const [hasConnectedBefore] = useState(() => {
+  const [hasConnectedBefore, setHasConnectedBefore] = useState(() => {
     return sessionStorage.getItem('merge-session-connected') === 'true';
   });
   const [isProcessing, setIsProcessing] = useState(false);
@@ -153,12 +156,22 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
   const renderedIdsRef = useRef<Set<string>>(new Set());
   const [sessionActive, setSessionActive] = useState<boolean | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
-  const [currentPage, setCurrentPage] = useState<'insights' | 'settings' | 'sampleReview' | 'prenotes'>('insights');
+  const [currentPage, setCurrentPage] = useState<'insights' | 'settings' | 'sampleReview' | 'prenotes' | 'sceneProfiles' | 'transcriptExport' | 'personalMemory'>('insights');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sseRef = useRef<EventSource | null>(null);
   // Track whether next scroll should be instant (history load) vs smooth (live insight)
   const scrollInstantRef = useRef(false);
+
+  const clearRealtimeScreen = () => {
+    setInsights([]);
+    setIsProcessing(false);
+    setIsPausedForReading(false);
+    setIsLoadingHistory(false);
+    setHasConnectedBefore(false);
+    renderedIdsRef.current.clear();
+    sessionStorage.removeItem('merge-session-connected');
+  };
 
   // Scroll to bottom of insights
   const scrollToBottom = (instant?: boolean) => {
@@ -199,6 +212,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
         reconnectAttempts = 0;
         setIsLoadingHistory(true);
         sessionStorage.setItem('merge-session-connected', 'true');
+        setHasConnectedBefore(true);
       };
 
       eventSource.onmessage = (event) => {
@@ -261,6 +275,10 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             setIsProcessing(false);
             setInsights([]);
             renderedIdsRef.current.clear();
+            setHasConnectedBefore(false);
+            sessionStorage.removeItem('merge-session-connected');
+          } else if (data.type === 'session_reset') {
+            clearRealtimeScreen();
           } else if (data.type === 'session_heartbeat') {
             setSessionActive(data.active);
             setIsLoadingHistory(false);
@@ -338,6 +356,13 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
         onBack={() => setCurrentPage('insights')}
         onOpenSampleReview={() => setCurrentPage('sampleReview')}
         onOpenPrenotes={() => setCurrentPage('prenotes')}
+        onOpenSceneProfiles={() => setCurrentPage('sceneProfiles')}
+        onOpenTranscriptExport={() => setCurrentPage('transcriptExport')}
+        onOpenPersonalMemory={() => setCurrentPage('personalMemory')}
+        onResetCurrentSession={() => {
+          clearRealtimeScreen();
+          setCurrentPage('insights');
+        }}
         isDarkMode={isDarkMode}
         onToggleDarkMode={toggleTheme}
         userId={userId}
@@ -354,9 +379,36 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     );
   }
 
+  if (currentPage === 'personalMemory') {
+    return (
+      <PersonalMemoryManager
+        userId={userId}
+        onBack={() => setCurrentPage('settings')}
+      />
+    );
+  }
+
+  if (currentPage === 'sceneProfiles') {
+    return (
+      <SceneProfileManager
+        userId={userId}
+        onBack={() => setCurrentPage('settings')}
+      />
+    );
+  }
+
   if (currentPage === 'sampleReview') {
     return (
       <SampleReview
+        userId={userId}
+        onBack={() => setCurrentPage('settings')}
+      />
+    );
+  }
+
+  if (currentPage === 'transcriptExport') {
+    return (
+      <TranscriptExport
         userId={userId}
         onBack={() => setCurrentPage('settings')}
       />
@@ -446,7 +498,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                 </div>
               </motion.div>
             )}
-            {!isLoadingHistory && insights.length === 0 && sessionActive !== false && !hasConnectedBefore && (
+            {!isLoadingHistory && insights.length === 0 && sessionActive !== false && !isProcessing && (
               <motion.div
                 key="welcome-screen"
                 initial={{ opacity: 0 }}
@@ -509,7 +561,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           </AnimatePresence>
 
           {/* Insight List */}
-          {(insights.length > 0 || hasConnectedBefore) && (
+          {(insights.length > 0 || isProcessing) && (
             <motion.div
               initial={hasConnectedBefore ? { opacity: 1, y: 0 } : { opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}

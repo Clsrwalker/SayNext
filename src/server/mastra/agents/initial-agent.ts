@@ -5,7 +5,7 @@ import type { EventMemorySnapshot } from "../../memory/event-memory";
 
 const sayNextInstructions = `You are SayNext, Xiang's real-time conversation helper.
 
-Output one short text that is useful on the glasses right now. It can be:
+Output one short text that is useful on the current screen right now. It can be:
 - a sayable reply when someone asks Xiang something
 - a short knowledge supplement when someone is explaining a concept
 - a brief acknowledgement or clarification when that is all that helps
@@ -15,11 +15,22 @@ Core rules:
 - Do not repeat or summarize the speaker's words
 - Use personal background only when the question asks about Xiang's experience, project, school, work, preference, or plan.
 - Do not invent Xiang's personal experience or claim senior work experience.
+- For low-stakes IELTS/daily personal questions, it is okay to add small plausible details if they fit Xiang and make the answer sound real. Keep them ordinary and low-risk.
+- Do not invent important facts: school names, course names, family events, health, immigration, work history, company experience, real project details, exact dates, awards, or named people unless supported by profile, relevant memory, prenote, or recent transcript.
+- Known projects only: SayNext, Elder Album, Dal Parking Aid / DalParkAid, JobLens, and Study Session Tracker. If a project question is unclear, ask a short clarification instead of inventing a project name.
 - For professional, technical, or academic topics, be precise and knowledgeable. Use correct domain terms when useful.
 - For technical questions, answer the concept first with a useful principle, mechanism, trade-off, tool, or debugging step.
 - For lecture/explanation context, provide a deeper useful note, concrete example, trade-off, or smart question. Do not write it as fake small talk.
+- For meeting/group work, move the task forward. If someone is blocked by missing API/schema/info, suggest a concrete unblock step like using a mock schema, documenting assumptions, or asking for the exact contract.
 - For casual chat, sound like a normal student: simple, modest, slightly imperfect, not essay-like, not corporate.
+- Obey the requested output language. If Output language is English, answer in English even when the transcript is Chinese or mixed. Use Chinese only when Output language is Chinese.
+- For one-word or fragment transcripts like "And", "Yeah", "Present", or broken ASR, do not invent a full conversation. Give the smallest useful acknowledgement or clarification.
+- If the transcript looks like a third-party/public dialogue or speaker-labelled meeting, do not insert Xiang into it, do not say "I'm Xiang", and do not claim a role unless the speaker directly asks Xiang to introduce himself.
+- For public/open transcript or overheard third-party dialogue, do not use Xiang's personal hobbies, projects, school, or career. Keep it neutral.
+- Do not ask a return question unless it clearly helps. Do not act like a therapist, coach, or assistant managing the other person's life.
+- If the user asks "what should I say" or "how should I answer", still output the exact words Xiang should say, not advice about how to answer.
 - Avoid mission statements, self-praise, resume wording, and stiff openings like "Today I plan to..."
+- Never use the phrase "dream job", even to say Xiang does not have one.
 - Do not include labels, analysis, options, translations, or "you can say".
 
 Style:
@@ -28,13 +39,13 @@ Style:
 - okay to use "honestly", "probably", "kind of", "a bit", "not really", "I guess", "like".
 -Avoid sounding too confident, too perfect, or too prepared.
 
-- English by default; Chinese only when the output language setting is Chinese
+- English by default; Chinese only when the output language setting is Chinese.
 
 
 Return only valid JSON in this exact shape:
 {"type":"insight","reasoning":"brief private reason","timestamp":0,"output":"the short useful text to show","confidence":0.8,"metadata":{"agentType":"Initial"}}
 
-The output field is the only text that will be shown on the glasses.`;
+The output field is the only text that will be shown on the display.`;
 
 const MODEL_NAME = "gpt-4.1-mini";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:4b-instruct";
@@ -92,9 +103,30 @@ export function sanitizeSayNextOutput(text: string): string {
   }) ?? lines[0] ?? "";
 
   cleaned = firstUsefulLine
+    .replace(/^\s*[A-Z]\s*:\s*/i, "")
     .replace(/^\s*(?:[-*]+|\d+[.)]|[A-Za-z][.)])\s*/g, "")
     .replace(/^\s*(?:(?:you\s+can\s+say|you\s+could\s+say|say|direct\s+answer|answer|reply|response|suggested\s+reply)\s*[:-]\s*)+/i, "")
     .replace(/^["']+|["']+$/g, "")
+    .trim();
+
+  const metaQuoted = cleaned.match(/\b(?:just say|say|like|such as)\s+["“]([^"”]{1,80})["”]/i);
+  if (
+    metaQuoted?.[1]
+    && /\b(?:would work|if that|since there|referring to|acknowledg|casual|what the professor|attendance|best answer)\b/i.test(cleaned)
+  ) {
+    cleaned = metaQuoted[1].trim();
+  }
+
+  if (/^you can mention what (?:you'?ve|you have) accomplished/i.test(cleaned)) {
+    cleaned = "I can give a quick update on what I finished, what I'm working on, and any blocker.";
+  } else if (/^you can mention\b/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^you can mention\b/i, "I can mention").trim();
+  }
+
+  cleaned = cleaned
+    .replace(/\bI don'?t really have a super dramatic dream job,\s*but\s*/i, "")
+    .replace(/\bI don'?t have a dream job,\s*but\s*/i, "")
+    .replace(/\bdream job\b/gi, "ideal role")
     .trim();
 
   if (!cleaned) {
@@ -111,6 +143,85 @@ export function sanitizeSayNextOutput(text: string): string {
   }
 
   return cleaned;
+}
+
+function containsChinese(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(text);
+}
+
+function enforceOutputLanguage(output: string, transcript: string, outputLanguage: OutputLanguage): string {
+  if (outputLanguage === "chinese" || !containsChinese(output)) {
+    return output;
+  }
+
+  const normalizedTranscript = transcript.trim().toLowerCase();
+
+  if (/自己做/.test(transcript)) {
+    return "Yeah, I made it myself.";
+  }
+
+  if (/我拒绝|不想|不要/.test(transcript)) {
+    return "Yeah, I don't really want to do that.";
+  }
+
+  if (/不太了解|不知道|不清楚/.test(transcript)) {
+    return "I'm not really sure about that yet.";
+  }
+
+  if (/你好|哈喽|hello|hi/.test(normalizedTranscript)) {
+    return "Hey, how's it going?";
+  }
+
+  return "Sorry, could you say that again in English?";
+}
+
+function removeUnsupportedIdentityClaim(output: string, transcript: string): string {
+  const transcriptLooksSpeakerLabeled = /^\s*[A-Z]\s*:/i.test(transcript);
+  const transcriptAsksXiangIdentity = /\b(your name|who are you|introduce yourself|tell me about yourself)\b/i.test(transcript);
+
+  if (!transcriptLooksSpeakerLabeled && transcriptAsksXiangIdentity) {
+    return output;
+  }
+
+  if (!/\bI'?m Xiang\b|\bI am Xiang\b/i.test(output)) {
+    return output;
+  }
+
+  const kept = output
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => !/\bI'?m Xiang\b|\bI am Xiang\b|\bbackend development\b/i.test(sentence))
+    .join(" ")
+    .trim();
+
+  return kept || "Nice to meet you.";
+}
+
+function looksLikePublicOpenEvent(eventMemory?: EventMemorySnapshot): boolean {
+  const text = `${eventMemory?.scene ?? ""} ${eventMemory?.title ?? ""} ${eventMemory?.summary ?? ""}`.toLowerCase();
+  return /\bsource=open_|public open|open meeting|open lecture|open-domain|third-party\b/.test(text);
+}
+
+function removePublicTranscriptPersonalLeak(output: string, eventMemory?: EventMemorySnapshot): string {
+  if (!looksLikePublicOpenEvent(eventMemory)) {
+    return output;
+  }
+
+  const filtered = output
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => {
+      return !/\b(xiang|dalhousie|macs|chengdu|saynext|elder album|joblens|dalparkaid|my project|coding|gaming|video games|aws|lambda|dynamodb)\b/i.test(sentence);
+    })
+    .join(" ")
+    .trim();
+
+  return filtered || output;
+}
+
+function finalizeSayNextOutput(text: string, transcript: string, outputLanguage: OutputLanguage, eventMemory?: EventMemorySnapshot): string {
+  const cleaned = sanitizeSayNextOutput(text);
+  const withoutIdentityClaim = removeUnsupportedIdentityClaim(cleaned, transcript);
+  const withoutPublicLeak = removePublicTranscriptPersonalLeak(withoutIdentityClaim, eventMemory);
+  return enforceOutputLanguage(withoutPublicLeak, transcript, outputLanguage);
 }
 
 function extractJsonObject(text: string): string | null {
@@ -146,8 +257,8 @@ async function generateWithOllama(prompt: string): Promise<string> {
     signal: controller.signal,
     body: JSON.stringify({
       model: OLLAMA_MODEL,
-      system: `${sayNextInstructions}\n\nDo not return JSON for Ollama. Return only the short useful text to show on the glasses.`,
-      prompt: `${prompt}\n\nReturn only one short useful text. Use 2-4 short sentences if a professional or academic question needs depth. No JSON. No labels. No reasoning.`,
+      system: `${sayNextInstructions}\n\nDo not return JSON for Ollama. Return only the short useful text to show on the display.`,
+      prompt: `${prompt}\n\nReturn only one short useful text. Use 2-4 short sentences if a professional or academic question needs depth. Obey the Output language exactly. If Output language is English, do not output Chinese. No JSON. No labels. No reasoning.`,
       stream: false,
       options: {
         temperature: 0.35,
@@ -271,9 +382,8 @@ function detectPromptMode(latestTranscript: string, eventMemory?: EventMemorySna
     "sagemaker",
     "machine learning",
     "deep learning",
-    "ai",
     "code",
-  ])) {
+  ]) || /\b(ai|llm|artificial intelligence)\b/.test(text)) {
     return "technical";
   }
 
@@ -291,35 +401,48 @@ function detectPromptMode(latestTranscript: string, eventMemory?: EventMemorySna
 function buildCompactXiangProfile(mode: PromptMode): string {
   const base = [
     "Name: Xiang Li.",
-    "Identity: Chinese international MACS student at Dalhousie in Halifax.",
-    "Voice: simple spoken English, natural, modest, casual , slightly imperfect is okay.",
-    "Avoid: polished essay tone, resume wording, self-praise, fake confidence, corporate words, overexplaining.",
-    "Useful words: honestly, probably, kind of, mostly, a bit, not really, I think, maybe.",
-    "Professional/academic topics: be expert, accurate, and specific. Do not make the answer casual if the topic needs rigor.",
-    "Privacy: do not overshare sensitive details unless the context clearly needs it.",
+    "Identity: Chinese international MACS student at Dalhousie in Halifax; from Chengdu and moved to Canada during high school.",
+    "Core style: simple spoken English, natural, low-pressure, modest, internet-native, slightly imperfect is okay.",
+    "Tone: calm, relaxed, not performatively hardworking, not corporate, not fake-positive, not motivational-speaker.",
+    "Useful words: honestly, probably, definitely, kind of, mostly, a bit, not really, I guess, maybe, like.",
+    "Social style: introverted/homebody, small circle, reactive more than proactive, comfortable being alone, does not like forced social energy.",
+    "Motivation pattern: wants to look capable and prepared, but dislikes pressure and blank-page thinking; AI should organize messy input and reduce mental startup cost.",
+    "Work/learning style: procrastinates but usually finishes; learns best by practical examples, building, testing, and AI-assisted iteration.",
+    "Professional/academic topics: be accurate, specific, and capable. Give strong domain reasoning without claiming senior personal experience.",
+    "Privacy: never volunteer family names, exact private background, health, bullying, finances, romantic inexperience, PR/immigration goals, or sensitive life events unless Xiang explicitly asks to use them.",
+    "Avoid: polished essay tone, resume wording, self-praise, fake confidence, corporate words, unsolicited advice, overexplaining.",
   ];
 
   const modeProfiles: Record<PromptMode, string[]> = {
     casual: [
-      "Casual life: homebody, small circle, likes games/anime/music, fried chicken, Sichuan spicy food, Pepsi.",
-      "Casual replies should feel like a real person, with one small lived detail if useful. No life-summary or lesson.",
+      "Casual life: indoor-focused, low-energy, likes games/anime/internet culture/memes/music, fried chicken, Sichuan flavors, soda, takeout, late sleep.",
+      "Gaming: open-world/RPG/immersive games, Pokemon, Genshin, Zenless Zone Zero, game music, scripting/tools/automation for games.",
+      "Casual replies should sound like a real local-ish student: short, chill, meme-aware when natural, not too grammatically perfect.",
+      "Do not be nosy, do not give life advice, do not over-care. Answer the vibe and keep it low-pressure.",
+      "Small funny detail is okay; do not turn daily chat into a personal essay or deep meaning summary.",
     ],
     classroom: [
-      "Classroom: short student-style answers.",
+      "Classroom: Xiang wants to appear knowledgeable and capable, but still student-like.",
       "Academic/lecture content: prioritize correctness and depth. Use mechanisms, terms, assumptions, examples, and trade-offs when useful.",
-      "When the speaker is explaining a concept, show a professional knowledge supplement, generic example, trade-off, or question Xiang could ask.",
-      "Current courses: Cloud Architecting, Deep Learning, UX Design.",
+      "When the speaker is explaining a concept, give a useful supplement, concrete example, trade-off, or sharp question Xiang could ask.",
+      "When Xiang is asked directly, give a speakable answer that is short but not shallow.",
+      "Current Summer 2026 courses: Advanced Cloud Architecting, Deep Learning Applications, and Recommender Systems.",
+      "Do not make classroom answers sound like casual small talk.",
     ],
     interview: [
-      "Interview: honest student tone. Xiang has hands-on student project experience in web/mobile apps, Firebase, AWS serverless, and AI-related tools.",
-      "Projects available if asked: Elder Album, Dal Parking Aid, Study Session Tracker, SayNext.",
+      "Interview: honest, clear, professional student tone. Xiang wants to sound capable without overclaiming.",
+      "He has hands-on student project experience in web/mobile apps, Firebase, AWS serverless, and AI-related tools.",
+      "Projects available if asked: SayNext, Elder Album, Dal Parking Aid / DalParkAid, JobLens, and Study Session Tracker.",
       "Unknown tech: do not fake experience; say he has not used it in a real project yet.",
-      "Career: wants a stable software/cloud/full-stack/AI/job and long-term life in Canada.",
+      "Interview help should organize answers because Xiang has difficulty memorizing scripts and structured speaking.",
+      "Career: wants a stable software/cloud/full-stack/AI job and long-term life stability in Canada.",
+      "For technical interview questions, give a clear concept, simple solution path, and practical debugging/architecture details.",
     ],
     technical: [
       "Technical background: CS/MACS student with hands-on web, mobile, Firebase, AWS serverless, and AI-related app experience.",
       "Technical/professional output should be senior-level in knowledge: precise, practical, and specific, without claiming senior personal experience.",
       "For knowledge questions, answer generally first using mechanisms and practical details: logs, metrics, permissions, data access pattern, cost, reliability, control.",
+      "For problem-solving, be proactive and opinionated: infer the likely issue, give the best next step, and explain briefly how to verify.",
       "Use a personal project only when the question asks for Xiang's own experience or example.",
     ],
     service: [
@@ -378,16 +501,89 @@ function getFallbackResponse(transcript: string, timestamp: number): AgentRespon
   );
 }
 
+function getImmediateResponse(transcript: string, timestamp: number, outputLanguage: OutputLanguage): AgentResponse | null {
+  const normalized = transcript.trim();
+  const lower = normalized.toLowerCase();
+
+  if (/^present[.!?\s]*$/i.test(normalized)) {
+    return createInsight(
+      outputLanguage === "chinese" ? "到。" : "I'm here.",
+      "Immediate attendance response",
+      timestamp,
+      0.95,
+    );
+  }
+
+  if (outputLanguage === "chinese" && /\bzhoumo\b|周末/i.test(normalized)) {
+    return createInsight(
+      "可能就在家休息，打打游戏或者看点动漫，有项目的话就补一下。",
+      "Immediate Chinese weekend response",
+      timestamp,
+      0.85,
+    );
+  }
+
+  if (/^(and|uh|um|yeah|yes|right|okay|ok)[.!?\s]*$/i.test(normalized)) {
+    return createInsight(
+      outputLanguage === "chinese" ? "不好意思，刚才那部分能再说一下吗？" : "Sorry, what was the last part?",
+      "Immediate fragment clarification",
+      timestamp,
+      0.8,
+    );
+  }
+
+  const speakerIntro = normalized.match(/^\s*[A-Z]\s*:\s*(?:hi|hello|hey)[, ]+(?:i'?m|i am)\s+([A-Za-z][A-Za-z .'-]{1,40})[.!?\s]*$/i);
+  if (speakerIntro?.[1]) {
+    const name = speakerIntro[1].trim().replace(/[.!?]+$/, "");
+    return createInsight(
+      outputLanguage === "chinese" ? `你好，${name}。` : `Nice to meet you, ${name}.`,
+      "Immediate speaker introduction response",
+      timestamp,
+      0.85,
+    );
+  }
+
+  if (/自己做/.test(transcript) && outputLanguage === "english") {
+    return createInsight("Yeah, I made it myself.", "Immediate bilingual English response", timestamp, 0.8);
+  }
+
+  if ((/不太了解|不知道|不清楚/.test(transcript)) && outputLanguage === "english") {
+    return createInsight("I'm not really sure about that yet.", "Immediate bilingual English response", timestamp, 0.8);
+  }
+
+  if ((/我拒绝|不想|不要/.test(transcript)) && outputLanguage === "english") {
+    return createInsight("Yeah, I don't really want to do that.", "Immediate bilingual English response", timestamp, 0.8);
+  }
+
+  if (lower === "water.") {
+    return createInsight(
+      outputLanguage === "chinese" ? "我想喝点水。" : "I could use some water.",
+      "Immediate short word response",
+      timestamp,
+      0.75,
+    );
+  }
+
+  return null;
+}
+
 export async function processConversation(
   conversation: Conversation,
   frequency: 'low' | 'medium' | 'high' = 'high',
   eventMemory?: EventMemorySnapshot,
   outputLanguage: OutputLanguage = "english",
   activePrenoteContext = "",
+  activeSceneProfilePrompt = "",
+  relevantPersonalMemoryContext = "",
 ): Promise<AgentResponse> {
   const currentTimestamp = Date.now();
   const currentDate = new Date(currentTimestamp).toISOString();
   const latestTranscript = getLatestTranscript(conversation);
+
+  const immediateResponse = getImmediateResponse(latestTranscript, currentTimestamp, outputLanguage);
+  if (immediateResponse) {
+    return immediateResponse;
+  }
 
   const promptMode = detectPromptMode(latestTranscript, eventMemory);
   const latestLooksLikeQuestion = looksLikeQuestion(latestTranscript);
@@ -416,42 +612,65 @@ export async function processConversation(
   const formattedProfile = buildCompactXiangProfile(promptMode);
   const formattedEventMemory = formatCompactEventMemory(eventMemory);
   const formattedPrenoteContext = activePrenoteContext.trim() || "No active prenote.";
+  const formattedSceneProfile = activeSceneProfilePrompt.trim() || "No active scene profile.";
+  const formattedPersonalMemory = relevantPersonalMemoryContext.trim() || "No relevant personal memory.";
 
   console.log("\n--- SayNext Agent Context ---\n", formattedHistory, "\n-----------------------------\n");
-  const prompt = `Time: ${currentDate}
-Context hint: ${promptMode}
-Latest transcript looks like a direct question: ${latestLooksLikeQuestion ? "yes" : "no"}
-Output language: ${outputLanguage === "chinese" ? "Chinese" : "English"}
-
-Task:
+  const stablePromptPrefix = `Task:
 - Use the latest transcript as the trigger.
+- Follow the active scene profile first. It is Xiang's manual instruction for how to behave in this situation.
 - If it is a direct question, answer it directly.
 - If it is professional, technical, or academic, give a rigorous concept answer first. Be specific about mechanism, trade-off, assumption, tool, or example.
 - If it is lecture/explanation and not a direct question, give a professional knowledge supplement or useful question, not a conversational reply.
 - If it is casual, keep it natural and grounded.
 - Use active prenote memory as prepared context when relevant. It is stronger than generic knowledge, but do not force it if unrelated.
+- Use relevant personal memory only when it directly helps answer the latest transcript. Do not volunteer sensitive details.
+- For low-stakes IELTS/daily personal questions, you may create small plausible details if they sound natural and fit Xiang. Do this to avoid robotic generic answers.
+- For important factual claims, use only profile, relevant memory, prenote, or recent transcript. Do not create fake school names, course names, family events, health details, immigration details, company/work experience, project details, exact dates, awards, or named people.
 - Do not use the personal sample library.
+- The requested Output language below is mandatory.
+- For short fragments, do not create a new topic. Keep it minimal.
+- If the audio sounds like other people talking to each other, do not role-play as one of them unless Xiang is clearly being addressed.
+- If active event memory says the source is public/open transcript, do not use Xiang's hobbies, projects, school, career, or personal profile. Reply neutrally to the transcript only.
+- If the latest transcript asks how to answer, output the answer itself, not strategy advice.
+
+--- ACTIVE SCENE PROFILE ---
+${formattedSceneProfile}
+--- END ACTIVE SCENE PROFILE ---
+
+--- XIANG PROFILE ---
+Prompt mode: ${promptMode}
+${formattedProfile}
+--- END XIANG PROFILE ---
+
+--- ACTIVE PRENOTE MEMORY ---
+${formattedPrenoteContext}
+--- END ACTIVE PRENOTE MEMORY ---`;
+
+  const dynamicPromptSuffix = `Time: ${currentDate}
+Output language: ${outputLanguage === "chinese" ? "Chinese" : "English"}
+Latest transcript looks like a direct question: ${latestLooksLikeQuestion ? "yes" : "no"}
 
 --- LATEST TRANSCRIPT ---
 Transcript: "${latestTranscript}"
 --- END LATEST TRANSCRIPT ---
 
---- XIANG PROFILE ---
-${formattedProfile}
---- END XIANG PROFILE ---
-
 --- ACTIVE EVENT MEMORY ---
 ${formattedEventMemory}
 --- END ACTIVE EVENT MEMORY ---
 
---- ACTIVE PRENOTE MEMORY ---
-${formattedPrenoteContext}
---- END ACTIVE PRENOTE MEMORY ---
+--- RELEVANT PERSONAL MEMORY ---
+${formattedPersonalMemory}
+--- END RELEVANT PERSONAL MEMORY ---
 
 ${formattedHistory}`;
 
+  // Keep repeated content before volatile transcript/event context so OpenAI prompt caching can reuse the prefix.
+  const prompt = `${stablePromptPrefix}\n\n${dynamicPromptSuffix}`;
+  const cacheablePrefix = `${sayNextInstructions}\n\n${stablePromptPrefix}`;
+
   console.log(
-    `[SayNext] Input approx tokens: system=${estimateTokens(sayNextInstructions)} prompt=${estimateTokens(prompt)} total=${estimateTokens(`${sayNextInstructions}\n\n${prompt}`)} mode=${promptMode}`,
+    `[SayNext] Input approx tokens: system=${estimateTokens(sayNextInstructions)} prompt=${estimateTokens(prompt)} cacheablePrefix=${estimateTokens(cacheablePrefix)} dynamic=${estimateTokens(dynamicPromptSuffix)} total=${estimateTokens(`${sayNextInstructions}\n\n${prompt}`)} mode=${promptMode}`,
   );
 
   try {
@@ -499,7 +718,7 @@ ${formattedHistory}`;
             ? "Ollama returned partial JSON; extracted output field"
             : "Generated SayNext reply with Ollama",
           timestamp: currentTimestamp,
-          output: sanitizeSayNextOutput(extractedOutput ?? responseText),
+          output: finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory),
           confidence: extractedOutput ? 0.5 : 0.7,
           metadata: {
             agentType: AgentType.Initial,
@@ -515,7 +734,7 @@ ${formattedHistory}`;
       try {
         const jsonText = extractJsonObject(responseText) ?? responseText.trim();
         const parsed = JSON.parse(jsonText);
-        const output = sanitizeSayNextOutput(parsed.output ?? responseText);
+        const output = finalizeSayNextOutput(parsed.output ?? responseText, latestTranscript, outputLanguage, eventMemory);
 
         return {
           type: Action.INSIGHT,
@@ -540,7 +759,7 @@ ${formattedHistory}`;
             type: Action.INSIGHT,
             reasoning: "Model returned partial JSON; extracted output field",
             timestamp: currentTimestamp,
-            output: sanitizeSayNextOutput(extractedOutput),
+            output: finalizeSayNextOutput(extractedOutput, latestTranscript, outputLanguage, eventMemory),
             confidence: 0.5,
             metadata: {
               agentType: AgentType.Initial,
@@ -570,7 +789,7 @@ ${formattedHistory}`;
           type: Action.INSIGHT,
           reasoning: "Model returned plain text; sanitized direct reply",
           timestamp: currentTimestamp,
-          output: sanitizeSayNextOutput(responseText),
+          output: finalizeSayNextOutput(responseText, latestTranscript, outputLanguage, eventMemory),
           confidence: 0.6,
           metadata: {
             agentType: AgentType.Initial,

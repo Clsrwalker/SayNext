@@ -9,7 +9,7 @@
   },
   "author": "Mentra",
   "license": "ISC",
-  "description": "Real-time conversation reply assistant for MentraOS smart glasses",
+  "description": "Mobile real-time conversation reply assistant",
   "dependencies": {
     "@ai-sdk/openai": "^1.3.23",
     "@googlemaps/google-maps-services-js": "^3.4.2",

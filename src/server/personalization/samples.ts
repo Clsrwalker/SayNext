@@ -238,7 +238,7 @@ export const xiangProfile = {
       "Kubernetes",
       "System design",
       "Cloud architecture",
-      "Smart glasses AI assistants",
+      "Mobile real-time AI assistants",
       "Small language models",
       "Real-time AI applications",
       "Applications that help people think or respond better",

@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { getHealth } from "../api/health";
 import { insightStream } from "../api/insights";
 import { getSettings, updateSettings } from "../api/settings";
+import { resetCurrentSession } from "../api/session";
 import { listConversationEvents, listConversationSamples, updateConversationSample } from "../api/conversation-samples";
 import {
   listPersonalMemoryItems,
@@ -14,6 +15,9 @@ import {
   processConversationSampleForPersonalization,
 } from "../api/personalization-pipeline";
 import { createPrenote, deletePrenote, getPrenote, listPrenotes, updatePrenote } from "../api/prenotes";
+import { getTranscriptExport, listTranscriptExports, summarizeTranscriptExport } from "../api/transcript-exports";
+import { createSceneProfile, deleteSceneProfile, getSceneProfile, listSceneProfiles, updateSceneProfile } from "../api/scene-profiles";
+import { createPersonalMemory, deletePersonalMemory, listPersonalMemories, searchPersonalMemories, updatePersonalMemory } from "../api/personal-memories";
 
 export const api = new Hono();
 
@@ -26,6 +30,7 @@ api.get("/insight-stream", insightStream);
 // Settings (frequency, theme)
 api.get("/settings", getSettings);
 api.patch("/settings", updateSettings);
+api.post("/session/reset", resetCurrentSession);
 
 // Conversation samples for rating and future personalization datasets
 api.get("/conversation-samples", listConversationSamples);
@@ -38,9 +43,28 @@ api.post("/personalization-pipeline/samples/:id", processConversationSampleForPe
 api.post("/personalization-pipeline/events/:id", processConversationEventForPersonalization);
 api.get("/personal-memory", listPersonalMemoryItems);
 
+// Personal memory library with local hybrid search
+api.get("/personal-memories", listPersonalMemories);
+api.post("/personal-memories", createPersonalMemory);
+api.post("/personal-memories/search", searchPersonalMemories);
+api.patch("/personal-memories/:id", updatePersonalMemory);
+api.delete("/personal-memories/:id", deletePersonalMemory);
+
 // Prenotes: prepared scene/context memory
 api.get("/prenotes", listPrenotes);
 api.post("/prenotes", createPrenote);
 api.get("/prenotes/:id", getPrenote);
 api.patch("/prenotes/:id", updatePrenote);
 api.delete("/prenotes/:id", deletePrenote);
+
+// Scene profiles: user-selected behavior/prompt strategy
+api.get("/scene-profiles", listSceneProfiles);
+api.post("/scene-profiles", createSceneProfile);
+api.get("/scene-profiles/:id", getSceneProfile);
+api.patch("/scene-profiles/:id", updateSceneProfile);
+api.delete("/scene-profiles/:id", deleteSceneProfile);
+
+// Transcript/session export
+api.get("/transcript-exports", listTranscriptExports);
+api.get("/transcript-exports/:sessionId", getTranscriptExport);
+api.post("/transcript-exports/:sessionId/summary", summarizeTranscriptExport);

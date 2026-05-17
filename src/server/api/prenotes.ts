@@ -11,9 +11,27 @@ function safePathPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 120) || "file";
 }
 
-function serializePrenote(prenote: PrenoteRecord) {
+function serializePrenote(prenote: PrenoteRecord, options: { includeFullText?: boolean } = {}) {
   return {
-    ...prenote,
+    id: prenote.id,
+    userId: prenote.userId,
+    title: prenote.title,
+    description: prenote.description,
+    status: prenote.status,
+    isActive: prenote.isActive,
+    runtimeContext: prenote.runtimeContext,
+    model: prenote.model,
+    error: prenote.error,
+    createdAt: prenote.createdAt,
+    updatedAt: prenote.updatedAt,
+    ...(options.includeFullText
+      ? {
+          sourceText: prenote.sourceText,
+          extractedText: prenote.extractedText,
+          processedJson: prenote.processedJson,
+          contentHash: prenote.contentHash,
+        }
+      : {}),
     files: conversationLogger.listPrenoteFiles(prenote.id).map((file) => ({
       id: file.id,
       fileName: file.fileName,
@@ -58,11 +76,20 @@ function inferPrenoteTitle(input: { title: string; sourceText: string; files: Fi
   return `Prenote ${new Date().toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
 }
 
+async function readJsonBody(c: Context): Promise<Record<string, any> | null> {
+  try {
+    const body = await c.req.json();
+    return body && typeof body === "object" ? body : {};
+  } catch {
+    return null;
+  }
+}
+
 export const listPrenotes = (c: Context) => {
   const userId = getUserId(c);
   if (!userId) return c.json({ error: "userId is required" }, 400);
 
-  const prenotes = conversationLogger.listPrenotes(userId).map(serializePrenote);
+  const prenotes = conversationLogger.listPrenotes(userId).map((prenote) => serializePrenote(prenote));
   return c.json({ prenotes });
 };
 
@@ -75,7 +102,7 @@ export const getPrenote = (c: Context) => {
   const prenote = conversationLogger.getPrenote(id);
   if (!prenote || prenote.userId !== userId) return c.json({ error: "Prenote not found" }, 404);
 
-  return c.json({ prenote: serializePrenote(prenote) });
+  return c.json({ prenote: serializePrenote(prenote, { includeFullText: true }) });
 };
 
 export const createPrenote = async (c: Context) => {
@@ -140,7 +167,7 @@ export const createPrenote = async (c: Context) => {
   });
 
   if (setActive) {
-    conversationLogger.setActivePrenote(userId, prenote.id);
+    conversationLogger.setPrenoteActive(userId, prenote.id, true);
   }
 
   const finalPrenote = conversationLogger.getPrenote(prenote.id) ?? updated ?? prenote;
@@ -151,21 +178,32 @@ export const updatePrenote = async (c: Context) => {
   const id = Number(c.req.param("id"));
   if (!Number.isFinite(id)) return c.json({ error: "Invalid prenote id" }, 400);
 
-  const body = await c.req.json();
+  const body = await readJsonBody(c);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+
   const userId = String(body.userId || "").trim();
   if (!userId) return c.json({ error: "userId is required" }, 400);
 
   const prenote = conversationLogger.getPrenote(id);
   if (!prenote || prenote.userId !== userId) return c.json({ error: "Prenote not found" }, 404);
 
+  if (typeof body.runtimeContext === "string" || typeof body.title === "string") {
+    const updated = conversationLogger.updatePrenoteMemory(userId, id, {
+      title: typeof body.title === "string" ? body.title : undefined,
+      runtimeContext: typeof body.runtimeContext === "string" ? body.runtimeContext : undefined,
+    });
+    if (!updated) return c.json({ error: "Prenote not found" }, 404);
+    return c.json({ prenote: serializePrenote(updated) });
+  }
+
   if (body.active === true) {
-    const active = conversationLogger.setActivePrenote(userId, id);
+    const active = conversationLogger.setPrenoteActive(userId, id, true);
     return c.json({ prenote: active ? serializePrenote(active) : null });
   }
 
   if (body.active === false) {
-    conversationLogger.setActivePrenote(userId, null);
-    return c.json({ prenote: serializePrenote(conversationLogger.getPrenote(id) ?? prenote) });
+    const inactive = conversationLogger.setPrenoteActive(userId, id, false);
+    return c.json({ prenote: serializePrenote(inactive ?? conversationLogger.getPrenote(id) ?? prenote) });
   }
 
   return c.json({ prenote: serializePrenote(prenote) });
@@ -173,7 +211,7 @@ export const updatePrenote = async (c: Context) => {
 
 export const deletePrenote = async (c: Context) => {
   const id = Number(c.req.param("id"));
-  const body = await c.req.json().catch(() => ({}));
+  const body = (await readJsonBody(c)) ?? {};
   const userId = String(body.userId || c.req.query("userId") || "").trim();
   if (!userId) return c.json({ error: "userId is required" }, 400);
   if (!Number.isFinite(id)) return c.json({ error: "Invalid prenote id" }, 400);

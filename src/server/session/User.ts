@@ -258,7 +258,7 @@ export class User {
     this.broadcastInsightEvent({ type: 'manual_pause', paused: true });
   }
 
-  /** Pin a specific insight on the glasses while paused */
+  /** Pin a specific insight on the display while paused */
   showInsightForReading(text: string): void {
     this.responseHandler?.showPinnedText(text);
     this.broadcastInsightEvent({ type: 'manual_pause', paused: true });
@@ -291,6 +291,26 @@ export class User {
     this.responseHandler?.close();
     this.responseHandler = null;
     this.appSession = null;
+  }
+
+  /** Clear only the current webview screen history. Database export history is kept. */
+  clearScreenHistory(): void {
+    this.insightHistory.clearAll();
+    this.eventQueue = [];
+  }
+
+  /** Reset real-time runtime state without deleting database history. */
+  resetCurrentSession(): void {
+    if (this.utteranceTimer) {
+      clearTimeout(this.utteranceTimer);
+      this.utteranceTimer = null;
+    }
+
+    this.currentUtteranceBuffer = "";
+    this.lastProcessedUtterance = "";
+    this.responseHandler?.resetRuntimeState();
+    this.clearScreenHistory();
+    this.broadcastInsightEvent({ type: 'session_reset' });
   }
 
   /** Register an SSE client */

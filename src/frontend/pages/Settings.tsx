@@ -7,6 +7,7 @@ import {
   updateFrequency,
   updateOutputLanguage,
   updateTheme,
+  resetCurrentSession,
   type FrequencyMode,
   type OutputLanguage,
 } from '../api/settings.api';
@@ -15,6 +16,10 @@ interface SettingsProps {
   onBack: () => void;
   onOpenSampleReview: () => void;
   onOpenPrenotes: () => void;
+  onOpenSceneProfiles: () => void;
+  onOpenTranscriptExport: () => void;
+  onOpenPersonalMemory: () => void;
+  onResetCurrentSession: () => void;
   isDarkMode: boolean;
   onToggleDarkMode: () => void;
   userId: string;
@@ -36,11 +41,24 @@ const OUTPUT_LANGUAGE_LABELS: Record<OutputLanguage, string> = {
 /**
  * Settings page - frequency toggle (LOW/MED/HIGH) + theme toggle
  */
-function Settings({ onBack, onOpenSampleReview, onOpenPrenotes, isDarkMode, onToggleDarkMode, userId }: SettingsProps) {
+function Settings({
+  onBack,
+  onOpenSampleReview,
+  onOpenPrenotes,
+  onOpenSceneProfiles,
+  onOpenTranscriptExport,
+  onOpenPersonalMemory,
+  onResetCurrentSession,
+  isDarkMode,
+  onToggleDarkMode,
+  userId,
+}: SettingsProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [frequency, setFrequency] = useState<FrequencyMode>('high');
   const [outputLanguage, setOutputLanguage] = useState<OutputLanguage>('english');
   const [isLoadingSettings, setIsLoadingSettings] = useState(true);
+  const [isResetting, setIsResetting] = useState(false);
+  const [resetStatus, setResetStatus] = useState<'idle' | 'done' | 'error'>('idle');
 
   // Fetch user settings on mount
   useEffect(() => {
@@ -98,6 +116,23 @@ function Settings({ onBack, onOpenSampleReview, onOpenPrenotes, isDarkMode, onTo
     } catch (error) {
       console.error('Failed to update theme:', error);
       onToggleDarkMode(); // revert
+    }
+  };
+
+  const handleResetCurrentSession = async () => {
+    if (isResetting) return;
+
+    setIsResetting(true);
+    setResetStatus('idle');
+    try {
+      await resetCurrentSession(userId);
+      onResetCurrentSession();
+      setResetStatus('done');
+    } catch (error) {
+      console.error('Failed to reset current session:', error);
+      setResetStatus('error');
+    } finally {
+      setIsResetting(false);
     }
   };
 
@@ -173,6 +208,24 @@ function Settings({ onBack, onOpenSampleReview, onOpenPrenotes, isDarkMode, onTo
         <SettingItem
           isFirstItem={false}
           isLastItem={false}
+          settingItemName="Scene Profiles"
+          customContent={
+            <button
+              onClick={onOpenSceneProfiles}
+              className="px-[12px] py-[6px] rounded-full text-[13px] font-semibold transition-all duration-300"
+              style={{
+                backgroundColor: 'var(--secondary-foreground)',
+                color: 'var(--primary-foreground)',
+              }}
+            >
+              Manage
+            </button>
+          }
+        />
+
+        <SettingItem
+          isFirstItem={false}
+          isLastItem={false}
           settingItemName="Prenote"
           customContent={
             <button
@@ -184,6 +237,61 @@ function Settings({ onBack, onOpenSampleReview, onOpenPrenotes, isDarkMode, onTo
               }}
             >
               Manage
+            </button>
+          }
+        />
+
+        <SettingItem
+          isFirstItem={false}
+          isLastItem={false}
+          settingItemName="Personal Memory"
+          customContent={
+            <button
+              onClick={onOpenPersonalMemory}
+              className="px-[12px] py-[6px] rounded-full text-[13px] font-semibold transition-all duration-300"
+              style={{
+                backgroundColor: 'var(--secondary-foreground)',
+                color: 'var(--primary-foreground)',
+              }}
+            >
+              Manage
+            </button>
+          }
+        />
+
+        <SettingItem
+          isFirstItem={false}
+          isLastItem={false}
+          settingItemName="Transcript Export"
+          customContent={
+            <button
+              onClick={onOpenTranscriptExport}
+              className="px-[12px] py-[6px] rounded-full text-[13px] font-semibold transition-all duration-300"
+              style={{
+                backgroundColor: 'var(--secondary-foreground)',
+                color: 'var(--primary-foreground)',
+              }}
+            >
+              Open
+            </button>
+          }
+        />
+
+        <SettingItem
+          isFirstItem={false}
+          isLastItem={false}
+          settingItemName="Reset Current Session"
+          customContent={
+            <button
+              onClick={handleResetCurrentSession}
+              disabled={isResetting}
+              className="px-[12px] py-[6px] rounded-full text-[13px] font-semibold transition-all duration-300 disabled:opacity-50"
+              style={{
+                backgroundColor: resetStatus === 'error' ? '#ef4444' : 'var(--secondary-foreground)',
+                color: 'var(--primary-foreground)',
+              }}
+            >
+              {isResetting ? 'Resetting' : resetStatus === 'done' ? 'Done' : resetStatus === 'error' ? 'Retry' : 'Reset'}
             </button>
           }
         />

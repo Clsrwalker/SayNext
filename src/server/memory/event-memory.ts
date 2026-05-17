@@ -27,14 +27,24 @@ interface ActiveEvent {
   aiReplies: string[];
 }
 
-function classifyScene(text: string): string {
+export function classifyScene(text: string): string {
   const normalized = text.toLowerCase();
+  const hasCourseContext = /\b(course|courses)\b/.test(normalized) && !/\bof course\b/.test(normalized);
+  const speakerLabelCount = (text.match(/\b[A-Z]:\s/g) ?? []).length;
+
+  if (speakerLabelCount >= 2 && /\b(team|meeting|project|whiteboard|tool training|design|prototype|remote control|manager|everybody)\b/.test(normalized)) {
+    return "group_discussion";
+  }
+
+  if (/\b(weekend|free time|anime|food|holiday|mountain|good morning|day going|what game|played any games|after class|staying home|hang out|chilling|takeout)\b/.test(normalized)) {
+    return "daily_chat";
+  }
 
   if (/\b(interview|candidate|position|role|hire|tell me about yourself|introduce yourself|why should we hire)\b/.test(normalized)) {
     return "interview";
   }
 
-  if (/\b(professor|class|lecture|homework|assignment|course|lambda|ec2|dynamodb|serverless|scalability|availability|architecture)\b/.test(normalized)) {
+  if (hasCourseContext || /\b(professor|class|lecture|homework|assignment|lambda|ec2|dynamodb|serverless|scalability|availability|architecture)\b/.test(normalized)) {
     return "classroom";
   }
 
@@ -42,7 +52,7 @@ function classifyScene(text: string): string {
     return "group_discussion";
   }
 
-  if (/\b(manager|client|work|ticket|production|requirement|deployment|bug|incident)\b/.test(normalized)) {
+  if (/\b(manager|client|production|requirement|requirements|deployment|bug|incident|jira ticket|support ticket|work ticket)\b/.test(normalized)) {
     return "work_discussion";
   }
 
@@ -53,13 +63,20 @@ function classifyScene(text: string): string {
   return "daily_chat";
 }
 
-function shouldStartNewEvent(current: ActiveEvent | null, scene: string, timestamp: number): boolean {
+function isClearDailySwitchText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return /\b(weekend|free time|anime|food|holiday|mountain|good morning|day going|what game|played any games|after class|staying home|hang out|chilling|takeout)\b/.test(normalized);
+}
+
+export function shouldStartNewEvent(current: Pick<ActiveEvent, "scene" | "lastTimestamp"> | null, scene: string, timestamp: number, text = ""): boolean {
   if (!current) return true;
   if (timestamp - current.lastTimestamp > EVENT_IDLE_TIMEOUT_MS) return true;
 
-  const currentStructured = current.scene !== "daily_chat";
-  const nextStructured = scene !== "daily_chat";
-  return currentStructured && nextStructured && current.scene !== scene;
+  if (current.scene === scene) return false;
+  if (current.scene === "group_discussion" && scene === "interview" && /\b[A-Z]:\s/.test(text)) return false;
+  if (current.scene === "classroom" && scene === "group_discussion" && /\b(lecture|algorithm|matrix|accuracy|method|code|pivot|elimination)\b/i.test(text)) return false;
+  if (scene === "daily_chat") return isClearDailySwitchText(text);
+  return true;
 }
 
 function makeEventId(userId: string, timestamp: number): string {
@@ -90,17 +107,21 @@ function trimRawTranscript(transcripts: string[]): string {
 export class EventMemoryManager {
   private activeEvent: ActiveEvent | null = null;
 
-  constructor(private readonly userId: string) {}
+  constructor(
+    private readonly userId: string,
+    private readonly sessionId: string = `${userId}-${Date.now()}`,
+    private readonly persistEvents = true,
+  ) {}
 
   addTranscript(text: string, timestamp: number): EventMemorySnapshot {
     const scene = classifyScene(text);
 
-    if (shouldStartNewEvent(this.activeEvent, scene, timestamp)) {
+    if (shouldStartNewEvent(this.activeEvent, scene, timestamp, text)) {
       this.closeActiveEvent();
       this.activeEvent = {
         id: makeEventId(this.userId, timestamp),
         userId: this.userId,
-        sessionId: `${this.userId}-${Math.floor(timestamp / 1000)}`,
+        sessionId: this.sessionId,
         scene,
         title: text.replace(/\s+/g, " ").trim().slice(0, 90) || scene,
         startTimestamp: timestamp,
@@ -159,12 +180,17 @@ export class EventMemoryManager {
 
   closeActiveEvent(): void {
     if (!this.activeEvent) return;
+    if (!this.persistEvents) {
+      this.activeEvent = null;
+      return;
+    }
     this.persistActiveEvent("closed");
     this.activeEvent = null;
   }
 
   private persistActiveEvent(status: "active" | "closed"): void {
     if (!this.activeEvent) return;
+    if (!this.persistEvents) return;
 
     const event = this.activeEvent;
     const title = makeTitle(event.scene, event.transcripts);

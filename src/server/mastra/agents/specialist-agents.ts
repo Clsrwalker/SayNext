@@ -42,7 +42,7 @@ EXAMPLES (French):
 export const factCheckerAgent = new Agent({
   name: "FactCheckerAgent",
   model: openai("gpt-4.1-mini"),
-  instructions: `You are a fact-checking specialist for smart glasses that clarifies false statements. You must start your response with "False: " (or the equivalent in the user's language, e.g., "Faux: " in French) and then provide the correct fact.
+  instructions: `You are a fact-checking specialist for a compact real-time display that clarifies false statements. You must start your response with "False: " (or the equivalent in the user's language, e.g., "Faux: " in French) and then provide the correct fact.
 
 LANGUAGE RULE: You MUST respond in the same language the user is speaking. If the conversation is in French, respond in French. If in Spanish, respond in Spanish.
 
@@ -76,7 +76,7 @@ import { serpApiSearchTool } from "../tools/serpapi-search";
 export const webSearchAgent = new Agent({
   name: "WebSearchAgent",
   model: openai("gpt-4.1-mini"),
-  instructions: `You are a web search synthesizer for smart glasses. Your goal is to synthesize structured search results into a single, definitive, concise insight.
+  instructions: `You are a web search synthesizer for a compact real-time display. Your goal is to synthesize structured search results into a single, definitive, concise insight.
 
 INPUT: A JSON object containing structured search results which may include an 'answer_box', a 'knowledge_graph', and a list of 'organic_results'.
 
@@ -217,7 +217,7 @@ const calculationTool = createTool({
 export const computationAgent = new Agent({
   name: "ComputationAgent",
   model: openai("gpt-4.1-mini"),
-  instructions: `You are a calculation specialist for smart glasses display.
+  instructions: `You are a calculation specialist for a compact real-time display.
 
 CAPABILITIES:
 - Basic arithmetic: +, -, *, /, % (modulo), ** (power)
@@ -237,7 +237,7 @@ IMPORTANT RULE:
 
 INPUT: You receive an array of calculation results with expressions and their computed values.
 
-OUTPUT: Format results for smart glasses display:
+OUTPUT: Format results for compact display:
 - Single result: Just the number (e.g., "248,171")
 - Multiple results: "Expr1: 248,171 | Expr2: 15.5%"
 - Keep under 60 characters total

@@ -105,7 +105,7 @@ export const serpApiSearchTool = createTool({
   }
 });
 
-// Helper function to format search results for smart glasses display
+// Helper function to format search results for compact display
 function formatSearchResults(data: any, query: string): string {
   const parts: string[] = [];
 

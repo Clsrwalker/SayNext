@@ -1,5 +1,11 @@
 const getApiUrl = () => window.location.origin;
 
+async function readError(response: Response, fallback: string): Promise<string> {
+  const data = await response.json().catch(() => ({}));
+  const detail = typeof data.error === "string" ? data.error : fallback;
+  return `${detail} (${response.status})`;
+}
+
 export interface PrenoteFileSummary {
   id: number;
   fileName: string;
@@ -21,6 +27,11 @@ export interface Prenote {
   sourceTextLength: number;
   extractedTextLength: number;
   runtimeContextLength: number;
+  runtimeContext: string;
+  sourceText?: string;
+  extractedText?: string;
+  processedJson?: string;
+  contentHash?: string;
   error: string;
   createdAt: string;
   updatedAt: string;
@@ -28,10 +39,23 @@ export interface Prenote {
 }
 
 export async function fetchPrenotes(userId: string): Promise<Prenote[]> {
+  if (!userId.trim()) throw new Error("Missing userId. Reopen the MiniApp from MentraOS.");
+
   const response = await fetch(`${getApiUrl()}/api/prenotes?userId=${encodeURIComponent(userId)}`);
-  if (!response.ok) throw new Error("Failed to fetch prenotes");
+  if (!response.ok) throw new Error(await readError(response, "Failed to fetch prenotes"));
+
   const data = await response.json();
   return data.prenotes || [];
+}
+
+export async function fetchPrenote(userId: string, id: number): Promise<Prenote> {
+  if (!userId.trim()) throw new Error("Missing userId. Reopen the MiniApp from MentraOS.");
+
+  const response = await fetch(`${getApiUrl()}/api/prenotes/${id}?userId=${encodeURIComponent(userId)}`);
+  if (!response.ok) throw new Error(await readError(response, "Failed to fetch prenote"));
+
+  const data = await response.json();
+  return data.prenote;
 }
 
 export async function createPrenote(input: {
@@ -59,8 +83,7 @@ export async function createPrenote(input: {
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error || "Failed to create prenote");
+    throw new Error(await readError(response, "Failed to create prenote"));
   }
 
   const data = await response.json();
@@ -74,7 +97,30 @@ export async function setActivePrenote(userId: string, id: number, active = true
     body: JSON.stringify({ userId, active }),
   });
 
-  if (!response.ok) throw new Error("Failed to update prenote");
+  if (!response.ok) throw new Error(await readError(response, "Failed to update prenote"));
+
+  const data = await response.json();
+  return data.prenote;
+}
+
+export async function updatePrenoteMemory(input: {
+  userId: string;
+  id: number;
+  title?: string;
+  runtimeContext: string;
+}): Promise<Prenote> {
+  const response = await fetch(`${getApiUrl()}/api/prenotes/${input.id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userId: input.userId,
+      title: input.title,
+      runtimeContext: input.runtimeContext,
+    }),
+  });
+
+  if (!response.ok) throw new Error(await readError(response, "Failed to update memory"));
+
   const data = await response.json();
   return data.prenote;
 }
@@ -86,5 +132,5 @@ export async function deletePrenote(userId: string, id: number): Promise<void> {
     body: JSON.stringify({ userId }),
   });
 
-  if (!response.ok) throw new Error("Failed to delete prenote");
+  if (!response.ok) throw new Error(await readError(response, "Failed to delete prenote"));
 }

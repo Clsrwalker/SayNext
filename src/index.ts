@@ -82,13 +82,16 @@ Bun.serve({
     "/webview": indexHtml,
     "/webview/*": indexHtml,
   },
-  fetch(request) {
+  async fetch(request) {
     const url = new URL(request.url);
 
     // Serve static assets from /assets/
     if (url.pathname.startsWith("/assets/")) {
       const filePath = `${publicPath}${url.pathname.replace("/assets", "")}`;
       const file = Bun.file(filePath);
+      if (!(await file.exists())) {
+        return new Response("Not found", { status: 404 });
+      }
       return new Response(file);
     }
 

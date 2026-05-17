@@ -35,9 +35,10 @@ export class SessionManager {
 
     // Detach the glasses session but keep the user object
     user.clearAppSession();
+    user.clearScreenHistory();
 
     // Broadcast disconnection to SSE clients
-    user.broadcastInsightEvent({ type: 'session_reconnecting' });
+    user.broadcastInsightEvent({ type: 'session_ended' });
 
     // Clear any existing timer before creating a new one
     this.cancelRemoval(userId);

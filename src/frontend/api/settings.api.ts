@@ -100,3 +100,18 @@ export const displayInsightForReading = async (userId: string, displayText: stri
 
   return response.json();
 };
+
+export const resetCurrentSession = async (userId: string): Promise<{ ok: boolean; active: boolean }> => {
+  const apiUrl = getApiUrl();
+  const response = await fetch(`${apiUrl}/api/session/reset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to reset current session');
+  }
+
+  return response.json();
+};

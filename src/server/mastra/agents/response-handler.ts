@@ -13,6 +13,7 @@ const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 export class MergeResponseHandler {
   private session: AppSession;
   private userId: string;
+  private sessionId: string;
   private locationManager: LocationManager;
   private conversation: Conversation;
   private eventMemory: EventMemoryManager;
@@ -41,9 +42,10 @@ export class MergeResponseHandler {
   ) {
     this.session = session;
     this.userId = userId;
+    this.sessionId = `${userId}-${Date.now()}`;
     this.locationManager = locationManager;
     this.conversation = [];
-    this.eventMemory = new EventMemoryManager(userId);
+    this.eventMemory = new EventMemoryManager(userId, this.sessionId);
     this.frequency = initialFrequency;
     this.outputLanguage = initialOutputLanguage;
   }
@@ -83,11 +85,21 @@ export class MergeResponseHandler {
       .sort((a, b) => a.timestamp - b.timestamp);
 
     const activePrenoteContext = conversationLogger.getActivePrenoteRuntimeContext(this.userId);
+    const activeSceneProfilePrompt = conversationLogger.getActiveSceneProfilePrompt(this.userId);
+    const relevantPersonalMemoryContext = conversationLogger.getRelevantPersonalMemoryContext(this.userId, text, 3);
 
     // Get Initial Agent's decision, passing the current frequency
-    const response = await processConversation(context, this.frequency, eventSnapshot, this.outputLanguage, activePrenoteContext);
+    const response = await processConversation(
+      context,
+      this.frequency,
+      eventSnapshot,
+      this.outputLanguage,
+      activePrenoteContext,
+      activeSceneProfilePrompt,
+      relevantPersonalMemoryContext,
+    );
 
-    if (requestSeq !== this.processingSeq && this.currentDisplayText) {
+    if (requestSeq !== this.processingSeq) {
       this.session.logger.info(`Dropping stale AI response for older transcript: "${text}"`);
       this.onStatus?.({ type: "processing_done", reason: "stale_response" });
       return;
@@ -100,6 +112,7 @@ export class MergeResponseHandler {
 
     // Handle the response based on action type
     await this.handleAgentResponse(response);
+    this.onStatus?.({ type: "processing_done", reason: response.type });
     this.session.logger.info({conversation: this.conversation}, `Conversation`);
 
     // Trim conversation history if it gets too long
@@ -113,8 +126,9 @@ export class MergeResponseHandler {
       const metadata = response.type === Action.INSIGHT ? response.metadata?.agentInput : undefined;
       conversationLogger.createSample({
         userId: this.userId,
-        sessionId: `${this.userId}-${Math.floor(timestamp / 1000)}`,
+        sessionId: this.sessionId,
         timestamp,
+        language: this.outputLanguage,
         transcript: text,
         aiReply: response.type === Action.INSIGHT ? response.output : null,
         actionType: response.type,
@@ -356,6 +370,34 @@ export class MergeResponseHandler {
       this.eventIdleTimer = null;
     }
     this.conversation = [];
+  }
+
+  resetRuntimeState(): void {
+    this.processingSeq++;
+    this.conversation = [];
+    this.recentInsightCache = [];
+    this.lastInsightText = null;
+    this.currentDisplayText = null;
+    this.isDisplaying = false;
+    this.isPausedForReading = false;
+
+    this.eventMemory.closeActiveEvent();
+    if (this.eventIdleTimer) {
+      clearTimeout(this.eventIdleTimer);
+      this.eventIdleTimer = null;
+    }
+    if (this.displayTimer) {
+      clearTimeout(this.displayTimer);
+      this.displayTimer = null;
+    }
+    if (this.pausedDisplayRefreshTimer) {
+      clearTimeout(this.pausedDisplayRefreshTimer);
+      this.pausedDisplayRefreshTimer = null;
+    }
+
+    this.onStatus?.({ type: "processing_done", reason: "manual_reset" });
+    this.session.layouts.showTextWall("SayNext is listening.", { durationMs: 1500 });
+    this.session.logger.info("Current SayNext runtime state reset");
   }
 
   close(): void {
