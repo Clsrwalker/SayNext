@@ -14,10 +14,18 @@ import PrenoteManager from './PrenoteManager';
 import TranscriptExport from './TranscriptExport';
 import SceneProfileManager from './SceneProfileManager';
 import PersonalMemoryManager from './PersonalMemoryManager';
+import MemoryReview from './MemoryReview';
 import Header from '../components/Header';
 import BottomHeader from '../components/BottomHeader';
 import { useTheme } from '../App';
-import { displayInsightForReading, pauseForReading, resumeAutomatic } from '../api/settings.api';
+import {
+  advanceTeleprompt,
+  cancelTeleprompt,
+  displayInsightForReading,
+  pauseForReading,
+  resumeAutomatic,
+  rewindTeleprompt,
+} from '../api/settings.api';
 
 interface Insight {
   id: string;
@@ -30,6 +38,12 @@ interface Insight {
 interface InsightsInterfaceProps {
   userId: string;
 }
+
+type TelepromptUiState = {
+  status: 'pending' | 'ready';
+  currentIndex: number;
+  total: number;
+};
 
 const THINKING_WORDS = [
   'doodling',
@@ -149,6 +163,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
   });
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPausedForReading, setIsPausedForReading] = useState(false);
+  const [telepromptState, setTelepromptState] = useState<TelepromptUiState | null>(null);
   const [thinkingWord, setThinkingWord] = useState(() =>
     THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)]
   );
@@ -156,7 +171,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
   const renderedIdsRef = useRef<Set<string>>(new Set());
   const [sessionActive, setSessionActive] = useState<boolean | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
-  const [currentPage, setCurrentPage] = useState<'insights' | 'settings' | 'sampleReview' | 'prenotes' | 'sceneProfiles' | 'transcriptExport' | 'personalMemory'>('insights');
+  const [currentPage, setCurrentPage] = useState<'insights' | 'settings' | 'sampleReview' | 'prenotes' | 'sceneProfiles' | 'transcriptExport' | 'personalMemory' | 'memoryReview'>('insights');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sseRef = useRef<EventSource | null>(null);
@@ -167,6 +182,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     setInsights([]);
     setIsProcessing(false);
     setIsPausedForReading(false);
+    setTelepromptState(null);
     setIsLoadingHistory(false);
     setHasConnectedBefore(false);
     renderedIdsRef.current.clear();
@@ -246,6 +262,31 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           } else if (data.type === 'manual_pause') {
             setIsPausedForReading(Boolean(data.paused));
             setIsProcessing(false);
+          } else if (data.type === 'teleprompt') {
+            setIsProcessing(false);
+            const currentIndex = Number(data.currentIndex ?? 0);
+            const total = Number(data.total ?? 0);
+            const isFinished = data.status === 'ready' && total > 0 && currentIndex >= total;
+            setTelepromptState(isFinished ? null : {
+              status: data.status === 'ready' ? 'ready' : 'pending',
+              currentIndex,
+              total,
+            });
+            const telepromptInsight = {
+              id: 'teleprompt-live',
+              text: data.text,
+              timestamp: new Date().toISOString(),
+              agentType: 'Teleprompt',
+              reasoning: 'Live teleprompt',
+            };
+            setInsights((prev) => [
+              ...prev.filter((insight) => insight.id !== 'teleprompt-live'),
+              telepromptInsight,
+            ]);
+          } else if (data.type === 'teleprompt_cancelled') {
+            setIsProcessing(false);
+            setTelepromptState(null);
+            setInsights((prev) => prev.filter((insight) => insight.id !== 'teleprompt-live'));
           } else if (data.type === 'connected') {
             setIsLoadingHistory(true);
           } else if (data.type === 'history') {
@@ -273,6 +314,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           } else if (data.type === 'session_ended') {
             setSessionActive(false);
             setIsProcessing(false);
+            setTelepromptState(null);
             setInsights([]);
             renderedIdsRef.current.clear();
             setHasConnectedBefore(false);
@@ -284,6 +326,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             setIsLoadingHistory(false);
             if (!data.active) {
               setIsProcessing(false);
+              setTelepromptState(null);
             }
           }
         } catch (error) {
@@ -349,6 +392,44 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     }
   };
 
+  const handleTelepromptNext = async () => {
+    if (!userId || !telepromptState || telepromptState.status !== 'ready') return;
+
+    try {
+      await advanceTeleprompt(userId);
+      setIsProcessing(false);
+    } catch (error) {
+      console.error('[InsightsInterface] Failed to advance teleprompt:', error);
+    }
+  };
+
+  const handleTelepromptBack = async () => {
+    if (!userId || !telepromptState || telepromptState.status !== 'ready' || telepromptState.currentIndex <= 0) return;
+
+    try {
+      await rewindTeleprompt(userId);
+      setIsProcessing(false);
+    } catch (error) {
+      console.error('[InsightsInterface] Failed to rewind teleprompt:', error);
+    }
+  };
+
+  const handleTelepromptCancel = async () => {
+    if (!userId || !telepromptState) return;
+
+    try {
+      await cancelTeleprompt(userId);
+      setTelepromptState(null);
+      setInsights((prev) => prev.filter((insight) => insight.id !== 'teleprompt-live'));
+      setIsProcessing(false);
+    } catch (error) {
+      console.error('[InsightsInterface] Failed to cancel teleprompt:', error);
+    }
+  };
+
+  const canAdvanceTeleprompt = telepromptState?.status === 'ready';
+  const canRewindTeleprompt = canAdvanceTeleprompt && (telepromptState?.currentIndex ?? 0) > 0;
+
   // Render Settings page if on settings
   if (currentPage === 'settings') {
     return (
@@ -359,6 +440,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
         onOpenSceneProfiles={() => setCurrentPage('sceneProfiles')}
         onOpenTranscriptExport={() => setCurrentPage('transcriptExport')}
         onOpenPersonalMemory={() => setCurrentPage('personalMemory')}
+        onOpenMemoryReview={() => setCurrentPage('memoryReview')}
         onResetCurrentSession={() => {
           clearRealtimeScreen();
           setCurrentPage('insights');
@@ -382,6 +464,15 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
   if (currentPage === 'personalMemory') {
     return (
       <PersonalMemoryManager
+        userId={userId}
+        onBack={() => setCurrentPage('settings')}
+      />
+    );
+  }
+
+  if (currentPage === 'memoryReview') {
+    return (
+      <MemoryReview
         userId={userId}
         onBack={() => setCurrentPage('settings')}
       />
@@ -624,19 +715,70 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           <div className="fixed left-0 right-0 bottom-0 z-[240] px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2 backdrop-blur-[8px]"
             style={{ backgroundColor: 'color-mix(in srgb, var(--background) 88%, transparent)' }}
           >
-            <div className="flex items-stretch">
-              <button
-                onClick={handlePauseToggle}
-                className="w-full min-h-[132px] px-6 rounded-[24px] text-[30px] font-bold shadow-sm transition active:scale-[0.99]"
-                style={{
-                  backgroundColor: isPausedForReading ? 'var(--secondary-foreground)' : 'var(--primary-foreground)',
-                  color: isPausedForReading ? 'var(--primary-foreground)' : 'var(--secondary-foreground)',
-                  border: '1px solid var(--border)',
-                }}
-              >
-                {isPausedForReading ? 'Continue' : 'Pause'}
-              </button>
-            </div>
+            {telepromptState ? (
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={handleTelepromptNext}
+                  disabled={!canAdvanceTeleprompt}
+                  className="col-span-3 min-h-[92px] px-6 rounded-[24px] text-[30px] font-bold shadow-sm transition active:scale-[0.99] disabled:opacity-55 disabled:active:scale-100"
+                  style={{
+                    backgroundColor: 'var(--secondary-foreground)',
+                    color: 'var(--primary-foreground)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  {canAdvanceTeleprompt ? `Next ${telepromptState.currentIndex + 1}/${telepromptState.total}` : 'Preparing'}
+                </button>
+                <button
+                  onClick={handleTelepromptBack}
+                  disabled={!canRewindTeleprompt}
+                  className="min-h-[58px] px-2 rounded-[18px] text-[18px] font-bold shadow-sm transition active:scale-[0.99] disabled:opacity-45 disabled:active:scale-100"
+                  style={{
+                    backgroundColor: 'var(--primary-foreground)',
+                    color: 'var(--secondary-foreground)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  Back
+                </button>
+                <button
+                  onClick={handlePauseToggle}
+                  className="min-h-[58px] px-2 rounded-[18px] text-[18px] font-bold shadow-sm transition active:scale-[0.99]"
+                  style={{
+                    backgroundColor: isPausedForReading ? 'var(--secondary-foreground)' : 'var(--primary-foreground)',
+                    color: isPausedForReading ? 'var(--primary-foreground)' : 'var(--secondary-foreground)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  {isPausedForReading ? 'Continue' : 'Pause'}
+                </button>
+                <button
+                  onClick={handleTelepromptCancel}
+                  className="min-h-[58px] px-2 rounded-[18px] text-[18px] font-bold shadow-sm transition active:scale-[0.99]"
+                  style={{
+                    backgroundColor: 'var(--primary-foreground)',
+                    color: '#b91c1c',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-stretch">
+                <button
+                  onClick={handlePauseToggle}
+                  className="w-full min-h-[132px] px-6 rounded-[24px] text-[30px] font-bold shadow-sm transition active:scale-[0.99]"
+                  style={{
+                    backgroundColor: isPausedForReading ? 'var(--secondary-foreground)' : 'var(--primary-foreground)',
+                    color: isPausedForReading ? 'var(--primary-foreground)' : 'var(--secondary-foreground)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  {isPausedForReading ? 'Continue' : 'Pause'}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

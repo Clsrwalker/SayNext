@@ -28,6 +28,10 @@ type StressCase = {
   language?: OutputLanguage;
   expectAny?: string[];
   rejectAny?: string[];
+  expectedMemoryRefs?: string[];
+  forbiddenMemoryRefs?: string[];
+  expectNoMemory?: boolean;
+  expectNoPersonalMemory?: boolean;
   maxWords?: number;
   minWords?: number;
   allowProjectMention?: boolean;
@@ -81,6 +85,57 @@ function hasChinese(text: string): boolean {
 function includesAny(text: string, terms: string[] = []): boolean {
   const normalized = text.toLowerCase();
   return terms.some((term) => normalized.includes(term.toLowerCase()));
+}
+
+function isPersonalOrProjectMemoryRef(ref: string): boolean {
+  const normalized = ref.toLowerCase();
+  return normalized.startsWith("xiang-")
+    || normalized.startsWith("doc:resume")
+    || normalized.startsWith("doc:saynext")
+    || normalized.startsWith("doc:elderalbum")
+    || normalized.startsWith("doc:joblens")
+    || normalized.startsWith("doc:dalparkaid");
+}
+
+function memoryRefMatches(ref: string, matcher: string): boolean {
+  const normalizedRef = ref.toLowerCase();
+  const normalizedMatcher = matcher.toLowerCase();
+  return normalizedRef === normalizedMatcher
+    || normalizedRef.startsWith(normalizedMatcher)
+    || normalizedRef.includes(normalizedMatcher);
+}
+
+function shouldDefaultRejectPersonalMemory(test: StressCase): boolean {
+  return ["open_dialogue", "open_meeting", "open_lecture", "open_news", "short_form"].includes(test.sourceKind);
+}
+
+function memoryProcessFlags(test: StressCase, memoryRefs: string[]): string[] {
+  const flags: string[] = [];
+  const topRefs = memoryRefs.slice(0, 3);
+
+  if (test.expectedMemoryRefs?.length && !topRefs.some((ref) => test.expectedMemoryRefs?.includes(ref))) {
+    flags.push(`process_missing_expected_memory:${test.expectedMemoryRefs.join("|")}`);
+  }
+
+  if (test.expectNoMemory && memoryRefs.length > 0) {
+    flags.push(`process_unexpected_memory:${memoryRefs.join("|")}`);
+  }
+
+  const rejectPersonalMemory = test.expectNoPersonalMemory ?? shouldDefaultRejectPersonalMemory(test);
+  const personalRefs = rejectPersonalMemory ? memoryRefs.filter(isPersonalOrProjectMemoryRef) : [];
+  if (personalRefs.length) {
+    flags.push(`process_unexpected_personal_memory:${personalRefs.join("|")}`);
+  }
+
+  const forbiddenRefs = test.forbiddenMemoryRefs ?? [];
+  const forbiddenHits = forbiddenRefs.length
+    ? memoryRefs.filter((ref) => forbiddenRefs.some((matcher) => memoryRefMatches(ref, matcher)))
+    : [];
+  if (forbiddenHits.length) {
+    flags.push(`process_forbidden_memory:${forbiddenHits.join("|")}`);
+  }
+
+  return flags;
 }
 
 function takeEvery<T>(items: T[], count: number): T[] {
@@ -162,6 +217,8 @@ function outputFlags(test: StressCase, output: string, memoryRefs: string[] = []
   const normalized = output.toLowerCase();
   const latest = compact(test.latest).toLowerCase();
 
+  flags.push(...memoryProcessFlags(test, memoryRefs));
+
   if (!output.trim()) flags.push("empty_output");
   if (/^\s*(you can say|you could say|suggested reply|answer:|reply:|analysis:)/i.test(output)) flags.push("label_or_meta_prefix");
   if (/\b(just say|you can mention|would work here|since there'?s no|the best answer|referring to|casual acknowledgment|professor is asking)\b/i.test(output)) flags.push("meta_instruction_in_output");
@@ -184,11 +241,11 @@ function outputFlags(test: StressCase, output: string, memoryRefs: string[] = []
     flags.push("attendance_wrong_reply");
   }
 
-  const projectTerms = ["saynext", "elder album", "elderalbum", "joblens", "dalparkaid", "dal parking", "aws", "lambda", "dynamodb", "firebase"];
+  const projectTermPattern = /\b(saynext|say next|elder album|elderalbum|joblens|dalparkaid|dal parking|aws|lambda|dynamodb|firebase)\b/i;
   const transcriptAllowsProject = includesAny(test.latest, [
     "project", "saynext", "say next", "elder", "joblens", "dalparkaid", "aws", "lambda", "dynamodb", "firebase", "cloud",
   ]);
-  if (!test.allowProjectMention && !transcriptAllowsProject && includesAny(output, projectTerms)) {
+  if (!test.allowProjectMention && !transcriptAllowsProject && projectTermPattern.test(output)) {
     flags.push("unwanted_project_or_tech_mention");
   }
 
@@ -202,6 +259,14 @@ function outputFlags(test: StressCase, output: string, memoryRefs: string[] = []
 
   if (test.sourceKind.startsWith("open_") && includesAny(output, [
     "xiang",
+    "my sister",
+    "my brother",
+    "my family",
+    "my mom",
+    "my dad",
+    "my childhood",
+    "when i was a child",
+    "back in chengdu",
     "my macs",
     "dalhousie",
     "chengdu",
@@ -213,6 +278,10 @@ function outputFlags(test: StressCase, output: string, memoryRefs: string[] = []
     "backend development",
   ])) {
     flags.push("personal_leak_on_public_transcript");
+  }
+
+  if (/\b(name|pronounce|pronunciation|called)\b/i.test(test.latest) && /\bdaewon\b/i.test(output)) {
+    flags.push("wrong_identity_name");
   }
 
   const personalExampleQuestion = /\b(describe|tell me about|a time when|an occasion when|have you ever|did you have|did you like|do you have a favou?rite|when you were young|when you were a child)\b/i.test(test.latest);
@@ -248,6 +317,54 @@ function analyzeOutput(test: StressCase, output: string, flags: string[], memory
 }
 
 function makeSyntheticCases(): StressCase[] {
+  const expectedMemoryById: Record<string, string[]> = {
+    daily_lunch: ["xiang-profile:lifestyle-food-health"],
+    daily_music: ["xiang-update:2026-05:music-listening", "xiang-profile:game-scripting-music"],
+    daily_parks: ["xiang-update:2026-05:parks-going-out"],
+    daily_sleep: ["xiang-update:2026-05:sleep-routine"],
+    daily_fruit: ["xiang-update:2026-05:fruit"],
+    daily_sports: ["xiang-update:2026-05:swimming"],
+    class_dl: ["knowledge:cs-interview:deep-learning"],
+    class_overfit: ["knowledge:cs-interview:ml-fundamentals"],
+    class_recommender: ["knowledge:cs-interview:recommender-systems"],
+    class_cloud_cost: ["knowledge:cs-interview:serverless-lambda", "knowledge:cs-interview:aws-well-architected"],
+    class_cap: ["knowledge:cs-interview:distributed-systems"],
+    class_index: ["knowledge:cs-interview:database-sql"],
+    class_network: ["knowledge:cs-interview:networking-web-protocols"],
+    class_security: ["knowledge:cs-interview:security-web-app"],
+    interview_self: ["xiang-profile:identity-education"],
+    interview_why_cs: ["xiang-update:2026-05:why-computer-science"],
+    interview_job: ["xiang-update:2026-05:future-job"],
+    interview_saynext: ["doc:saynext:positioning", "doc:saynext:runtime-flow", "xiang-profile:project-saynext"],
+    interview_elder: ["doc:elderalbum:aws-architecture-deployment", "xiang-profile:project-elder-album"],
+    interview_dalpark: ["doc:dalparkaid:overview-problem", "xiang-profile:project-dal-parking-aid"],
+    interview_joblens: ["doc:joblens:overview-problem", "doc:joblens:workflow-features"],
+    interview_bug: ["xiang-behavioral:saynext-hard-bug-context", "xiang-behavioral:saynext-local-llm-json-latency"],
+    interview_conflict: ["xiang-behavioral:team-disagreement-pattern"],
+    interview_feedback: ["xiang-behavioral:constructive-feedback-ai-like"],
+    interview_failure: ["xiang-behavioral:saynext-prompt-failure"],
+    asr_project_next: ["doc:saynext:positioning", "doc:saynext:interview-story", "xiang-profile:project-saynext"],
+    asr_cloud_why: ["xiang-update:2026-05:favorite-subjects", "knowledge:cs-interview:aws-well-architected"],
+    asr_lambda: ["knowledge:cs-interview:serverless-lambda"],
+    asr_supervise: ["knowledge:cs-interview:ml-fundamentals"],
+    asr_what_school: ["xiang-profile:china-school-history"],
+    asr_game: ["xiang-profile:favorite-games", "xiang-profile:games-general"],
+  };
+  const noMemoryIds = new Set(["asr_and", "asr_definitely", "asr_noise", "asr_present"]);
+  const forbidProjectForTechnicalIds = new Set([
+    "class_dl",
+    "class_overfit",
+    "class_regularization",
+    "class_cnn",
+    "class_recommender",
+    "class_cloud_cost",
+    "class_cap",
+    "class_index",
+    "class_network",
+    "class_security",
+    "asr_lambda",
+    "asr_supervise",
+  ]);
   const cases: StressCase[] = [
     ["daily_cold", "Daily Chat", "It's freezing outside today.", ["cold", "yeah", "outside", "halifax"], ["project", "career"], 24],
     ["daily_lunch", "Daily Chat", "What did you eat for lunch?", ["fried", "takeout", "food", "chicken", "simple"], ["cloud", "aws"], 35],
@@ -315,6 +432,11 @@ function makeSyntheticCases(): StressCase[] {
     latest: String(latest),
     expectAny: expectAny as string[],
     rejectAny: rejectAny as string[],
+    expectedMemoryRefs: expectedMemoryById[String(id)],
+    expectNoMemory: noMemoryIds.has(String(id)),
+    forbiddenMemoryRefs: forbidProjectForTechnicalIds.has(String(id))
+      ? ["xiang-", "doc:saynext", "doc:elderalbum", "doc:joblens", "doc:dalparkaid", "doc:resume"]
+      : undefined,
     maxWords: maxWords as number,
     allowProjectMention: String(id).includes("interview") || String(id).includes("project") || String(id).includes("meeting"),
     shouldBeGrounded: true,
@@ -325,11 +447,12 @@ function makeSyntheticCases(): StressCase[] {
     id: "zh_daily_weekend",
     sourceKind: "synthetic",
     scene: "Daily Chat",
-    latest: "ni zhoumo yiban ganma? (Chinese ASR mixed)",
+    latest: "你周末一般干嘛？",
     language: "chinese",
     allowChinese: true,
     expectAny: ["游戏", "休息", "动漫", "家", "可能"],
     rejectAny: ["aws", "cloud"],
+    expectedMemoryRefs: ["xiang-profile:favorite-games", "xiang-profile:games-general", "xiang-profile:lifestyle-food-health"],
     maxWords: 45,
     desired: "Chinese mode should answer naturally in Chinese.",
   });
@@ -387,6 +510,7 @@ function makeIeltsStressCase(question: string, index: number, sourceId = "ielts"
   const allowsProject = includesAny(latest, [
     "project", "technology", "computer", "work", "job", "study", "school", "university", "teamwork", "future",
   ]);
+  const isNarrativePrompt = /^(describe|tell me about|talk about)\b/i.test(latest);
 
   return {
     id: `${sourceId}_${index + 1}`,
@@ -394,7 +518,7 @@ function makeIeltsStressCase(question: string, index: number, sourceId = "ielts"
     scene: "Daily Chat",
     latest,
     rejectAny: ["passed away", "fatty liver", "uric acid", "permanent residency", "family was financially", "financially well-off"],
-    maxWords: allowsProject ? 70 : 55,
+    maxWords: allowsProject || isNarrativePrompt ? 70 : 55,
     allowProjectMention: allowsProject,
     shouldNotOvershare: true,
     desired: "IELTS-style speaking question should get a natural Xiang-style answer without oversharing or sounding scripted.",
@@ -589,7 +713,7 @@ async function evaluateCase(test: StressCase): Promise<CaseResult> {
   const output = response.type === "insight" ? response.output : "";
   const memoryRefs = conversationLogger.searchPersonalMemoriesHybrid(userId, test.latest, 3).map((memory) => memory.sourceRef || memory.title);
   const flags = outputFlags(test, output, memoryRefs);
-  const verdict: CaseResult["verdict"] = flags.some((flag) => flag.includes("sensitive") || flag.includes("personal_leak") || flag.includes("contains_rejected")) ? "bad" : flags.length ? "watch" : "good";
+  const verdict: CaseResult["verdict"] = flags.some((flag) => flag.startsWith("process_") || flag.includes("sensitive") || flag.includes("personal_leak") || flag.includes("contains_rejected")) ? "bad" : flags.length ? "watch" : "good";
 
   return {
     test,

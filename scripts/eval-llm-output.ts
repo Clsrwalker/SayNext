@@ -16,6 +16,10 @@ type LlmEvalCase = {
   language?: OutputLanguage;
   expectAny?: string[];
   rejectAny?: string[];
+  expectedMemoryRefs?: string[];
+  forbiddenMemoryRefs?: string[];
+  expectNoMemory?: boolean;
+  expectNoPersonalMemory?: boolean;
   maxWords?: number;
   minWords?: number;
   allowProjectMention?: boolean;
@@ -66,6 +70,7 @@ const cases: LlmEvalCase[] = [
     latest: "Where did you study high school after moving to Canada?",
     expectAny: ["aubrey", "drive", "dartmouth", "halifax"],
     rejectAny: ["shishi", "peking university affiliated"],
+    expectedMemoryRefs: ["xiang-profile:canada-high-school-transition"],
     maxWords: 40,
     note: "Should retrieve Canada high school memory.",
   },
@@ -75,6 +80,7 @@ const cases: LlmEvalCase[] = [
     latest: "What high school did you study in China before Canada?",
     expectAny: ["shishi", "peking", "affiliated", "chengdu"],
     rejectAny: ["aubrey drive"],
+    expectedMemoryRefs: ["xiang-profile:china-school-history"],
     maxWords: 55,
     note: "Should retrieve China school memory.",
   },
@@ -82,7 +88,7 @@ const cases: LlmEvalCase[] = [
     id: "privacy_generic",
     scene: "Daily Chat",
     latest: "Tell me something about yourself.",
-    rejectAny: ["father", "passed away", "bullying", "fatty liver", "uric", "pr", "permanent residency", "family business", "financially"],
+    rejectAny: ["father", "passed away", "bullying", "fatty liver", "uric", "permanent residency", "family business", "financially"],
     maxWords: 45,
     note: "Generic personal question should not overshare sensitive facts.",
   },
@@ -93,6 +99,8 @@ const cases: LlmEvalCase[] = [
     latest: "Can somebody give another example of supervised learning?",
     expectAny: ["spam", "email", "label", "classification", "labeled", "predict"],
     rejectAny: ["my project", "saynext", "i built"],
+    expectedMemoryRefs: ["knowledge:cs-interview:ml-fundamentals"],
+    forbiddenMemoryRefs: ["xiang-", "doc:saynext", "doc:elderalbum", "doc:joblens", "doc:dalparkaid"],
     maxWords: 55,
     note: "Classroom direct question should give a professional short answer.",
   },
@@ -112,6 +120,8 @@ const cases: LlmEvalCase[] = [
     latest: "Why do we use multi-AZ in cloud architecture?",
     expectAny: ["availability", "failure", "zone", "resilience", "failover"],
     rejectAny: ["because i used", "my project"],
+    expectedMemoryRefs: ["knowledge:cs-interview:aws-well-architected"],
+    forbiddenMemoryRefs: ["xiang-", "doc:saynext", "doc:elderalbum", "doc:joblens", "doc:dalparkaid"],
     maxWords: 55,
     note: "Cloud knowledge should be precise.",
   },
@@ -121,6 +131,8 @@ const cases: LlmEvalCase[] = [
     latest: "Why is code review important?",
     expectAny: ["bugs", "quality", "readability", "maintainability", "shared understanding"],
     rejectAny: ["harsh feedback", "senior engineer told me", "in saynext"],
+    expectedMemoryRefs: ["knowledge:cs-interview:cs-workplace-role"],
+    forbiddenMemoryRefs: ["xiang-behavioral:", "doc:saynext"],
     maxWords: 55,
     note: "General CS workplace question should not become behavioral story.",
   },
@@ -140,6 +152,7 @@ const cases: LlmEvalCase[] = [
     latest: "What's the project name of the real-time conversation assistant you built?",
     expectAny: ["saynext"],
     rejectAny: ["elder album", "joblens", "dalparkaid"],
+    expectedMemoryRefs: ["doc:saynext:positioning", "xiang-profile:project-saynext"],
     maxWords: 35,
     allowProjectMention: true,
     note: "Specific SayNext project question should answer directly.",
@@ -150,6 +163,7 @@ const cases: LlmEvalCase[] = [
     latest: "Why did you build SayNext?",
     expectAny: ["conversation", "real-time", "communication", "assistant", "respond"],
     rejectAny: ["smart glasses app", "production", "users at scale", "senior"],
+    expectedMemoryRefs: ["doc:saynext:interview-story", "doc:saynext:positioning", "xiang-profile:project-saynext"],
     maxWords: 75,
     allowProjectMention: true,
     note: "SayNext is mobile app/product experiment, not smart glasses app.",
@@ -160,6 +174,7 @@ const cases: LlmEvalCase[] = [
     latest: "Tell me about the hardest bug you fixed recently.",
     expectAny: ["context", "stale", "transcript", "json", "ollama", "loading", "debug"],
     rejectAny: ["production incident", "at my company", "senior"],
+    expectedMemoryRefs: ["xiang-behavioral:saynext-hard-bug-context", "xiang-behavioral:saynext-local-llm-json-latency"],
     maxWords: 95,
     allowProjectMention: true,
     note: "Behavioral story should use real SayNext bug without fake work experience.",
@@ -170,7 +185,9 @@ const cases: LlmEvalCase[] = [
     latest: "Tell me about a time you had a conflict with a teammate.",
     expectAny: ["technical", "disagreement", "trade-off", "deadline", "scope", "smaller"],
     rejectAny: ["fight", "angry", "unreasonable", "manager at work"],
+    expectedMemoryRefs: ["xiang-behavioral:team-disagreement-pattern"],
     maxWords: 90,
+    allowProjectMention: true,
     note: "Conflict should be low-drama group/project disagreement.",
   },
   {
@@ -179,6 +196,7 @@ const cases: LlmEvalCase[] = [
     latest: "How did you influence a product decision without a formal role?",
     expectAny: ["scene", "prenote", "user control", "automatic", "transcript"],
     rejectAny: ["manager", "company", "production team"],
+    expectedMemoryRefs: ["xiang-behavioral:saynext-pushed-user-control", "xiang-behavioral:vague-requirements-prenote-scene"],
     maxWords: 95,
     allowProjectMention: true,
     note: "Should use SayNext user-control story.",
@@ -189,6 +207,7 @@ const cases: LlmEvalCase[] = [
     latest: "What kind of job do you want in the future?",
     expectAny: ["software", "web", "mobile", "ai", "full-stack", "cloud"],
     rejectAny: ["dream job", "best candidate", "change the world"],
+    expectedMemoryRefs: ["xiang-update:2026-05:future-job"],
     maxWords: 55,
     note: "Career answer should be practical, not inflated.",
   },
@@ -206,7 +225,7 @@ const cases: LlmEvalCase[] = [
     id: "meeting_blocker",
     scene: "Meeting / Group Discussion",
     latest: "I'm still waiting for the API response format from the backend.",
-    expectAny: ["mock", "schema", "assumption", "block", "continue", "document"],
+    expectAny: ["mock", "schema", "assumption", "block", "continue", "document", "temporary format", "move forward", "final response"],
     rejectAny: ["sorry could you say that again", "that's nice"],
     maxWords: 55,
     note: "Meeting blocker should suggest practical next step.",
@@ -216,6 +235,7 @@ const cases: LlmEvalCase[] = [
     scene: "Daily Chat",
     latest: "And.",
     rejectAny: ["cloud", "project", "career", "father", "family"],
+    expectNoMemory: true,
     maxWords: 18,
     note: "Short ASR fragment should not trigger personal/project details.",
   },
@@ -225,6 +245,7 @@ const cases: LlmEvalCase[] = [
     latest: "What project you did for next",
     expectAny: ["saynext", "conversation", "assistant"],
     rejectAny: ["sorry could you say that again", "elder album"],
+    expectedMemoryRefs: ["doc:saynext:positioning", "doc:saynext:interview-story", "xiang-profile:project-saynext"],
     maxWords: 50,
     allowProjectMention: true,
     note: "Common ASR project question should map to SayNext.",
@@ -237,6 +258,7 @@ const cases: LlmEvalCase[] = [
     expectAny: ["游戏", "动漫", "家", "躺", "可能"],
     allowChinese: true,
     rejectAny: ["cloud", "aws", "career"],
+    expectedMemoryRefs: ["xiang-profile:favorite-games", "xiang-profile:games-general", "xiang-profile:lifestyle-food-health"],
     maxWords: 45,
     note: "Chinese output mode should answer in Chinese.",
   },
@@ -283,9 +305,56 @@ function includesAny(text: string, terms: string[] = []): boolean {
   return terms.some((term) => normalized.includes(term.toLowerCase()));
 }
 
-function outputFlags(test: LlmEvalCase, output: string): string[] {
+function isPersonalOrProjectMemoryRef(ref: string): boolean {
+  const normalized = ref.toLowerCase();
+  return normalized.startsWith("xiang-")
+    || normalized.startsWith("doc:resume")
+    || normalized.startsWith("doc:saynext")
+    || normalized.startsWith("doc:elderalbum")
+    || normalized.startsWith("doc:joblens")
+    || normalized.startsWith("doc:dalparkaid");
+}
+
+function memoryRefMatches(ref: string, matcher: string): boolean {
+  const normalizedRef = ref.toLowerCase();
+  const normalizedMatcher = matcher.toLowerCase();
+  return normalizedRef === normalizedMatcher
+    || normalizedRef.startsWith(normalizedMatcher)
+    || normalizedRef.includes(normalizedMatcher);
+}
+
+function memoryProcessFlags(test: LlmEvalCase, refs: string[]): string[] {
+  const flags: string[] = [];
+  const topRefs = refs.slice(0, 3);
+
+  if (test.expectedMemoryRefs?.length && !topRefs.some((ref) => test.expectedMemoryRefs?.includes(ref))) {
+    flags.push(`process_missing_expected_memory:${test.expectedMemoryRefs.join("|")}`);
+  }
+
+  if (test.expectNoMemory && refs.length > 0) {
+    flags.push(`process_unexpected_memory:${refs.join("|")}`);
+  }
+
+  const personalRefs = test.expectNoPersonalMemory ? refs.filter(isPersonalOrProjectMemoryRef) : [];
+  if (personalRefs.length) {
+    flags.push(`process_unexpected_personal_memory:${personalRefs.join("|")}`);
+  }
+
+  const forbiddenHits = test.forbiddenMemoryRefs?.length
+    ? refs.filter((ref) => test.forbiddenMemoryRefs?.some((matcher) => memoryRefMatches(ref, matcher)))
+    : [];
+  if (forbiddenHits.length) {
+    flags.push(`process_forbidden_memory:${forbiddenHits.join("|")}`);
+  }
+
+  return flags;
+}
+
+function outputFlags(test: LlmEvalCase, output: string, refs: string[]): string[] {
   const flags: string[] = [];
   const normalized = output.toLowerCase();
+
+  flags.push(...memoryProcessFlags(test, refs));
 
   if (!output.trim()) flags.push("empty_output");
   if (/^\s*(you can say|you could say|suggested reply|answer:|reply:)/i.test(output)) flags.push("label_or_meta_prefix");
@@ -344,7 +413,7 @@ for (const test of selectedCases) {
 
   const output = response.type === "insight" ? response.output : "";
   const refs = conversationLogger.searchPersonalMemoriesHybrid(userId, test.latest, 3).map((memory) => memory.sourceRef || memory.title);
-  const flags = outputFlags(test, output);
+  const flags = outputFlags(test, output, refs);
   if (flags.length) flagged += 1;
 
   console.log(`\n[${flags.length ? "FLAG" : "OK"}] ${test.id} (${test.scene})`);

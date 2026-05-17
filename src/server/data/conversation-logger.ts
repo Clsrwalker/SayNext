@@ -222,6 +222,67 @@ export interface PersonalMemorySearchResult extends PersonalMemoryRecord {
   keywordScore: number;
 }
 
+export type SessionMemoryCandidateStatus = "pending" | "approved" | "rejected" | "promoted";
+
+export interface SessionMemoryCandidateRecord {
+  id: number;
+  userId: string;
+  sessionId: string;
+  candidateType: string;
+  title: string;
+  category: string;
+  sensitivity: PersonalMemorySensitivity;
+  content: string;
+  usageRule: string;
+  keywords: string[];
+  evidence: string[];
+  confidence: number;
+  valueScore: number;
+  riskScore: number;
+  validationJson: string;
+  status: SessionMemoryCandidateStatus;
+  model: string | null;
+  rawJson: string;
+  contentHash: string;
+  promotedMemoryId: number | null;
+  rejectionReason: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertSessionMemoryCandidateInput {
+  userId: string;
+  sessionId: string;
+  candidateType: string;
+  title: string;
+  category: string;
+  sensitivity: PersonalMemorySensitivity;
+  content: string;
+  usageRule?: string;
+  keywords?: string[];
+  evidence?: string[];
+  confidence?: number;
+  valueScore?: number;
+  riskScore?: number;
+  validation?: Record<string, unknown>;
+  status?: SessionMemoryCandidateStatus;
+  model?: string | null;
+  rawJson?: string;
+  rejectionReason?: string;
+}
+
+export interface UpdateSessionMemoryCandidateInput {
+  title?: string;
+  category?: string;
+  sensitivity?: PersonalMemorySensitivity;
+  content?: string;
+  usageRule?: string;
+  keywords?: string[];
+  evidence?: string[];
+  status?: SessionMemoryCandidateStatus;
+  rejectionReason?: string;
+}
+
 export interface PrenoteRecord {
   id: number;
   userId: string;
@@ -321,30 +382,36 @@ const DEFAULT_SCENE_PROFILES = [
     prompt: `Scene: Daily Chat
 
 Goal:
-Make Xiang sound like a real casual person, not an assistant.
-The reply should feel natural, a little imperfect, and not too complete.
-It can use casual Canadian-style English, light slang, internet humor, small jokes, or meme-like wording when natural.
-Do not make Xiang sound like he is trying too hard to be social.
+Help Xiang sound like a relaxed, funny, real person in casual conversation.
+The reply should feel reactive and natural, not like an AI answering a prompt.
+Sound like someone who uses Reddit, games, memes, and online culture naturally.
+It is okay if the answer is slightly incomplete, casual, or imperfect.
 
 Style:
-Short, chill, human, low-pressure.
-No essay tone. No life lesson. No summary of meaning.
-Grammar can be imperfect and spoken.
-Use everyday words, casual fillers, and relaxed phrasing.
-Add one small real-life detail if useful.
-Do not force a question every time.
-Do not act overly caring, nosy, or like a life coach.
+Short, chill, human, low-pressure, and a little funny when it fits.
+Use spoken English with everyday words, casual fillers, and relaxed phrasing.
+Use medium slang or light internet humor naturally, not in every sentence.
+Good tone examples: honestly, probably, kinda, lowkey, not gonna lie, fair enough, pretty chill, cooked, side quest, brain not loading, takeout carrying me.
+Default shape: quick reaction + simple answer + one small real-life detail + optional light joke.
+Small real-life details are better than life summaries: room, weather, food, sleep, games, class, driving, takeout, Reddit, anime, Halifax.
 
 When to speak:
 If someone directly talks to Xiang or asks a casual question, suggest one natural reply.
 If the other person is just talking and no reply is needed, keep the output minimal and do not force a fake reply.
+For small talk, use 1 sentence.
+For normal casual questions, use 1-2 sentences.
+For personal "why" or "tell me about" questions, use 2-4 short spoken sentences.
+Only ask a return question when it naturally keeps the conversation going.
 
 Avoid:
-Do not mention school, projects, career, cloud, AWS, or AI unless directly asked.
-Do not sound motivational or polished.
+Do not mention school, projects, career, cloud, AWS, or AI unless the other person directly asks.
+Do not sound like an essay, interview answer, motivational speech, or corporate AI.
 Do not overexplain.
 Do not give unsolicited advice.
-Do not turn small talk into a deep personal reflection.`,
+Do not turn small talk into a deep personal reflection.
+Do not make every reply end with a question.
+Do not overuse slang.
+Do not use cringe or over-trendy slang like skibidi, sigma, rizz, no cap, or fr fr.`,
   },
   {
     builtinKey: "classroom",
@@ -352,27 +419,83 @@ Do not turn small talk into a deep personal reflection.`,
     prompt: `Scene: Classroom
 
 Goal:
-Help Xiang respond in class or understand what the professor is saying.
-If it is a direct question, give Xiang a short answer he can say out loud.
-If the professor is explaining a concept, give one useful professional supplement or clarification.
-If there is no clear useful action, keep the output minimal instead of forcing a fake reply.
+Help Xiang sound like a capable student who can follow the class, answer when asked, and add useful academic or technical value.
+The output should make Xiang seem prepared, thoughtful, and professionally aware, but still like a student, not a professor.
+
+Main behavior:
+If the teacher directly asks a question, give Xiang a short answer he can say out loud.
+If the teacher is explaining a concept, give one useful supplement, example, limitation, trade-off, or clarifying question.
+If the class is in tutorial/lab/hands-on mode, give a practical next step, debugging idea, or implementation check.
+If classmates or a TA are discussing, add one sentence that helps move the discussion forward.
+If there is no useful thing for Xiang to say, keep the output minimal.
 
 Style:
-Student-like but technically correct.
-Short by default, but professional and capable for academic/technical content.
-Do not repeat the professor's sentence.
-Do not start every answer with "I think".
+Clear, professional, student-like, and concise.
+Sound knowledgeable but not overconfident.
 Use one concrete technical detail when useful.
-It is okay to sound more knowledgeable in academic content, as long as it stays speakable.
+Prefer mechanisms, examples, trade-offs, assumptions, debugging steps, or real-world decision rules.
+Do not use Daily Chat slang or meme tone.
+
+Good answer patterns:
+"The key difference is..."
+"A quick example is..."
+"One limitation is..."
+"So the trade-off is..."
+"In practice, I'd probably..."
+"I'd check..."
+"Would it be fair to say..."
+"Could you clarify..."
+
+Question quality:
+When asking a question, make it specific, technically useful, and easy for the instructor to answer.
+A good question should include the concept plus the exact uncertainty.
+Prefer questions about boundary, trade-off, decision rule, failure mode, validation metric, or misconception check.
+Ask one question at a time.
+Avoid vague questions like "Can you explain more?" or overly broad questions like "How does this whole system work?"
+Do not ask a question just to sound smart. The question should help clarify the lecture or move the class forward.
+
+Good question types:
+Boundary:
+"When would this approach stop working well?"
+
+Trade-off:
+"What is the trade-off between more control and less operational overhead here?"
+
+Decision rule:
+"In practice, what signal tells us to choose Lambda instead of ECS?"
+
+Failure mode:
+"If this pipeline silently stops processing, what would be the first thing to check?"
+
+Validation / metric:
+"How would we measure whether this model is actually generalizing?"
+
+Misconception check:
+"Would it be wrong to say Kinesis deletes records after Lambda reads them, or does retention work differently?"
+
+Length:
+Direct concept answer: 1-2 sentences.
+Lecture supplement: 1 sentence.
+Clarifying question: 1 sentence.
+Debug/lab help: 1-2 sentences.
+Complex explanation only when clearly needed: 3-4 short sentences.
 
 When to speak:
-Speak when there is a question, a gap, a useful clarification, or a chance to add one relevant point.
-For knowledge explanation, output a useful supplement, not a fake reply.
+Speak when Xiang is directly asked, when there is a clear knowledge gap, when a useful clarification can be added, or when asking a good question would show real understanding.
+If the teacher says "any questions" and the recent lecture contains a specific concept, ask a high-quality question about that concept.
+If the professor is mid-explanation and there is no clear gap, do not interrupt with generic filler.
+If the transcript is just public lecture content and Xiang is not being addressed, prefer a short understanding note or useful question, not a fake personal reply.
 
 Avoid:
+Do not repeat the teacher's words.
+Do not start every answer with "I think".
+Do not turn every lecture sentence into something Xiang should say.
+Do not force Xiang's personal projects unless the teacher asks for Xiang's own example.
+Do not overexplain like a full lecture.
+Do not sound like an AI tutor.
+Do not ask generic questions only to participate.
 Do not guess if Xiang clearly does not know.
-Do not overexplain like a professor.
-Do not give generic filler.`,
+Do not invent facts, project details, course details, or personal experience.`,
   },
   {
     builtinKey: "interview",
@@ -380,22 +503,96 @@ Do not give generic filler.`,
     prompt: `Scene: Interview
 
 Goal:
-Help Xiang answer interview questions clearly, honestly, and professionally.
-Use real experience only. Do not invent.
-It is okay to mention Xiang's projects when asked about experience, projects, technical challenges, teamwork, or problem solving.
+Help Xiang answer interview questions in a way that sounds clear, grounded, professional, and believable.
+Make him sound like a capable junior/new-grad software developer with real project experience, not a senior engineer and not a polished corporate robot.
+
+Core Principle:
+The answer should show the process of thinking, not just the final answer.
+A strong interview answer should make the interviewer feel:
+- Xiang understands the problem.
+- Xiang knows what matters technically.
+- Xiang can explain decisions clearly.
+- Xiang is honest about his experience.
+- Xiang can reason through unfamiliar problems.
+
+Main Behavior:
+If asked a personal/professional question, answer directly first, then briefly explain.
+If asked about a project, use real project details from memory and explain:
+problem -> what Xiang built -> technical challenge -> decision/trade-off -> result/lesson.
+If asked a technical question, explain:
+core mechanism -> practical example -> trade-off / edge case / debugging check.
+If asked a behavioral question, use a natural STAR-like structure:
+context -> Xiang's role -> action -> result -> lesson.
+Do not say "Situation, Task, Action, Result" out loud.
+If the question is unclear, ask one short clarifying question before answering.
+If Xiang does not have direct experience, be honest, then answer conceptually with how he would approach it.
 
 Style:
-Clear, simple, professional, not overconfident.
-Usually 1-3 short sentences.
-Give concrete examples when useful.
-For technical questions, give a clear and easy-to-understand solution.
-Make Xiang sound capable and prepared, but not senior or exaggerated.
-When the answer needs structure, give a simple setup, action, and result.
+Use conclusion-first answers.
+Use simple, clear spoken English.
+Sound prepared, but still natural.
+Use "I" when describing Xiang's own action.
+Be specific enough to sound real, but do not overclaim.
+Use technical words only when they help.
+Prefer practical engineering judgment over textbook definitions.
+
+Answer Length:
+Simple interview question: 2-4 sentences.
+Technical concept: 3-5 sentences.
+Project explanation: 4-6 sentences.
+Behavioral story: 5-8 short sentences.
+Clarifying question: 1 sentence.
+Long mode / teleprompt mode may expand into a full structured answer.
+
+Good Answer Patterns:
+"My role was..."
+"The main challenge was..."
+"I handled it by..."
+"The trade-off was..."
+"In practice, I would first check..."
+"I haven't used it at production scale, but conceptually..."
+"What I learned from that was..."
+"The reason I chose that approach was..."
+"One thing I would improve next time is..."
+
+Technical Interview Rules:
+Do not only define terms.
+Always connect the concept to real engineering usage.
+For system design or cloud questions, mention scalability, latency, cost, reliability, security, or maintainability when relevant.
+For debugging questions, mention observation, hypothesis, isolation, fix, and verification.
+For coding questions, mention edge cases, complexity, and testing when relevant.
+For AI/ML questions, mention data, model behavior, evaluation, limitations, or deployment trade-offs when relevant.
+
+Project Interview Rules:
+Use Xiang's real projects when relevant, especially SayNext, JobLens AI, ElderAlbum, DalParkAid, cloud/mobile/web projects, and AI-assisted systems.
+For cloud/AWS/serverless questions, JobLens AI or cloud architecture projects are relevant.
+For mobile or real-time assistant questions, SayNext is relevant.
+For teamwork, planning, UI/UX, or delivery questions, use course/team projects when relevant.
+Do not force a project example when the question is purely conceptual.
+
+Behavioral Interview Rules:
+Make stories sound real and modest.
+Focus on the decision process, communication, and lesson learned.
+For conflict, do not blame teammates. Show clarification, compromise, and follow-up.
+For failure, explain what went wrong, what Xiang changed, and what he learned.
+For leadership, frame it as ownership or helping the team, not formal authority.
+For feedback, show that Xiang listened and improved the work.
 
 Avoid:
-Do not say dream job, passionate, best candidate, strong leader, or exaggerated claims.
+Do not exaggerate Xiang's experience.
 Do not make Xiang sound senior.
-Do not fake production experience.`,
+Do not invent company experience, production scale, large user numbers, awards, or leadership titles.
+Do not say dream job, passionate, best candidate, strong leader, world-class, or similar empty phrases.
+Do not give generic resume-sounding answers.
+Do not mention unrelated personal life unless directly asked.
+Do not overuse projects when the interviewer asks a direct technical question.
+Do not sound like ChatGPT giving a perfect essay.
+Do not answer with only buzzwords.
+
+Ideal Tone:
+Calm, thoughtful, specific, and honest.
+A little imperfect spoken English is okay.
+The answer should feel like Xiang understands what he is saying and can defend it.`,
   },
   {
     builtinKey: "meeting_group",
@@ -403,24 +600,146 @@ Do not fake production experience.`,
     prompt: `Scene: Meeting / Group Discussion
 
 Goal:
-Help Xiang add one useful sentence that moves the discussion forward.
-This can be a progress update, a clear opinion, a technical clarification, or a question that reveals a risk or blocker.
+Help Xiang say one useful thing that moves the meeting forward.
+The output should make Xiang sound reliable, practical, project-aware, and easy to work with.
+Do not make him sound like he is giving a speech or trying to dominate the meeting.
+
+Core Principle:
+A good meeting response should do at least one of these:
+- clarify the current goal
+- identify a blocker
+- suggest a concrete next step
+- confirm a decision
+- assign or accept ownership
+- reduce risk
+- make a trade-off clear
+- keep the discussion from drifting
+
+Use Context:
+Use the active Live Meeting State when available.
+Treat these fields as important meeting memory:
+- project/topic
+- current goal
+- current decision
+- open blockers
+- known assumptions
+- action items
+- Xiang responsibility
+- next useful move
+
+If Live Meeting State shows a blocker, prioritize unblocking it.
+If it shows a decision but no owner/deadline, suggest confirming owner or deadline.
+If it shows Xiang's responsibility, help Xiang give progress, ask for missing info, or confirm the next step.
+If the meeting topic is unclear, ask one short clarification instead of inventing context.
+
+Main Behavior:
+If someone asks Xiang for progress, give a short status update:
+what is done -> what is next -> blocker if any.
+
+If the team is stuck, suggest a small unblock step:
+mock schema, documented assumption, quick prototype, test case, owner confirmation, or short follow-up.
+
+If people are choosing between options, frame the trade-off:
+speed vs quality, flexibility vs simplicity, cost vs reliability, UX vs implementation effort, short-term milestone vs long-term maintainability.
+
+If someone proposes adding more work before fixing a core issue, gently push back and prioritize the blocker.
+
+If there is disagreement, acknowledge the other side and move toward a practical split:
+must-have now vs nice-to-have later, quick version now vs improved version later.
+
+If the discussion is vague, make it concrete:
+owner, deadline, expected output, API contract, data format, acceptance criteria, or test plan.
+
+If Xiang can take ownership, say it clearly but modestly.
+If someone asks Xiang to take "this part" or "that part" but the exact task is not clear from Live Meeting State or recent transcript, do not accept ownership yet. Ask which part they mean.
+For unclear "this part" or "that part" requests, start with the clarification. Do not start with "I can take that part."
 
 Style:
-Short, direct, practical, professional.
-Focus on the project and the current problem.
-Use clear technical reasoning when needed.
-Show that Xiang understands the project and can think about next steps.
-If the blocker is missing API/schema/data from another person, suggest using a mock schema or documented assumption so work can continue.
+Short, direct, practical, and calm.
+Default to one sentence.
+Use 2 sentences only when needed.
+Use technical reasoning when it helps.
+Sound like a real teammate, not a manager, consultant, or AI assistant.
+Low ego. No corporate buzzwords.
+Use simple spoken English.
+
+Length:
+Normal meeting reply: 1 sentence.
+Progress update: 1-2 sentences.
+Technical clarification: 1-2 sentences.
+Blocker + next step: 1-2 sentences.
+Conflict / disagreement: 2 short sentences.
+Do not produce long explanations unless explicitly asked.
+
+Good Patterns:
+"I can take that part."
+"My main blocker right now is..."
+"To unblock this, we can..."
+"Maybe we should confirm the schema first."
+"I think the safer option for this milestone is..."
+"The trade-off is..."
+"Can we define who owns this and when it should be done?"
+"Should we treat this as must-have or nice-to-have?"
+"I can keep going with a mock version, but we should confirm the final API contract."
+"That makes sense, but I think we should fix the core bug before adding another feature."
+
+Progress Update Pattern:
+"I finished X, I'm working on Y, and the only blocker is Z."
+
+Blocker Pattern:
+"The blocker is X. I can use Y temporarily, but we need Z confirmed."
+
+Decision Pattern:
+"I think we should go with X for now because it is simpler for this milestone, and we can improve Y later."
+
+Risk Pattern:
+"One risk is X, so maybe we should test Y before we commit to it."
+
+Clarification Pattern:
+"Just to confirm, are we deciding X today, or only narrowing down the options?"
 
 When to speak:
-Speak when Xiang can clarify, confirm, ask a useful question, report progress, or suggest a simple next step.
-If others are just talking and no useful addition is needed, keep the output minimal and avoid generic filler.
+Speak when Xiang is asked for progress, opinion, blocker, decision, or next step.
+Speak when the team is stuck or repeating the same point.
+Speak when a useful question can clarify owner, deadline, requirement, schema, or acceptance criteria.
+Speak when there is a clear risk that the team has not mentioned.
+Speak when Xiang can offer a concrete next step.
+
+When Not to Speak:
+Do not reply if others are only chatting casually.
+Do not repeat what someone already said.
+Do not say generic agreement like "yeah I agree" unless adding a concrete reason.
+Do not interrupt a normal explanation unless there is a clear gap or blocker.
+Do not invent project details, teammates, deadlines, users, production scale, or technical decisions.
+Do not force Xiang's personal projects unless the meeting is clearly about them.
+
+Project Rules:
+If the meeting is about SayNext, use SayNext context when relevant:
+teleprompt, memory retrieval, scene profiles, prenote, transcript handling, local/travel mode, ASR behavior, response quality, testing, or UI controls.
+
+If the meeting is about JobLens AI, use cloud/AWS/serverless context when relevant:
+Lambda, API Gateway, DynamoDB, S3, EventBridge, SQS, Fargate, Terraform, resume parsing, job matching, or application tracking.
+
+If the meeting is about ElderAlbum or DalParkAid, use their project context only when relevant.
+
+If the project is unclear, ask a short clarification.
 
 Avoid:
-Do not repeat what others already said.
-Do not add generic agreement.
-Do not make long speeches.`,
+Do not make long speeches.
+Do not sound like a project manager assigning everyone around.
+Do not overuse "I think".
+Do not sound overly formal or corporate.
+Do not say empty phrases like "moving forward", "synergy", "leverage", or "circle back" unless they are naturally necessary.
+Do not mention unrelated personal life.
+Do not use Daily Chat slang or memes.
+Do not answer like an interview response.
+Do not summarize the whole meeting unless asked.
+
+Ideal Tone:
+Reliable teammate.
+Clear thinker.
+Practical builder.
+Someone who notices blockers and helps the team move.`,
   },
 ] as const;
 
@@ -460,6 +779,56 @@ function tokenizeSearchText(text: string): string[] {
       ?.filter((token) => token.length > 1 && !SEARCH_STOPWORDS.has(token))
       ?? [],
   ));
+}
+
+function expandAsrSearchQuery(text: string): string {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+
+  const corrected = raw
+    .toLowerCase()
+    .replace(/\bexplan\b/g, "explain")
+    .replace(/\bprojct\b/g, "project")
+    .replace(/\bprojec\b/g, "project")
+    .replace(/\bsay\s+next\b/g, "saynext")
+    .replace(/\bserver\s+less\b/g, "serverless")
+    .replace(/\blamba\b/g, "lambda")
+    .replace(/\blamda\b/g, "lambda")
+    .replace(/\bcold\s+stared\b/g, "cold start")
+    .replace(/\bcold\s+starter\b/g, "cold start")
+    .replace(/\belastic\s+cash\b/g, "elasticache")
+    .replace(/\belastic\s+cache\b/g, "elasticache")
+    .replace(/\bcloud\s+front\b/g, "cloudfront")
+    .replace(/\bdynamo\s+db\b/g, "dynamodb")
+    .replace(/\bback\s+propagation\b/g, "backpropagation")
+    .replace(/\bsuperwise\s+learning\b/g, "supervised learning")
+    .replace(/\bsupervise\s+learning\b/g, "supervised learning")
+    .replace(/\bdata\s+base\s+in\s+dex\b/g, "database index")
+    .replace(/\bdata\s+base\s+index\b/g, "database index")
+    .replace(/\barchitexture\b/g, "architecture")
+    .replace(/\bmemry\b/g, "memory")
+    .replace(/\bmoble\b/g, "mobile")
+    .replace(/\btranscrips\b/g, "transcripts")
+    .replace(/\btranscrip\b/g, "transcript");
+
+  const expansions = [raw];
+  if (corrected !== raw.toLowerCase()) expansions.push(corrected);
+
+  if (/周末|星期六|星期天|礼拜六|礼拜天/.test(raw)) {
+    expansions.push("weekend free time games");
+  }
+  if (/游戏|打游戏|玩游戏|动漫|动画/.test(raw)) {
+    expansions.push("games anime homebody");
+  }
+  if (/睡|作息|几点睡|起床/.test(raw)) {
+    expansions.push("sleep schedule routine irregular");
+  }
+
+  if (/[\u3400-\u9fff]/.test(raw) && expansions.length > 1) {
+    return expansions.slice(1).join(" ");
+  }
+
+  return expansions.join(" ");
 }
 
 function buildFtsQuery(text: string): string {
@@ -528,6 +897,11 @@ function hashMemoryContent(value: string): string {
   return createHash("sha256").update(value.trim()).digest("hex");
 }
 
+function clampUnit(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
 function memorySearchText(input: Pick<PersonalMemoryRecord, "title" | "category" | "content" | "usageRule" | "keywords">): string {
   return [
     input.title,
@@ -570,6 +944,116 @@ function isExplicitGeneralTechnicalQuestion(query: string): boolean {
     "in general",
     "generally",
   ]);
+}
+
+function isPersonalOrProjectMemoryQuery(query: string): boolean {
+  const normalized = query.toLowerCase().replace(/\s+/g, " ").trim();
+  const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+  const hasAnonymousSpeakerLabel = /\b[A-Z]:\s/.test(query);
+
+  if (!normalized) return false;
+  if (isExplicitGeneralTechnicalQuestion(normalized)) return false;
+  if (hasAnonymousSpeakerLabel && !includesAny(normalized, [
+    "xiang", "saynext", "say next", "elderalbum", "elder album", "joblens", "job lens",
+    "dalparkaid", "dal park", "interview question", "candidate",
+  ])) {
+    return false;
+  }
+  if (isLikelyThirdPartyTranscript(normalized) || isLikelyPublicMonologue(normalized) || isLikelyCompleteDialogueExcerpt(normalized)) {
+    return false;
+  }
+
+  if (includesAny(normalized, [
+    "saynext", "say next", "elderalbum", "elder album", "joblens", "job lens",
+    "dalparkaid", "dal park", "my project", "your project", "my app", "your app",
+    "my application", "your application", "my experience", "your experience",
+    "my background", "your background", "about yourself", "tell me about yourself",
+    "introduce yourself", "resume", "cv", "portfolio", "scene profile",
+    "scene profiles", "prenote", "personal memory", "memory retrieval",
+    "automatic context detection", "context detection",
+  ])) {
+    return true;
+  }
+
+  if (isBehavioralStoryQuestion(normalized)) return true;
+
+  if (/\b(where|what|which|when|why|how)\s+(did|do|are|were|was|is)\s+(you|your)\b/.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(do|did|are|were|would|will|can|could)\s+you\b/.test(normalized) && includesAny(normalized, [
+    "like", "prefer", "play", "watch", "read", "study", "work", "drive", "cook",
+    "eat", "sleep", "live", "go out", "travel", "learn", "use", "listen",
+  ])) {
+    return true;
+  }
+
+  if (includesAny(normalized, [
+    "your school", "your high school", "your university", "your college", "your major",
+    "your program", "your course", "your class", "your professor", "your instructor",
+    "your schedule", "your summer term", "your job", "your career", "your dream job",
+    "your family", "your mother", "your mom", "your father", "your dad", "your sister",
+    "your hometown", "your birthplace", "your childhood", "your room", "your bedroom",
+    "your home", "your car", "your license", "your favourite", "your favorite",
+    "your hobby", "your hobbies", "your games", "your music", "your english",
+    "your personality", "your lifestyle",
+    "my school", "my high school", "my university", "my major", "my course",
+    "my class", "my family", "my hometown", "my childhood", "my room",
+    "my car", "my english", "my job", "my career",
+  ])) {
+    return true;
+  }
+
+  if (includesAny(normalized, [
+    "what games", "what game", "which game", "what food", "what music",
+    "what anime", "what tv", "what movie", "what website", "what app",
+    "what kind of games", "what kind of game", "what kind of job", "what kind of work",
+    "what kind of role", "role are you looking for", "what role are you looking for",
+    "what do you usually",
+    "what do you often", "what do you normally", "how often do you",
+    "how did you improve your english", "why did you choose computer science",
+    "why computer science", "when did you move to canada", "after moving to canada",
+    "before canada", "high school in china", "high school after moving",
+    "where did you study", "where are you studying", "what are you studying",
+    "what school you studying", "high school you studying in china",
+    "do you work or study", "work or study", "free time", "weekend",
+    "spend your free time", "spending free time", "indoors or outdoors",
+    "most expensive item", "ever bought", "favourite room", "favorite room",
+    "favourite subject", "favorite subject", "play any musical instrument",
+    "good at any sport", "any sport", "what sport", "which sport",
+    "project you did for next", "project did for next", "small project you made",
+  ])) {
+    return true;
+  }
+
+  if (/^(describe|descrip|descripe|talk about|tell me about)\b/.test(normalized) && includesAny(normalized, [
+    "room", "place", "person", "friend", "family", "childhood", "school",
+    "teacher", "home", "city", "hometown", "item", "thing", "gift", "skill",
+    "game", "movie", "film", "book", "website", "app", "music", "sport",
+    "food", "trip", "holiday", "experience", "memory", "favourite", "favorite",
+    "expensive", "bought",
+  ])) {
+    return true;
+  }
+
+  if (/\bielts\b/.test(normalized) && includesAny(normalized, [
+    "room", "place", "person", "friend", "family", "childhood", "school",
+    "teacher", "home", "city", "hometown", "item", "thing", "gift", "skill",
+    "game", "movie", "film", "book", "website", "app", "music", "sport",
+    "food", "trip", "holiday", "experience", "memory", "favourite", "favorite",
+    "expensive", "bought",
+  ])) {
+    return true;
+  }
+
+  if (wordCount <= 8 && includesAny(normalized, [
+    "what school", "what high school", "what game", "what project", "which project",
+    "what course", "what class", "where from", "where are you from",
+  ])) {
+    return true;
+  }
+
+  return false;
 }
 
 function shouldSkipPersonalMemorySearch(query: string): boolean {
@@ -621,6 +1105,13 @@ function shouldSkipPersonalMemorySearch(query: string): boolean {
     "citation format",
     "massachusetts institute of technology",
     "uh uh answer",
+    "can you hear me",
+    "mic work",
+    "mic working",
+    "microphone work",
+    "microphone working",
+    "is my mic",
+    "is the mic",
     "who won",
     "hockey game yesterday",
     "photosynthesis",
@@ -775,6 +1266,46 @@ function isLikelyCompleteDialogueExcerpt(query: string): boolean {
   return false;
 }
 
+function isLikelyExternalLearningTranscript(query: string): boolean {
+  const normalized = query.toLowerCase().replace(/\s+/g, " ").trim();
+  const rawWordCount = normalized.split(/\s+/).filter(Boolean).length;
+  if (rawWordCount < 8) return false;
+
+  if (includesAny(normalized, [
+    "xiang",
+    "my project",
+    "your project",
+    "my experience",
+    "your experience",
+    "about yourself",
+    "tell me about yourself",
+    "your family",
+    "my family",
+  ])) {
+    return false;
+  }
+
+  return includesAny(normalized, [
+    "professor",
+    "students",
+    "all of you",
+    "you guys",
+    "can anyone",
+    "does anyone",
+    "any questions",
+    "today we're",
+    "today we are",
+    "today's lecture",
+    "lecture",
+    "this class",
+    "this course",
+    "week two",
+    "ta",
+    "assignment",
+    "homework",
+  ]);
+}
+
 function isBehavioralStoryQuestion(query: string): boolean {
   const normalized = query.toLowerCase();
   return includesAny(normalized, [
@@ -869,6 +1400,10 @@ function isGeneralTechnicalConceptQuestion(query: string): boolean {
   const normalized = query.toLowerCase();
   const explicitGeneral = isExplicitGeneralTechnicalQuestion(query);
 
+  if (/\bielts\b/.test(normalized)) {
+    return false;
+  }
+
   if (includesAny(normalized, ["movie", "film", "films", "tv show"]) && includesAny(normalized, ["transformer", "transformers"])) {
     return false;
   }
@@ -893,6 +1428,280 @@ function isGeneralTechnicalConceptQuestion(query: string): boolean {
     "drop out deep learning",
     "regression test",
     "cloud cost",
+    "clustering",
+    "google news clustering",
+    "related news articles",
+    "unlabeled data",
+    "anomaly detection",
+    "reinforcement learning",
+    "learning from trial and error",
+    "reward function",
+    "policy gradient",
+    "prompt engineering",
+    "in-context learning",
+    "few-shot learning",
+    "chain of thought",
+    "rag",
+    "retrieval augmented generation",
+    "vector database",
+    "fine tuning",
+    "fine-tuning",
+    "model training",
+    "data management practices",
+    "foundation model",
+    "cloud security",
+    "object storage",
+    "what is an object",
+    "containerd",
+    "container runtime",
+    "container registry",
+    "docker hub",
+    "kubernetes",
+    "config map",
+    "configmap",
+    "secret manager",
+    "guided lab",
+    "challenge lab",
+    "load balance",
+    "cloudfront",
+    "route 53",
+    "primary database",
+    "secondary database",
+    "database replication",
+    "network partition",
+    "data processing on cloud",
+    "s3 path",
+    "s3 source",
+    "iam role",
+    "aws services",
+    "aws resources",
+    "access key id",
+    "secret access key",
+    "kinesis",
+    "kinesis data streams",
+    "kds",
+    "kafka",
+    "partition",
+    "partitions",
+    "vpc endpoint",
+    "interface endpoint",
+    "gateway endpoint",
+    "privatelink",
+    "private link",
+    "direct connect",
+    "vpn",
+    "private network",
+    "private net",
+    "public internet",
+    "security group",
+    "network acl",
+    "nacl",
+    "stateful",
+    "stateless",
+    "subnet",
+    "subnets",
+    "public subnet",
+    "private subnet",
+    "application server",
+    "app server",
+    "database server",
+    "internet gateway",
+    "nat gateway",
+    "route table",
+    "cidr",
+    "elastic ip",
+    "public ip",
+    "ami",
+    "amazon machine image",
+    "instance type",
+    "autoscaling",
+    "vmware",
+    "elastic beanstalk",
+    "beanstalk",
+    "fargate",
+    "ecs",
+    "eks",
+    "ecr",
+    "dns resolver",
+    "edge location",
+    "point of presence",
+    "consumer group",
+    "offset tracking",
+    "partition key",
+    "shard",
+    "broker",
+    "firehose",
+    "flink",
+    "lambda layer",
+    "lambda layers",
+    "docker image",
+    "container image",
+    "buildspec",
+    "appspec",
+    "codecommit",
+    "codebuild",
+    "codedeploy",
+    "codepipeline",
+    "codedeploy agent",
+    "deployment group",
+    "codedeploy application",
+    "presigned url",
+    "s3 vectors",
+    "opensearch",
+    "glacier",
+    "efs",
+    "lifecycle policy",
+    "rds standby",
+    "read replica",
+    "multi az standby",
+    "cloud hosted model",
+    "hard drive",
+    "disk size",
+    "volume size",
+    "resize partitions",
+    "one frame",
+    "multiple frames",
+    "pattern movement",
+    "general ai application",
+    "general ai applications",
+    "ai application architecture",
+    "business reason",
+    "new version",
+    "infrastructure as code",
+    "iac",
+    "terraform",
+    "cloudformation",
+    "cloud formation",
+    "hcl",
+    "hashicorp configuration language",
+    "state file",
+    "tfstate",
+    "terraform init",
+    "terraform plan",
+    "terraform apply",
+    "terraform destroy",
+    "provider block",
+    "resource block",
+    "aws_vpc",
+    "aws_subnet",
+    "aws_instance",
+    "user data",
+    "aws cli",
+    "access key",
+    "secret access key",
+    "session token",
+    "learner lab",
+    "learnlab",
+    "port 80",
+    "port 22",
+    "port 3306",
+    "mysql port",
+    "react",
+    "react native",
+    "component",
+    "components",
+    "props",
+    "state visible",
+    "text input",
+    "radio button",
+    "navigation",
+    "navigator",
+    "route",
+    "routes",
+    "login route",
+    "login component",
+    "firebase auth",
+    "useeffect",
+    "use effect",
+    "usestate",
+    "use state",
+    "dependency array",
+    "screen",
+    "screens",
+    "wireframe",
+    "prototype",
+    "prototyping",
+    "low fidelity",
+    "medium fidelity",
+    "high fidelity",
+    "user experience",
+    "usability",
+    "ui design",
+    "gesture",
+    "animation",
+    "sensor",
+    "sensors",
+    "gesture detector",
+    "gestures",
+    "rotation",
+    "rotations",
+    "x y z",
+    "ui thread",
+    "async",
+    "promise",
+    "database schema",
+    "schema",
+    "table",
+    "tables",
+    "field",
+    "fields",
+    "column",
+    "columns",
+    "attribute",
+    "attributes",
+    "primary key",
+    "auto-increment",
+    "cache",
+    "caching",
+    "data persistence",
+    "restful",
+    "rest api",
+    "api",
+    "apis",
+    "pos system",
+    "payment systems",
+    "shopping cart",
+    "checkout",
+    "web client",
+    "web server",
+    "html",
+    "url",
+    "port number",
+    "fragment",
+    "path representing",
+    "fetch data",
+    "https",
+    "http",
+    "sender",
+    "receiver",
+    "channel",
+    "decode",
+    "decoding",
+    "data center",
+    "data centers",
+    "virtualization",
+    "cpu",
+    "gpu",
+    "virtual gpu",
+    "virtual machine",
+    "cuda",
+    "opencl",
+    "container",
+    "containers",
+    "container image",
+    "docker image",
+    "distributed computing",
+    "big data",
+    "intellectual property",
+    "copyright",
+    "contract",
+    "ip rights",
+    "ai tools",
+    "online communication",
+    "virtual background",
+    "mute",
+    "echo",
+    "bandwidth",
   ])) {
     return true;
   }
@@ -905,6 +1714,8 @@ function isGeneralTechnicalConceptQuestion(query: string): boolean {
     "choose computer science", "which project should", "what project should", "project should i talk",
     "react native project", "react native experience", "project parking", "parking project",
     "my aws project", "project album",
+    "conversation assistant", "conversation support", "real time conversation",
+    "realtime conversation", "real-time conversation", "live transcript", "live transcripts",
     "games related to", "programming interest", "bullying", "album sharing app",
     "serverless album", "connecting aws services",
   ])) {
@@ -951,6 +1762,42 @@ function isGeneralTechnicalConceptQuestion(query: string): boolean {
     "incident", "alerts", "red metrics", "mobile apps", "react native",
     "offline state", "software engineer do", "code review", "agile scrum",
     "product thinking",
+    "reinforcement learning", "reward function", "policy", "agent environment",
+    "prompt engineering", "in-context learning", "few-shot learning", "chain of thought",
+    "rag", "retrieval augmented generation", "vector database", "fine tuning", "fine-tuning",
+    "foundation model", "large language model", "llm application",
+    "object storage", "containerd", "container runtime", "container registry",
+    "docker hub", "kubernetes", "config map", "configmap", "secret manager",
+    "guided lab", "challenge lab", "cloudfront", "route 53",
+    "load balance", "load balancing", "load balancer",
+    "primary database", "secondary database", "database replication",
+    "network partition", "data processing on cloud", "s3 path", "s3 source",
+    "iam role", "aws services", "aws resources", "access key id", "secret access key",
+    "kinesis", "kinesis data streams", "kds", "kafka", "partition", "partitions", "consumer group",
+    "offset tracking", "partition key", "shard", "broker", "firehose", "flink",
+    "vpc endpoint", "interface endpoint", "gateway endpoint", "privatelink",
+    "private link", "direct connect", "vpn", "private network", "private net", "public internet",
+    "security group", "network acl", "nacl", "stateful", "stateless",
+    "subnet", "subnets", "public subnet", "private subnet", "application server",
+    "app server", "database server", "internet gateway", "nat gateway", "route table",
+    "cidr", "elastic ip", "public ip", "ami", "amazon machine image", "instance type",
+    "elastic beanstalk", "beanstalk", "fargate", "ecs", "eks", "ecr",
+    "dns resolver", "edge location", "point of presence",
+    "lambda layer", "lambda layers", "docker image", "container image",
+    "buildspec", "appspec", "codecommit", "codebuild", "codedeploy",
+    "codepipeline", "codedeploy agent", "deployment group", "codedeploy application",
+    "presigned url", "s3 vectors",
+    "opensearch", "glacier", "efs", "lifecycle policy", "rds standby",
+    "read replica", "multi az standby", "cloud hosted model",
+    "hard drive", "disk size", "volume size", "one frame", "multiple frames",
+    "pattern movement", "general ai application", "general ai applications",
+    "ai application architecture", "business reason", "new version",
+    "infrastructure as code", "iac", "terraform", "cloudformation", "cloud formation",
+    "hcl", "hashicorp configuration language", "state file", "tfstate",
+    "terraform init", "terraform plan", "terraform apply", "terraform destroy",
+    "provider block", "resource block", "aws_vpc", "aws_subnet", "aws_instance",
+    "user data", "aws cli", "access key", "secret access key", "session token", "learner lab", "learnlab",
+    "port 80", "port 22", "port 3306", "mysql port",
   ])) {
     return true;
   }
@@ -971,6 +1818,107 @@ function isGeneralTechnicalConceptQuestion(query: string): boolean {
     "content based recommendation", "train test split", "data leakage", "classification model",
     "a b testing", "ab testing", "p value", "logistic regression", "vanishing gradient",
     "dropout", "batch normalization", "embedding in machine learning", "cosine similarity",
+    "reinforcement learning", "reward", "policy", "agent", "environment",
+    "prompt engineering", "in-context learning", "few-shot learning", "chain of thought",
+    "rag", "retrieval augmented generation", "vector database", "fine tuning", "fine-tuning",
+    "foundation model", "cloud security", "model training", "data management practices",
+    "object storage", "containerd", "container runtime", "container registry",
+    "kubernetes", "config map", "configmap", "secret manager", "cloudfront",
+    "primary database", "secondary database", "database replication", "network partition",
+    "iam role", "aws services", "aws resources", "access key id", "secret access key",
+    "kinesis", "kinesis data streams", "kafka", "partition", "partitions", "consumer group", "offset tracking",
+    "firehose", "flink", "lambda layer", "buildspec", "appspec", "codepipeline",
+    "codebuild", "codedeploy", "codecommit", "presigned url", "s3 vectors",
+    "opensearch", "glacier", "efs", "lifecycle policy", "rds standby",
+    "read replica", "cloud hosted model", "vpc endpoint", "interface endpoint",
+    "gateway endpoint", "privatelink", "private link", "security group", "network acl",
+    "direct connect", "vpn", "private network", "private net", "public internet",
+    "nacl", "stateful", "stateless", "subnet", "subnets", "public subnet", "private subnet",
+    "application server", "app server", "database server",
+    "internet gateway", "nat gateway", "route table", "cidr", "elastic ip",
+    "public ip", "ami", "amazon machine image", "instance type", "autoscaling", "vmware", "elastic beanstalk",
+    "beanstalk", "fargate", "ecs", "eks", "ecr", "dns resolver", "edge location",
+    "point of presence",
+    "infrastructure as code", "iac", "terraform", "cloudformation", "cloud formation",
+    "hcl", "hashicorp configuration language", "state file", "tfstate",
+    "terraform init", "terraform plan", "terraform apply", "terraform destroy",
+    "provider block", "resource block", "user data", "aws cli", "session token",
+  ]);
+}
+
+function isLikelyGeneralTechnicalLecture(query: string): boolean {
+  const normalized = query.toLowerCase();
+  const words = normalized.split(/\s+/).filter(Boolean).length;
+  if (words < 8) return false;
+
+  if (includesAny(normalized, [
+    "xiang", "saynext", "say next", "elderalbum", "elder album", "joblens", "job lens",
+    "dalparkaid", "dal park", "my project", "your project", "my app", "your app",
+    "my experience", "your experience", "my course", "your course", "my class",
+    "your class", "my school", "your school", "my family", "your family",
+    "what application did you build", "what app did you build",
+    "why do you like", "why did you choose", "favorite", "favourite",
+  ])) {
+    return false;
+  }
+
+  return includesAny(normalized, [
+    "aws", "cloud", "ec2", "s3", "lambda", "iam", "vpc", "rds",
+    "database", "databases", "storage", "object", "bucket", "data lake",
+    "load balance", "load balancing", "load balancer", "auto scaling", "autoscaling", "multi-az", "availability zone",
+    "kubernetes", "pod", "pods", "node", "nodes", "cluster", "replica set",
+    "container", "containerd", "docker", "config map", "configmap", "secret manager",
+    "event bridge", "eventbridge", "sqs", "sns", "cloudfront", "route 53",
+    "security", "secure", "encrypt", "access key", "secret access key", "token",
+    "kinesis", "kds", "kafka", "partition", "partitions", "consumer group", "offset", "partition key",
+    "shard", "broker", "firehose", "flink", "codecommit", "codebuild",
+    "codedeploy", "codepipeline", "buildspec", "appspec", "codedeploy agent",
+    "deployment group", "codedeploy application",
+    "presigned url", "s3 vectors", "opensearch", "glacier", "efs",
+    "lifecycle policy", "read replica", "standby", "cloud hosted model",
+    "vpc endpoint", "interface endpoint", "gateway endpoint", "privatelink",
+    "private link", "direct connect", "vpn", "private network", "private net",
+    "public internet", "security group", "network acl", "nacl", "stateful",
+    "stateless", "inbound", "outbound", "subnet", "subnets", "public subnet",
+    "private subnet", "application server", "app server", "database server",
+    "internet gateway", "nat gateway", "route table", "cidr", "elastic ip",
+    "public ip", "ami", "amazon machine image", "instance type", "elastic beanstalk",
+    "beanstalk", "fargate", "ecs", "eks", "ecr", "dns resolver",
+    "edge location", "point of presence",
+    "language model", "llm", "prompt", "prompts", "vector database", "rag",
+    "supervised learning", "unsupervised learning", "reinforcement learning",
+    "computer vision", "image classification", "model training",
+    "consistency", "replication", "latency", "caching", "cache", "ttl",
+    "hard drive", "disk", "volume", "frame", "frames", "pattern movement",
+    "general ai application", "general ai applications", "application architecture",
+    "business reason", "new version", "version update", "user feedback",
+    "infrastructure as code", "iac", "terraform", "cloudformation", "cloud formation",
+    "hcl", "hashicorp configuration language", "state file", "tfstate",
+    "terraform init", "terraform plan", "terraform apply", "terraform destroy",
+    "provider block", "resource block", "aws_vpc", "aws_subnet", "aws_instance",
+    "user data", "aws cli", "session token", "learner lab", "learnlab",
+    "port 80", "port 22", "port 3306", "mysql port",
+    "react", "react native", "component", "components", "props", "state visible",
+    "text input", "radio button", "navigation", "navigator", "route", "routes",
+    "login route", "login component", "firebase auth", "useeffect", "use effect",
+    "usestate", "use state", "dependency array", "screen", "screens",
+    "wireframe", "prototype", "prototyping", "low fidelity", "medium fidelity",
+    "high fidelity", "user experience", "usability", "ui design", "gesture",
+    "gestures", "gesture detector", "animation", "lottie", "key framing",
+    "z-axis", "justify-content", "align-items", "cross axis", "main axis",
+    "sensor", "sensors", "rotation", "rotations", "x y z",
+    "ui thread", "async", "promise", "database schema", "schema", "table",
+    "tables", "field", "fields", "column", "columns", "attribute",
+    "attributes", "primary key", "auto-increment", "cache", "caching",
+    "data persistence", "restful", "rest api", "api", "apis", "pos system",
+    "payment systems", "shopping cart", "checkout", "web client", "web server",
+    "html", "url", "port number", "fragment", "path representing",
+    "fetch data", "https", "http", "sender", "receiver", "channel", "decode",
+    "decoding", "data center", "data centers", "virtualization",
+    "cpu", "gpu", "virtual gpu", "virtual machine", "cuda", "opencl",
+    "container", "containers", "container image", "docker image", "distributed computing", "big data",
+    "intellectual property", "copyright", "contract", "ip rights", "ai tools",
+    "online communication", "virtual background", "mute", "echo", "bandwidth",
   ]);
 }
 
@@ -1004,11 +1952,230 @@ function knowledgeInterviewIntentBoost(query: string, sourceRef: string, tokens:
   if (ref.includes("ml-fundamentals") && matches(["supervised learning", "supervise learning", "unsupervised learning", "bias variance", "overfitting", "cross validation", "confusion matrix", "precision", "recall", "f1", "gradient descent", "data leakage", "class imbalance", "evaluation metrics for ml", "choose a metric", "classification model", "classification metric", "regularization", "train test split", "decision trees", "bagging", "boosting", "random forest", "feature selection", "missing values", "logistic regression", "a b testing", "ab testing", "p value", "pca", "k-means", "cosine similarity"])) boost += 0.27;
   if (ref.includes("deep-learning") && matches(["backpropagation", "dropout", "drop out", "batch normalization", "cnn", "rnn", "transformer", "neural network", "embedding in neural", "vanishing gradient"])) boost += 0.27;
   if (ref.includes("recommender-systems") && matches(["collaborative filtering", "content based", "cold start in recommender", "recommender cold start", "user item", "evaluate a recommender", "ndcg", "recommender system"])) boost += 0.27;
-  if (ref.includes("data-engineering-warehousing") && matches(["etl", "elt", "data warehouse", "star schema", "batch processing", "streaming", "data quality", "pipeline"])) boost += 0.24;
+  if (ref.includes("data-engineering-warehousing")
+    && (hasAnyToken(tokens, ["etl", "elt"]) || matches(["data warehouse", "star schema", "batch processing", "streaming", "data quality", "data pipeline"]))) {
+    boost += 0.24;
+  }
   if (ref.includes("os-concurrency") && matches(["process versus thread", "process vs thread", "thread in operating", "operating system thread", "operating system", "concurrency", "parallelism", "deadlock", "mutex", "semaphore", "virtual memory"])) boost += 0.24;
   if (ref.includes("sre-observability") && matches(["logs versus metrics", "logs vs metrics", "sli", "slo", "incident", "alerts", "red metrics", "observability"])) boost += 0.24;
   if (ref.includes("mobile-apps") && matches(["mobile apps", "mobile app", "react native", "offline state", "mobile app performance"])) boost += 0.27;
   if (ref.includes("cs-workplace-role") && matches(["software engineer do", "day to day", "code review", "agile scrum", "product thinking", "engineers"])) boost += 0.24;
+
+  return boost;
+}
+
+function knowledgeLectureIntentBoost(query: string, sourceRef: string, tokens: Set<string>): number {
+  if (!sourceRef.startsWith("knowledge:lecture:")) return 0;
+
+  const q = query.toLowerCase();
+  const ref = sourceRef.toLowerCase();
+  const matches = (needles: string[]) => includesAny(q, needles);
+  let boost = 0;
+
+  if (ref.includes("kinesis-kafka-streaming") && (matches([
+    "kinesis", "kds", "kafka", "data stream", "topic", "partition", "consumer group",
+    "offset", "offset tracking", "broker", "partition key", "shard", "retention",
+    "ordering", "hot shard",
+  ]) || hasAnyToken(tokens, ["kinesis", "kafka", "broker", "shard", "partition", "offset"]))) {
+    boost += 0.34;
+    if (matches(["lambda", "base64", "base sixty four", "s3 pipeline", "put record", "putrecord", "event and context"])) boost -= 0.14;
+  }
+
+  if (ref.includes("kinesis-lambda-s3-pipeline") && matches([
+    "kinesis to lambda", "lambda to s3", "kinesis lambda", "putrecord", "put record",
+    "partition key", "base64", "base sixty four", "decode", "event context",
+    "event and context", "triggered by kinesis", "cloudwatch", "batch size", "trim horizon", "s3 pipeline",
+  ])) {
+    boost += 0.34;
+    if (matches(["runtime", "environment variables", "timeout limits", "timeout", "lambda layers", "docker image"])) boost -= 0.12;
+  }
+
+  if (ref.includes("lambda-runtime-layers-docker") && matches([
+    "lambda layer", "lambda layers", "docker image", "container image", "runtime",
+    "handler", "environment variables", "cloudwatch logs", "timeout", "15 minutes",
+    "timeout limits", "package size", "dependency",
+  ])) {
+    boost += 0.32;
+    if (matches(["runtime environment variables", "cloudwatch logs", "timeout limits"])) boost += 0.12;
+  }
+
+  if (ref.includes("aws-cicd-codepipeline") && matches([
+    "codepipeline", "codebuild", "codedeploy", "codecommit", "buildspec", "appspec",
+    "ci cd", "cicd", "pipeline", "artifact", "rollback",
+    "deployment group", "codedeploy application", "create an application",
+    "application first", "deployment first",
+  ])) {
+    boost += 0.34;
+    if (matches(["codedeploy agent", "agent installed", "installed on ec2", "ec2 user data"])) boost -= 0.13;
+  }
+
+  if (ref.includes("cicd-iam-ec2-setup") && matches([
+    "codedeploy agent", "ec2 user data", "user data", "httpd", "ruby",
+    "instance profile", "trust relationship", "iam role", "codebuild role",
+    "codedeploy role", "codepipeline role", "security group", "agent installed", "installed on ec2",
+  ])) {
+    boost += 0.34;
+  }
+
+  if (ref.includes("s3-object-storage-vectors") && matches([
+    "s3 object", "object storage", "bucket", "presigned url", "pre signed url",
+    "object url", "s3 vectors", "opensearch", "vector database", "static assets",
+    "data transfer", "storage class",
+  ])) {
+    boost += 0.32;
+    if (matches(["s3 vectors", "opensearch"])) boost += 0.14;
+  }
+
+  if (ref.includes("s3-efs-glacier-lifecycle") && matches([
+    "efs", "elastic file system", "glacier", "s3 glacier", "lifecycle policy",
+    "standard ia", "archive", "retrieval", "file system", "file storage",
+  ])) {
+    boost += 0.34;
+  }
+
+  if (ref.includes("managed-unmanaged-db-security") && matches([
+    "managed database", "managed rds", "unmanaged database", "running my own database", "own database on ec2", "database on ec2",
+    "on premise", "on-premise", "sensitive data", "cloud security", "nist",
+    "hipaa", "gdpr", "patching", "backups",
+  ])) {
+    boost += 0.32;
+    if (matches(["managed rds", "running my own database", "own database on ec2", "tradeoff between managed"])) boost += 0.14;
+  }
+
+  if (ref.includes("rds-ha-backups-dr") && matches([
+    "rds", "multi az", "multi-az", "standby", "read replica", "failover",
+    "disaster recovery", "route 53", "health check", "backup", "cross region",
+    "rpo", "rto",
+  ])) {
+    boost += 0.34;
+    if (matches(["managed rds", "running my own database", "own database on ec2", "tradeoff between managed"])) boost -= 0.16;
+  }
+
+  if (ref.includes("cloud-architecture-best-practices") && matches([
+    "cloud architecture", "best practices", "auto scaling", "automated recovery",
+    "infrastructure as code", "loose coupling", "load balancer", "sqs", "sns",
+    "cloudfront", "redis", "ttl", "cache invalidation", "devsecops",
+  ])) {
+    boost += 0.32;
+    if (matches(["redis", "ttl", "cache invalidation", "performance design"])) boost += 0.1;
+  }
+
+  if (ref.includes("genai-rag-finetuning") && matches([
+    "prompt engineering", "in context learning", "few shot", "rag",
+    "retrieval augmented generation", "vector database", "fine tuning", "fine-tuning",
+    "genai", "llm application", "foundation model",
+  ])) {
+    boost += 0.34;
+    if (matches(["s3 vectors", "opensearch"])) boost -= 0.16;
+  }
+
+  if (ref.includes("llm-api-cloud-security") && matches([
+    "llm api", "api token", "api key", "cloud hosted model", "iam role",
+    "internal network", "bedrock", "token management", "private access",
+  ])) {
+    boost += 0.34;
+  }
+
+  if (ref.includes("ml-paradigms-supervised-unsupervised-rl") && matches([
+    "supervised learning", "supervise learning", "unsupervised learning",
+    "reinforcement learning", "trial and error", "reward", "policy", "agent",
+    "environment", "chess", "clustering", "anomaly detection", "labels",
+  ])) {
+    boost += 0.32;
+  }
+
+  if (ref.includes("firehose-flink-stream-processing") && matches([
+    "firehose", "kinesis firehose", "flink", "apache flink", "stream processing",
+    "real time analytics", "delivery stream", "s3 delivery", "stateful processing",
+  ])) {
+    boost += 0.34;
+  }
+
+  if (ref.includes("vpc-subnets-route-tables") && matches([
+    "vpc", "subnet", "subnets", "public subnet", "private subnet", "route table", "local route",
+    "internet gateway", "nat gateway", "cidr", "availability zone", "0.0.0.0/0",
+    "what makes a subnet public", "private route table", "application server",
+    "app server", "database server", "multiple subnets",
+  ])) {
+    boost += 0.34;
+  }
+
+  if (ref.includes("security-groups-nacls") && matches([
+    "security group", "security groups", "network acl", "nacl", "nacls",
+    "stateful", "stateless", "inbound", "outbound", "allow and deny",
+    "rule number", "first matching rule", "instance level", "subnet level",
+  ])) {
+    boost += 0.36;
+  }
+
+  if (ref.includes("vpc-endpoints-privatelink") && matches([
+    "vpc endpoint", "interface endpoint", "gateway endpoint", "privatelink",
+    "private link", "s3 endpoint", "dynamodb endpoint", "aws backbone",
+    "internal network", "not public internet", "private network", "private net",
+    "public internet",
+  ])) {
+    boost += 0.36;
+  }
+
+  if (ref.includes("vpc-vpn-direct-connect") && matches([
+    "direct connect", "vpn", "private network", "private net", "public internet",
+    "not public internet", "dedicated connection", "private connection",
+    "bandwidth guarantee", "guaranteed bandwidth", "hybrid cloud networking",
+  ])) {
+    boost += 0.38;
+  }
+
+  if (ref.includes("route53-cloudfront-cdn") && matches([
+    "route 53", "route fifty three", "dns", "dns resolver", "domain name",
+    "health check", "routing policy", "latency routing", "geolocation",
+    "cloudfront", "cdn", "edge location", "regional edge cache", "point of presence", "pop",
+  ])) {
+    boost += 0.34;
+    if (matches(["redis", "ttl", "cache invalidation"])) boost -= 0.14;
+  }
+
+  if (ref.includes("aws-compute-service-choice") && matches([
+    "choose between ec2", "ec2 lambda ecs", "lambda ecs", "eks", "fargate",
+    "elastic beanstalk", "beanstalk", "compute service", "serverless",
+    "container", "virtual machine", "it depends", "use case", "workload requirements",
+  ])) {
+    boost += 0.36;
+  }
+
+  if (ref.includes("ec2-ami-instance-networking") && matches([
+    "ami", "amazon machine image", "golden ami", "marketplace ami",
+    "community ami", "instance type", "t3 micro", "cpu", "memory", "storage",
+    "network performance", "public ip", "elastic ip", "network interface",
+  ])) {
+    boost += 0.34;
+    if (matches(["s3 object", "object storage", "presigned url", "pre signed url"])) boost -= 0.16;
+  }
+
+  if (ref.includes("iac-terraform-cloudformation") && matches([
+    "infrastructure as code", "iac", "terraform", "cloudformation", "cloud formation",
+    "hcl", "hashicorp configuration language", "state file", "tfstate",
+    "cloud agnostic", "aws native", "stack", "stacks", "declarative",
+    "configuration drift", "reproducible", "reproduce the environment",
+  ])) {
+    boost += 0.38;
+  }
+
+  if (ref.includes("terraform-aws-lab-resources")) {
+    const hasTerraformLabContext = matches([
+      "terraform", "main.tf", "provider block", "resource block", "aws_vpc",
+      "aws_subnet", "aws_instance", "terraform init", "terraform plan",
+      "terraform apply", "terraform destroy", "learner lab", "learnlab",
+      "aws cli", "session token", "output variable",
+    ]);
+    const hasLabResourceTerm = matches([
+      "user data", "rds", "mysql", "port 80", "port 22", "port 3306",
+      "security group", "public subnet", "private subnet", "internet gateway",
+      "ec2 boots", "instance boots",
+    ]);
+    if (hasTerraformLabContext && (hasLabResourceTerm || matches(["provider block", "resource block", "terraform init", "terraform plan", "terraform apply", "terraform destroy", "aws cli", "session token"]))) {
+      boost += 0.38;
+    }
+  }
 
   return boost;
 }
@@ -1027,7 +2194,9 @@ function highSensitivityAllowed(query: string, memory: Pick<PersonalMemoryRecord
 
   if (category.includes("family_events")) {
     return includesAny(normalizedQuery, [
-      "father", "dad", "sister", "passed away", "liver", "scam", "york", "money", "financial",
+      "family", "mother", "mom", "father", "dad", "sister", "sibling", "siblings", "parent", "parents",
+      "passed away", "liver", "scam", "york", "money", "financial", "partner", "uncle", "zhao",
+      "niece", "married", "daughter", "age gap", "lives with",
     ]);
   }
 
@@ -1063,6 +2232,52 @@ function highSensitivityAllowed(query: string, memory: Pick<PersonalMemoryRecord
   return memoryTokens.filter((token) => queryTokens.has(token)).length >= 2;
 }
 
+function promotedKnowledgeIntentBoost(query: string, memory: Pick<PersonalMemoryRecord, "category" | "title" | "sourceRef">, tokens: Set<string>): number {
+  const sourceRef = memory.sourceRef.toLowerCase();
+  const category = memory.category.toLowerCase();
+  if (!sourceRef.startsWith("session-memory:") || !category.startsWith("knowledge")) return 0;
+
+  const title = memory.title.toLowerCase();
+  const q = query.toLowerCase();
+  const matches = (needles: string[]) => includesAny(q, needles);
+  const tokenHits = (needles: string[]) => hasAnyToken(tokens, needles);
+  let boost = 0;
+
+  if ((title.includes("architecture") || title.includes("e-commerce") || title.includes("ecommerce"))
+    && (matches([
+      "high availability", "highly available", "low latency", "e-commerce", "ecommerce",
+      "cloudfront", "dynamodb global", "global table", "multi az", "multi-az",
+      "application load balancer", "auto scaling", "eks",
+    ]) || tokenHits(["cloudfront", "dynamodb", "ecommerce", "latency"]))) {
+    boost += 0.34;
+  }
+
+  if ((title.includes("elasticache") || title.includes("caching"))
+    && (matches(["elasticache", "redis", "memcached", "cache invalidation", "database cache", "old data cost"])
+      || tokenHits(["elasticache", "redis", "memcached"])
+      || (tokenHits(["database"]) && tokenHits(["cache", "caching"])))) {
+    boost += 0.43;
+  }
+
+  if ((category.includes("security") || title.includes("security") || title.includes("observability"))
+    && (matches([
+      "secrets manager", "cloudtrail", "vpc flow", "api keys", "network traffic",
+      "least privilege", "parameter store",
+    ]) || tokenHits(["secrets", "cloudtrail", "audit", "credentials"]))) {
+    boost += 0.36;
+  }
+
+  if ((category.includes("ai") || category.includes("ml") || title.includes("language model") || title.includes("token prediction"))
+    && (matches(["large language model", "language models", "backpropagation", "next token", "next word", "gpt style"])
+      || tokenHits(["llm", "gpt"])
+      || (tokenHits(["backpropagation"]) && tokenHits(["model", "models", "language"]))
+      || (tokenHits(["token", "probability"]) && tokenHits(["llm", "gpt", "word"])))) {
+    boost += 0.34;
+  }
+
+  return boost;
+}
+
 function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRecord, "category" | "title" | "sourceRef">): number {
   const normalizedQuery = query.toLowerCase();
   const tokens = new Set(tokenizeSearchText(query));
@@ -1071,6 +2286,8 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
   const sourceRef = memory.sourceRef.toLowerCase();
   let boost = 0;
   boost += knowledgeInterviewIntentBoost(normalizedQuery, sourceRef, tokens);
+  boost += knowledgeLectureIntentBoost(normalizedQuery, sourceRef, tokens);
+  boost += promotedKnowledgeIntentBoost(normalizedQuery, memory, tokens);
 
   if (hasAnyToken(tokens, ["university", "college", "degree", "dalhousie", "acadia", "macs", "program", "study", "studying", "major"]) && category === "identity_education") {
     boost += 0.035;
@@ -1144,8 +2361,11 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     ])) boost += 0.06;
 
     if (sourceRef.includes("xiang-update:2026-05:driving-car") && (hasAnyToken(tokens, [
-      "car", "drive", "driving", "license", "licence", "campus",
-    ]) || includesAny(normalizedQuery, ["go to school", "get to school", "travel to school", "get to campus", "go to campus"]))) {
+      "car", "cars", "drive", "driving", "license", "licence", "campus", "honda", "civic", "hatchback", "sport", "kentville", "dealership",
+    ]) || includesAny(normalizedQuery, [
+      "go to school", "get to school", "travel to school", "get to campus", "go to campus",
+      "expensive item", "most expensive", "ever bought", "you bought", "bought recently",
+    ]))) {
       boost += 0.055;
     }
 
@@ -1210,7 +2430,8 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
 
   if (sourceRef.includes("xiang-update:2026-05:driving-car") && includesAny(normalizedQuery, [
     "go to school", "get to school", "travel to school", "drive to school", "usually go to campus",
-    "go to campus", "driver", "license", "licence", "car",
+    "go to campus", "driver", "license", "licence", "car", "expensive item", "most expensive", "ever bought",
+    "honda civic", "hatchback sport", "black car", "kentville", "dealership", "how much was your car",
   ])) {
     boost += 0.11;
   }
@@ -1260,6 +2481,11 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     if (category === "games" && hasAnyToken(tokens, ["play", "played", "games", "game", "film", "films"]) && !hasAnyToken(tokens, ["script", "scripts", "scripting", "automation", "programming", "piano", "music", "musical", "instrument", "instruments"])) boost += 0.018;
     if (category === "games_technical_hobby" && hasAnyToken(tokens, ["script", "scripts", "scripting", "automation", "programming", "piano", "music", "musical", "instrument", "instruments"])) boost += 0.055;
   }
+  if (sourceRef.includes("xiang-profile:game-scripting-music") && includesAny(normalizedQuery, [
+    "piano scripts", "game scripting", "script in games", "scripts in games", "music scripts in games",
+  ])) {
+    boost += 0.22;
+  }
 
   if (sourceRef.includes("xiang-update:2026-05:anime-tv-film") && hasAnyToken(tokens, [
     "anime", "tv", "show", "shows", "series", "film", "films", "movie", "movies",
@@ -1271,6 +2497,36 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     "listen to music", "listening to music", "where do you usually listen", "where do you normally listen",
   ])) {
     boost += 0.11;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05:music-instruments") && (hasAnyToken(tokens, [
+    "instrument", "instruments", "saxophone", "sax", "band", "concert", "performance", "perform", "performed", "harp", "piano", "keyboard",
+  ]) || includesAny(normalizedQuery, [
+    "play any musical instrument", "played any instrument", "school band", "concert band", "wind band",
+    "do you play piano", "can you play piano", "do you play saxophone", "learned harp",
+  ]))) {
+    boost += 0.14;
+  }
+  if (sourceRef.includes("xiang-update:2026-05:music-instruments") && includesAny(normalizedQuery, [
+    "piano scripts", "game scripting", "script in games", "scripts in games", "music scripts in games",
+  ])) {
+    boost -= 0.16;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05:family-current-details") && (hasAnyToken(tokens, [
+    "family", "mother", "mom", "sister", "sibling", "siblings", "niece", "married", "daughter", "zhao",
+  ]) || includesAny(normalizedQuery, [
+    "age gap", "older sister", "how old is your sister", "is your sister married",
+    "does your sister have a child", "mother partner", "uncle zhao", "mom's partner",
+    "after your father passed", "who lives with your mother",
+  ]))) {
+    boost += 0.14;
+  }
+  if (sourceRef.includes("xiang-update:2026-05:family-current-details") && includesAny(normalizedQuery, [
+    "family business", "family company", "business do", "company after 2018", "factory", "natural gas",
+    "what did your sister study", "sister study", "york university", "financial scam",
+  ])) {
+    boost -= 0.18;
   }
 
   if (hasAnyToken(tokens, ["family", "mother", "mom", "father", "dad", "sister", "brother", "brothers", "sibling", "siblings", "parents", "business", "factory"]) && category.includes("family")) {
@@ -1299,6 +2555,18 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     if (includesAny(normalizedQuery, ["learning english", "studying english"])) boost -= 0.025;
   }
 
+  if (sourceRef.includes("xiang-update:2026-05:piano-learning") && includesAny(normalizedQuery, [
+    "skill you learned", "learned skill", "new skill", "difficult at first",
+    "difficult skill", "learn a skill", "learned a skill", "hobby", "piano",
+  ])) {
+    boost += 0.13;
+  }
+  if (sourceRef.includes("xiang-update:2026-05:piano-learning") && includesAny(normalizedQuery, [
+    "piano scripts", "game scripting", "script in games", "scripts in games", "music scripts in games",
+  ])) {
+    boost -= 0.16;
+  }
+
   if (hasAnyToken(tokens, ["deadline", "deadlines", "motivation", "motivated", "procrastinate", "procrastination", "assignment", "work", "polished"]) && category === "motivation_work_style") {
     boost += 0.035;
     if (includesAny(normalizedQuery, ["tight deadline", "school project", "look polished", "useful software", "feel stuck"])) boost += 0.06;
@@ -1307,6 +2575,11 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
 
   if (hasAnyToken(tokens, ["stress", "weakness", "confidence", "nervous", "girlfriend", "relationship", "romantic", "dating", "date", "social", "interview"]) && category === "emotional_social" && !normalizedQuery.includes("social media")) {
     boost += 0.04;
+  }
+  if (sourceRef.includes("xiang-profile:stress-insecurity-romance") && includesAny(normalizedQuery, [
+    "react under stress", "reaction under stress", "stress response", "under heavy stress", "how do you react under stress",
+  ])) {
+    boost += 0.24;
   }
 
   if (category === "interview_profile" && includesAny(normalizedQuery, ["interview", "interview question", "interview questions", "answer interview", "answer questions"])) {
@@ -1319,6 +2592,7 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     if (includesAny(normalizedQuery, ["use a computer", "use computers", "computers for", "computer science"])) boost += 0.035;
     if (includesAny(normalizedQuery, ["strength that helps", "software projects"])) boost += 0.11;
     if (includesAny(normalizedQuery, ["why computer science money project"])) boost -= 0.03;
+    if (includesAny(normalizedQuery, ["skill you learned", "learned skill", "new skill", "difficult at first"])) boost -= 0.04;
   }
 
   if (hasAnyToken(tokens, ["weakness", "english", "speaking", "communication"]) && ["speaking_style", "learning_style"].includes(category)) {
@@ -1404,14 +2678,27 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     boost += 0.04;
   }
 
+  const sayNextConversationSupportIntent = includesAny(normalizedQuery, [
+    "real time conversation", "realtime conversation", "real-time conversation",
+    "conversation support", "conversation assistant", "real time assistant",
+    "realtime assistant", "real-time assistant", "live transcript", "live transcripts",
+  ]) || (
+    hasAnyToken(tokens, ["real", "realtime", "real-time", "live", "conversation", "assistant", "transcript", "transcripts"])
+    && hasAnyToken(tokens, ["project", "app", "built", "build", "made", "assistant", "support"])
+  );
+
   if (includesAny(normalizedQuery, ["computer games"]) && (category === "games" || category === "games_technical_hobby")) {
     boost += 0.08;
   }
 
   const isGenericProjectQuestion = hasAnyToken(tokens, ["project", "projects", "software", "built", "build"])
     && !hasAnyToken(tokens, ["react", "native", "firebase", "parking", "mobile", "saynext", "glasses", "aws", "serverless", "lambda", "study", "tracker"]);
-  if (isGenericProjectQuestion && category === "technical_projects" && title.includes("elder album")) {
+  if (isGenericProjectQuestion && !sayNextConversationSupportIntent && category === "technical_projects" && title.includes("elder album")) {
     boost += 0.018;
+  }
+
+  if (sayNextConversationSupportIntent && category === "technical_projects" && title.includes("saynext")) {
+    boost += 0.14;
   }
 
   if (category === "technical_projects" && title.includes("saynext") && hasAnyToken(tokens, ["saynext", "glasses", "assistant", "transcription"])) {
@@ -1428,16 +2715,26 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     boost += 0.04;
   }
 
+  if (category === "technical_projects" && title.includes("saynext") && includesAny(normalizedQuery, [
+    "what i make", "what i made", "what you make", "what you made", "make and why",
+    "made and why", "project and why", "why did you build", "why did i build",
+    "why build", "why did you make", "why did i make",
+  ])) {
+    boost += 0.12;
+  }
+
   if (sourceRef.startsWith("doc:saynext") && includesAny(normalizedQuery, [
     "saynext", "this app", "conversation assistant", "mobile app", "mobile assistant",
+    "conversation support", "real time", "realtime", "real-time",
     "transcript", "asr", "prompt", "prenote", "personal memory", "scene profile",
     "ollama", "qwen", "openai", "gpt", "frp", "vps", "local mode", "travel mode",
     "product thinking",
   ])) {
     boost += 0.05;
-    if (sourceRef.includes("positioning") && includesAny(normalizedQuery, ["what is", "overview", "mobile", "smart glasses", "goal", "motivation", "product thinking"])) boost += 0.04;
-    if (sourceRef.includes("positioning") && includesAny(normalizedQuery, ["why did i build", "why build", "why did you decide", "decide to build", "motivation", "reason"])) boost += 0.11;
-    if (sourceRef.includes("interview-story") && includesAny(normalizedQuery, ["why did i build", "why build", "why did you decide", "decide to build", "motivation", "interview", "product thinking"])) boost += 0.13;
+    if (sayNextConversationSupportIntent) boost += 0.12;
+    if (sourceRef.includes("positioning") && includesAny(normalizedQuery, ["what is", "overview", "mobile", "smart glasses", "goal", "motivation", "product thinking", "what i make", "what i made", "what you make", "what you made"])) boost += 0.08;
+    if (sourceRef.includes("positioning") && includesAny(normalizedQuery, ["why did i build", "why did you build", "why build", "why did you decide", "decide to build", "motivation", "reason", "make and why", "made and why", "project and why"])) boost += 0.13;
+    if (sourceRef.includes("interview-story") && includesAny(normalizedQuery, ["why did i build", "why did you build", "why build", "why did you decide", "decide to build", "motivation", "interview", "product thinking", "make and why", "made and why", "project and why"])) boost += 0.16;
     if (sourceRef.includes("runtime-flow") && includesAny(normalizedQuery, ["runtime", "flow", "transcript", "asr", "final", "timeout", "context", "stale", "response", "real time", "hardest part", "hard part", "bad context", "recover"])) boost += 0.04;
     if (sourceRef.includes("memory-personalization") && includesAny(normalizedQuery, ["memory", "prenote", "hybrid", "fts5", "sqlite", "personalization", "knowledge"])) boost += 0.04;
     if (sourceRef.includes("llm-deployment") && includesAny(normalizedQuery, ["ollama", "qwen", "openai", "gpt", "cost", "vps", "frp", "local mode", "travel mode", "deployment"])) boost += 0.04;
@@ -1464,6 +2761,16 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     && includesAny(normalizedQuery, ["interviewer asks about aws", "project should i use", "which project should i use", "what project should i use"])
     && includesAny(normalizedQuery, ["aws", "cloud", "serverless", "lambda"])) {
     boost += 0.18;
+  }
+
+  if (sourceRef.startsWith("doc:joblens") && includesAny(normalizedQuery, [
+    "aws cloud project", "cloud project", "aws project", "cloud architecture",
+    "aws architecture", "serverless", "lambda", "api gateway", "dynamodb",
+    "s3", "eventbridge", "sqs", "fargate", "terraform", "event-driven",
+  ])) {
+    boost += 0.08;
+    if (sourceRef.includes("architecture")) boost += 0.08;
+    if (sourceRef.includes("data-storage-security") && includesAny(normalizedQuery, ["dynamodb", "s3", "security", "jwt"])) boost += 0.04;
   }
 
   if (category === "technical_projects" && title.includes("dalparkaid") && includesAny(normalizedQuery, ["dalparkaid", "dal park", "parking", "prediction", "crowd", "crowdsourced", "campus", "react native project parking", "parking mobile app", "react native experience"])) {
@@ -1653,6 +2960,35 @@ function mapPersonalMemoryRecord(row: any): PersonalMemoryRecord {
     source: row.source || "manual",
     sourceRef: row.source_ref || "",
     contentHash: row.content_hash || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapSessionMemoryCandidateRecord(row: any): SessionMemoryCandidateRecord {
+  const status = String(row.status || "pending");
+  return {
+    id: row.id,
+    userId: row.user_id,
+    sessionId: row.session_id,
+    candidateType: row.candidate_type || "unknown",
+    title: row.title || "Memory candidate",
+    category: row.category || "general",
+    sensitivity: normalizeSensitivity(row.sensitivity),
+    content: row.content || "",
+    usageRule: row.usage_rule || "",
+    keywords: parseJsonArray(row.keywords_json).map(String),
+    evidence: parseJsonArray(row.evidence_json).map(String),
+    confidence: Number(row.confidence || 0),
+    valueScore: Number(row.value_score || 0),
+    riskScore: Number(row.risk_score || 0),
+    validationJson: row.validation_json || "{}",
+    status: status === "approved" || status === "rejected" || status === "promoted" ? status : "pending",
+    model: row.model,
+    rawJson: row.raw_json || "{}",
+    contentHash: row.content_hash || "",
+    promotedMemoryId: row.promoted_memory_id === null || row.promoted_memory_id === undefined ? null : Number(row.promoted_memory_id),
+    rejectionReason: row.rejection_reason || "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1887,6 +3223,38 @@ class ConversationLogger {
         content
       )
     `);
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS session_memory_candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        candidate_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'general',
+        sensitivity TEXT NOT NULL DEFAULT 'medium',
+        content TEXT NOT NULL,
+        usage_rule TEXT NOT NULL DEFAULT '',
+        keywords_json TEXT NOT NULL DEFAULT '[]',
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        confidence REAL NOT NULL DEFAULT 0,
+        value_score REAL NOT NULL DEFAULT 0,
+        risk_score REAL NOT NULL DEFAULT 1,
+        validation_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'pending',
+        model TEXT,
+        raw_json TEXT NOT NULL DEFAULT '{}',
+        content_hash TEXT NOT NULL DEFAULT '',
+        promoted_memory_id INTEGER,
+        rejection_reason TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, session_id, candidate_type, content_hash)
+      )
+    `);
+
+    db.run("CREATE INDEX IF NOT EXISTS idx_session_memory_candidates_user_status ON session_memory_candidates(user_id, status, updated_at DESC)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_session_memory_candidates_session ON session_memory_candidates(user_id, session_id, updated_at DESC)");
 
     db.run(`
       CREATE TABLE IF NOT EXISTS prenotes (
@@ -2596,13 +3964,16 @@ class ConversationLogger {
   searchPersonalMemoriesHybrid(userId: string, query: string, limit = 3): PersonalMemorySearchResult[] {
     if (!this.isEnabled()) return [];
 
-    const cleanedQuery = query.trim();
-    if (!cleanedQuery) return [];
-    if (shouldSkipPersonalMemorySearch(cleanedQuery)) return [];
-    const generalTechnicalConceptQuestion = isGeneralTechnicalConceptQuestion(cleanedQuery);
+    const rawQuery = query.trim();
+    if (!rawQuery) return [];
+    const cleanedQuery = expandAsrSearchQuery(rawQuery);
+    if (shouldSkipPersonalMemorySearch(rawQuery) || shouldSkipPersonalMemorySearch(cleanedQuery)) return [];
+    const generalTechnicalConceptQuestion = isGeneralTechnicalConceptQuestion(cleanedQuery)
+      || isLikelyGeneralTechnicalLecture(cleanedQuery);
     const explicitGeneralTechnicalQuestion = isExplicitGeneralTechnicalQuestion(cleanedQuery);
     const likelyThirdPartyTranscript = isLikelyThirdPartyTranscript(cleanedQuery);
     const likelyPassivePublicTranscript = isLikelyPublicMonologue(cleanedQuery) || isLikelyCompleteDialogueExcerpt(cleanedQuery);
+    const likelyExternalLearningContext = isLikelyExternalLearningTranscript(cleanedQuery);
     const behavioralStoryQuestion = isBehavioralStoryQuestion(cleanedQuery);
     if (likelyPassivePublicTranscript && !generalTechnicalConceptQuestion) return [];
 
@@ -2650,15 +4021,31 @@ class ConversationLogger {
         const vectorScore = vectorScores.find((item) => item.id === memory.id)?.score ?? 0;
         const intentBoost = personalMemoryIntentBoost(cleanedQuery, memory);
         const normalizedQuery = cleanedQuery.toLowerCase();
+        const queryWordCount = normalizedQuery.split(/\s+/).filter(Boolean).length;
         const sourceRef = memory.sourceRef.toLowerCase();
         const projectQuestion = hasAnyToken(queryTokens, ["project", "projects", "built", "build", "made", "experience", "architecture", "app"]);
-        const projectSpecificQuestion = !explicitGeneralTechnicalQuestion && includesAny(normalizedQuery, [
+        const explicitProjectQuestion = hasAnyToken(queryTokens, ["project", "projects", "built", "build", "made"])
+          || includesAny(normalizedQuery, ["my app", "your app", "my application", "your application"]);
+        const projectSpecificQuestion = !explicitGeneralTechnicalQuestion && (includesAny(normalizedQuery, [
           "saynext", "say next", "elderalbum", "elder album", "joblens", "job lens",
           "dalparkaid", "dal park", "my project", "your project", "my app", "your app",
           "which project should", "what project should", "project should i talk", "project should xiang talk",
           "project should i use", "album sharing app", "parking app", "parking mobile app",
           "parking project", "react native project parking", "react native experience",
-          "my aws project", "project album", "job matching app", "connecting aws services",
+          "my aws project", "my aws cloud project", "aws cloud project", "cloud project",
+          "project album", "job matching app", "connecting aws services",
+          "what project did i use", "what project did you use",
+          "conversation assistant", "conversation support", "real time conversation",
+          "realtime conversation", "real-time conversation", "live transcript", "live transcripts",
+        ]) || (
+          explicitProjectQuestion && includesAny(normalizedQuery, [
+            "aws", "cloud", "serverless", "lambda", "dynamodb", "s3", "api gateway",
+            "cloud architecture", "serverless architecture", "eventbridge", "sqs",
+            "fargate", "terraform", "event-driven",
+          ])
+        ));
+        const shortPersonalCoursePreferenceQuestion = queryWordCount <= 14 && includesAny(normalizedQuery, [
+          "cloud architecture why", "deep learning like why", "why you like deep learning",
         ]);
         const personalExperienceQuestion = includesAny(normalizedQuery, [
           "your programming interest", "my programming interest", "games related to",
@@ -2667,9 +4054,28 @@ class ConversationLogger {
           "how do you react under stress", "dating experience", "talking to girls",
           "what motivates you", "what did your family", "your family", "my family",
           "why do you like", "as a course", "what time is your", "personal data",
-          "privacy-sensitive", "not be overshared", "cloud architecture why",
-          "deep learning like why", "why you like deep learning",
+          "privacy-sensitive", "not be overshared",
+        ]) || shortPersonalCoursePreferenceQuestion;
+        const technicalKnowledgeQuestion = includesAny(normalizedQuery, [
+          "serverless", "cold start", "lambda", "api gateway", "dynamodb", "s3",
+          "sql", "nosql", "database index", "supervised learning", "unsupervised learning",
+          "backpropagation", "regularization", "hash map", "cap theorem", "jwt",
         ]);
+        const allowPersonalOrProjectMemory = isPersonalOrProjectMemoryQuery(cleanedQuery)
+          || projectSpecificQuestion
+          || personalExperienceQuestion
+          || behavioralStoryQuestion;
+
+        if (!allowPersonalOrProjectMemory
+          && memory.source !== "knowledge"
+          && !memory.category.startsWith("knowledge")) {
+          return acc;
+        }
+
+        if (!allowPersonalOrProjectMemory
+          && (sourceRef.startsWith("xiang-") || sourceRef.startsWith("doc:"))) {
+          return acc;
+        }
 
         if (memory.category === "behavioral_story" && !behavioralStoryQuestion) {
           return acc;
@@ -2679,12 +4085,23 @@ class ConversationLogger {
           return acc;
         }
 
-        if ((generalTechnicalConceptQuestion || likelyThirdPartyTranscript || likelyPassivePublicTranscript) && memory.source !== "knowledge" && !memory.category.startsWith("knowledge")) {
+        if ((generalTechnicalConceptQuestion || likelyThirdPartyTranscript || likelyPassivePublicTranscript || likelyExternalLearningContext)
+          && !projectSpecificQuestion
+          && !personalExperienceQuestion
+          && memory.source !== "knowledge"
+          && !memory.category.startsWith("knowledge")) {
+          return acc;
+        }
+
+        if ((generalTechnicalConceptQuestion || likelyExternalLearningContext)
+          && (sourceRef.startsWith("xiang-") || sourceRef.startsWith("doc:"))
+          && !projectSpecificQuestion
+          && !personalExperienceQuestion) {
           return acc;
         }
 
         if (memory.source === "knowledge") {
-          if (personalExperienceQuestion) return acc;
+          if (personalExperienceQuestion && !technicalKnowledgeQuestion) return acc;
           if (projectSpecificQuestion) return acc;
           if (sourceRef.startsWith("knowledge:cs-interview:")
             && includesAny(normalizedQuery, ["which project", "what project", "project are you", "project best shows", "project did you"])) {
@@ -2714,7 +4131,9 @@ class ConversationLogger {
         if (sourceRef.startsWith("doc:joblens") && !includesAny(normalizedQuery, [
           "joblens", "job lens", "job matching", "job aggregation", "resume upload",
           "resume parsing", "match analysis", "resume with a job posting", "job posting",
-          "application tracking", "dynamodb", "eventbridge", "sqs", "fargate",
+          "application tracking", "aws", "cloud", "cloud architecture", "aws architecture",
+          "serverless", "lambda", "api gateway", "dynamodb", "s3", "eventbridge", "sqs",
+          "fargate", "terraform", "event-driven",
         ])) {
           return acc;
         }
@@ -2759,7 +4178,9 @@ class ConversationLogger {
           "prenote", "personal memory", "scene profile", "ollama", "qwen", "openai",
           "gpt", "frp", "vps", "local mode", "travel mode", "recover", "bad context",
           "ui controls", "controls", "product thinking",
-          "design choices", "go through",
+          "design choices", "go through", "automatic context detection", "context detection",
+          "manual scene", "scene profiles", "project you did for next", "project did for next",
+          "small project you made",
         ]) && !(projectQuestion && includesAny(normalizedQuery, ["real time", "assistant", "conversation", "product thinking"]))) {
           return acc;
         }
@@ -2777,6 +4198,13 @@ class ConversationLogger {
 
         if (sourceRef.includes("xiang-profile:interview-style") && includesAny(normalizedQuery, [
           "strength that helps", "software projects",
+        ])) {
+          return acc;
+        }
+
+        if (sourceRef.includes("xiang-profile:canada-high-school-transition") && includesAny(normalizedQuery, [
+          "before canada", "before coming to canada", "before moving to canada",
+          "in china before canada", "china before canada",
         ])) {
           return acc;
         }
@@ -2847,7 +4275,7 @@ class ConversationLogger {
         }
 
         if (sourceRef.includes("doc:saynext:ui-ux") && includesAny(normalizedQuery, [
-          "why did i build", "why build", "why did you decide", "decide to build",
+          "why did i build", "why did you build", "why build", "why did you decide", "decide to build",
         ])) {
           return acc;
         }
@@ -2860,6 +4288,7 @@ class ConversationLogger {
 
         if (sourceRef.includes("xiang-update:2026-05:driving-car") && !includesAny(normalizedQuery, [
           "go to school", "get to school", "travel to school", "go to campus", "get to campus",
+          "expensive item", "most expensive", "ever bought", "you bought", "bought recently",
         ]) && !hasAnyToken(queryTokens, ["car", "drive", "driving", "driver", "license", "licence", "campus"])) {
           return acc;
         }
@@ -3022,6 +4451,257 @@ class ConversationLogger {
         return `Memory ${index + 1}: ${memory.title} [${memory.category}, ${memory.sensitivity}]\n${memory.content}${usage}`;
       })
       .join("\n\n---\n\n");
+  }
+
+  upsertSessionMemoryCandidate(input: UpsertSessionMemoryCandidateInput): SessionMemoryCandidateRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const content = input.content.trim();
+    if (!content) return null;
+
+    const keywords = Array.from(new Set((input.keywords ?? []).map((keyword) => keyword.trim()).filter(Boolean))).slice(0, 30);
+    const evidence = Array.from(new Set((input.evidence ?? []).map((item) => item.trim()).filter(Boolean))).slice(0, 12);
+    const contentHash = hashMemoryContent([
+      input.candidateType.trim(),
+      input.category.trim(),
+      content,
+    ].join("\n"));
+    const status = input.status === "approved" || input.status === "rejected" || input.status === "promoted"
+      ? input.status
+      : "pending";
+
+    this.getDb()
+      .query(`
+        INSERT INTO session_memory_candidates (
+          user_id, session_id, candidate_type, title, category, sensitivity,
+          content, usage_rule, keywords_json, evidence_json, confidence,
+          value_score, risk_score, validation_json, status, model, raw_json,
+          content_hash, rejection_reason
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, session_id, candidate_type, content_hash) DO UPDATE SET
+          title = excluded.title,
+          category = excluded.category,
+          sensitivity = excluded.sensitivity,
+          content = excluded.content,
+          usage_rule = excluded.usage_rule,
+          keywords_json = excluded.keywords_json,
+          evidence_json = excluded.evidence_json,
+          confidence = excluded.confidence,
+          value_score = excluded.value_score,
+          risk_score = excluded.risk_score,
+          validation_json = excluded.validation_json,
+          status = CASE
+            WHEN session_memory_candidates.status = 'promoted' THEN session_memory_candidates.status
+            ELSE excluded.status
+          END,
+          model = excluded.model,
+          raw_json = excluded.raw_json,
+          rejection_reason = excluded.rejection_reason,
+          updated_at = CURRENT_TIMESTAMP
+      `)
+      .run(
+        input.userId,
+        input.sessionId,
+        input.candidateType.trim() || "unknown",
+        input.title.trim() || "Memory candidate",
+        input.category.trim() || "general",
+        normalizeSensitivity(input.sensitivity),
+        content,
+        input.usageRule?.trim() || "",
+        JSON.stringify(keywords),
+        JSON.stringify(evidence),
+        clampUnit(input.confidence ?? 0),
+        clampUnit(input.valueScore ?? 0),
+        clampUnit(input.riskScore ?? 1),
+        JSON.stringify(input.validation ?? {}),
+        status,
+        input.model ?? null,
+        input.rawJson ?? "{}",
+        contentHash,
+        input.rejectionReason?.trim() || "",
+      );
+
+    const row = this.getDb()
+      .query(`
+        SELECT *
+        FROM session_memory_candidates
+        WHERE user_id = ? AND session_id = ? AND candidate_type = ? AND content_hash = ?
+        LIMIT 1
+      `)
+      .get(input.userId, input.sessionId, input.candidateType.trim() || "unknown", contentHash);
+
+    return row ? mapSessionMemoryCandidateRecord(row) : null;
+  }
+
+  getSessionMemoryCandidate(userId: string, id: number): SessionMemoryCandidateRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const row = this.getDb()
+      .query("SELECT * FROM session_memory_candidates WHERE user_id = ? AND id = ?")
+      .get(userId, id);
+
+    return row ? mapSessionMemoryCandidateRecord(row) : null;
+  }
+
+  listSessionMemoryCandidates(userId: string, options: { sessionId?: string; status?: string; limit?: number } = {}): SessionMemoryCandidateRecord[] {
+    if (!this.isEnabled()) return [];
+
+    const safeLimit = Math.max(1, Math.min(options.limit ?? 100, 1000));
+    const sessionId = options.sessionId ?? "";
+    const status = options.status ?? "all";
+    const rows = this.getDb()
+      .query(`
+        SELECT *
+        FROM session_memory_candidates
+        WHERE user_id = ?
+          AND (? = '' OR session_id = ?)
+          AND (? = 'all' OR status = ?)
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `)
+      .all(userId, sessionId, sessionId, status, status, safeLimit);
+
+    return rows.map(mapSessionMemoryCandidateRecord);
+  }
+
+  supersedeSessionMemoryCandidates(userId: string, sessionId: string): void {
+    if (!this.isEnabled()) return;
+
+    this.getDb()
+      .query(`
+        UPDATE session_memory_candidates
+        SET status = 'rejected',
+            rejection_reason = 'Superseded by a newer extraction run.',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ?
+          AND session_id = ?
+          AND status IN ('pending', 'approved')
+          AND promoted_memory_id IS NULL
+      `)
+      .run(userId, sessionId);
+  }
+
+  updateSessionMemoryCandidateStatus(
+    userId: string,
+    id: number,
+    status: SessionMemoryCandidateStatus,
+    rejectionReason = "",
+    promotedMemoryId?: number | null,
+  ): SessionMemoryCandidateRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const existing = this.getSessionMemoryCandidate(userId, id);
+    if (!existing) return null;
+
+    this.getDb()
+      .query(`
+        UPDATE session_memory_candidates
+        SET status = ?, rejection_reason = ?, promoted_memory_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND id = ?
+      `)
+      .run(status, rejectionReason, promotedMemoryId ?? existing.promotedMemoryId, userId, id);
+
+    return this.getSessionMemoryCandidate(userId, id);
+  }
+
+  updateSessionMemoryCandidate(userId: string, id: number, input: UpdateSessionMemoryCandidateInput): SessionMemoryCandidateRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const existing = this.getSessionMemoryCandidate(userId, id);
+    if (!existing) return null;
+
+    const title = typeof input.title === "string" && input.title.trim() ? input.title.trim() : existing.title;
+    const category = typeof input.category === "string" && input.category.trim() ? input.category.trim() : existing.category;
+    const content = typeof input.content === "string" ? input.content.trim() : existing.content;
+    const usageRule = typeof input.usageRule === "string" ? input.usageRule.trim() : existing.usageRule;
+    const keywords = input.keywords
+      ? Array.from(new Set(input.keywords.map((keyword) => keyword.trim()).filter(Boolean))).slice(0, 30)
+      : existing.keywords;
+    const evidence = input.evidence
+      ? Array.from(new Set(input.evidence.map((item) => item.trim()).filter(Boolean))).slice(0, 12)
+      : existing.evidence;
+    const status = input.status === "approved" || input.status === "rejected" || input.status === "promoted" || input.status === "pending"
+      ? input.status
+      : existing.status;
+    const contentHash = hashMemoryContent([
+      existing.candidateType,
+      category,
+      content,
+    ].join("\n"));
+
+    this.getDb()
+      .query(`
+        UPDATE session_memory_candidates
+        SET title = ?,
+            category = ?,
+            sensitivity = ?,
+            content = ?,
+            usage_rule = ?,
+            keywords_json = ?,
+            evidence_json = ?,
+            status = ?,
+            content_hash = ?,
+            rejection_reason = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND id = ?
+      `)
+      .run(
+        title,
+        category,
+        input.sensitivity ? normalizeSensitivity(input.sensitivity) : existing.sensitivity,
+        content,
+        usageRule,
+        JSON.stringify(keywords),
+        JSON.stringify(evidence),
+        status,
+        contentHash,
+        typeof input.rejectionReason === "string" ? input.rejectionReason.trim() : existing.rejectionReason,
+        userId,
+        id,
+      );
+
+    return this.getSessionMemoryCandidate(userId, id);
+  }
+
+  deleteSessionMemoryCandidate(userId: string, id: number): boolean {
+    if (!this.isEnabled()) return false;
+
+    const existing = this.getSessionMemoryCandidate(userId, id);
+    if (!existing) return false;
+
+    this.getDb()
+      .query("DELETE FROM session_memory_candidates WHERE user_id = ? AND id = ?")
+      .run(userId, id);
+    return true;
+  }
+
+  promoteSessionMemoryCandidate(userId: string, id: number): { candidate: SessionMemoryCandidateRecord; memory: PersonalMemoryRecord } | null {
+    if (!this.isEnabled()) return null;
+
+    const candidate = this.getSessionMemoryCandidate(userId, id);
+    if (!candidate || candidate.status === "rejected") return null;
+    if (candidate.candidateType === "event_summary") return null;
+
+    const source = candidate.candidateType === "knowledge_fact" ? "knowledge" : "pipeline";
+    const sourceRef = `session-memory:${candidate.id}`;
+    const memory = this.createPersonalMemory({
+      userId,
+      title: candidate.title,
+      category: candidate.category,
+      sensitivity: candidate.sensitivity,
+      content: candidate.content,
+      usageRule: candidate.usageRule,
+      keywords: candidate.keywords,
+      status: "active",
+      source,
+      sourceRef,
+      upsertBySource: true,
+    });
+
+    if (!memory) return null;
+    const updatedCandidate = this.updateSessionMemoryCandidateStatus(userId, id, "promoted", "", memory.id) ?? candidate;
+    return { candidate: updatedCandidate, memory };
   }
 
   createPrenote(input: CreatePrenoteInput): PrenoteRecord | null {

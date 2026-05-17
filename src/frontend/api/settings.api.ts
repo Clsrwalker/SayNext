@@ -115,3 +115,48 @@ export const resetCurrentSession = async (userId: string): Promise<{ ok: boolean
 
   return response.json();
 };
+
+export const advanceTeleprompt = async (userId: string): Promise<{ ok: boolean; active: boolean; advanced: boolean }> => {
+  const apiUrl = getApiUrl();
+  const response = await fetch(`${apiUrl}/api/teleprompt/next`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to advance teleprompt');
+  }
+
+  return response.json();
+};
+
+export const rewindTeleprompt = async (userId: string): Promise<{ ok: boolean; active: boolean; rewound: boolean }> => {
+  const apiUrl = getApiUrl();
+  const response = await fetch(`${apiUrl}/api/teleprompt/previous`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to rewind teleprompt');
+  }
+
+  return response.json();
+};
+
+export const cancelTeleprompt = async (userId: string): Promise<{ ok: boolean; active: boolean; cancelled: boolean }> => {
+  const apiUrl = getApiUrl();
+  const response = await fetch(`${apiUrl}/api/teleprompt/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to cancel teleprompt');
+  }
+
+  return response.json();
+};

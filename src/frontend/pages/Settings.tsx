@@ -19,6 +19,7 @@ interface SettingsProps {
   onOpenSceneProfiles: () => void;
   onOpenTranscriptExport: () => void;
   onOpenPersonalMemory: () => void;
+  onOpenMemoryReview: () => void;
   onResetCurrentSession: () => void;
   isDarkMode: boolean;
   onToggleDarkMode: () => void;
@@ -48,6 +49,7 @@ function Settings({
   onOpenSceneProfiles,
   onOpenTranscriptExport,
   onOpenPersonalMemory,
+  onOpenMemoryReview,
   onResetCurrentSession,
   isDarkMode,
   onToggleDarkMode,
@@ -255,6 +257,24 @@ function Settings({
               }}
             >
               Manage
+            </button>
+          }
+        />
+
+        <SettingItem
+          isFirstItem={false}
+          isLastItem={false}
+          settingItemName="Memory Review"
+          customContent={
+            <button
+              onClick={onOpenMemoryReview}
+              className="px-[12px] py-[6px] rounded-full text-[13px] font-semibold transition-all duration-300"
+              style={{
+                backgroundColor: 'var(--secondary-foreground)',
+                color: 'var(--primary-foreground)',
+              }}
+            >
+              Review
             </button>
           }
         />

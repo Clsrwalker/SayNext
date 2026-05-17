@@ -85,12 +85,48 @@ In travel mode:
 frps: inactive
 saynext: active
 caddy -> 127.0.0.1:3000
+SAYNEXT_RUNTIME_MODE=travel
+LLM_PROVIDER=openai
+session memory extraction -> synchronous OpenAI
+batch -> disabled
 ```
 
 Check public health:
 
 ```powershell
 curl.exe --ssl-no-revoke https://saynext.167.172.153.109.sslip.io/api/health
+```
+
+## Local/VPS Database Sync
+
+Use one database as the source of truth at a time:
+
+```text
+At home: Local is the main database.
+During travel: VPS is the main database.
+Sync before switching.
+Do not let both sides write new transcript or memory at the same time.
+```
+
+Update VPS code after pushing to GitHub:
+
+```powershell
+cd D:\SayNext
+.\scripts\update-vps-code.ps1
+```
+
+Switch from Local main database to VPS main database before travel:
+
+```powershell
+cd D:\SayNext
+.\scripts\sync-local-to-vps.ps1 -SwitchToTravelMode
+```
+
+Switch from VPS main database back to Local main database after travel:
+
+```powershell
+cd D:\SayNext
+.\scripts\sync-vps-to-local.ps1 -SwitchToLocalMode
 ```
 
 ## Old Full Remote Ollama Plan

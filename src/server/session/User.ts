@@ -36,6 +36,8 @@ export class User {
   private currentUtteranceBuffer: string = "";
   private utteranceTimer: NodeJS.Timeout | null = null;
   private lastProcessedUtterance: string = "";
+  private lastProcessedAt: number = 0;
+  private lastProcessedReason: 'isFinal' | 'timeout' | null = null;
 
   /** SSE clients for broadcasting events */
   private sseClients: Set<(data: string) => void> = new Set();
@@ -145,6 +147,28 @@ export class User {
       this.utteranceTimer = setTimeout(() => processBufferAndReset('timeout'), UTTERANCE_TIMEOUT_MS);
     };
 
+    const normalizeForDuplicate = (value: string) => value
+      .toLowerCase()
+      .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const isLateFinalCorrectionDuplicate = (text: string, reason: 'isFinal' | 'timeout') => {
+      if (reason !== 'isFinal') return false;
+      if (this.lastProcessedReason !== 'timeout') return false;
+      if (Date.now() - this.lastProcessedAt > 3000) return false;
+
+      const current = normalizeForDuplicate(text);
+      const previous = normalizeForDuplicate(this.lastProcessedUtterance);
+      if (!current || !previous) return false;
+      if (current === previous) return true;
+
+      const shorter = current.length < previous.length ? current : previous;
+      const longer = current.length < previous.length ? previous : current;
+      const lengthRatio = shorter.length / Math.max(longer.length, 1);
+      return longer.startsWith(shorter) && lengthRatio >= 0.72;
+    };
+
     const processBufferAndReset = (reason: 'isFinal' | 'timeout') => {
       if (this.utteranceTimer) {
         clearTimeout(this.utteranceTimer);
@@ -165,7 +189,15 @@ export class User {
           return;
         }
 
+        if (isLateFinalCorrectionDuplicate(textToProcess, reason)) {
+          session.logger.info(`Skipping late final ASR correction duplicate: "${textToProcess}"`);
+          this.currentUtteranceBuffer = "";
+          return;
+        }
+
         this.lastProcessedUtterance = textToProcess;
+        this.lastProcessedAt = Date.now();
+        this.lastProcessedReason = reason;
         session.logger.info(`Processing utterance (reason: ${reason}): "${textToProcess}"`);
         console.log(`[SayNext] Processing (${reason}): ${textToProcess}`);
         // Broadcast processing event for webview thinking indicator
@@ -270,6 +302,21 @@ export class User {
     this.broadcastInsightEvent({ type: 'manual_pause', paused: false });
   }
 
+  /** Force the current teleprompt to move to the next readable chunk. */
+  advanceTeleprompt(): boolean {
+    return this.responseHandler?.advanceTelepromptManually() || false;
+  }
+
+  /** Move the current teleprompt back to the previous readable chunk. */
+  rewindTeleprompt(): boolean {
+    return this.responseHandler?.rewindTelepromptManually() || false;
+  }
+
+  /** Cancel the current teleprompt and return to normal listening. */
+  cancelTeleprompt(): boolean {
+    return this.responseHandler?.cancelTelepromptManually() || false;
+  }
+
   /** Get current manual pause state */
   isPausedForReading(): boolean {
     return this.responseHandler?.getManualPauseState() || false;
@@ -308,6 +355,8 @@ export class User {
 
     this.currentUtteranceBuffer = "";
     this.lastProcessedUtterance = "";
+    this.lastProcessedAt = 0;
+    this.lastProcessedReason = null;
     this.responseHandler?.resetRuntimeState();
     this.clearScreenHistory();
     this.broadcastInsightEvent({ type: 'session_reset' });

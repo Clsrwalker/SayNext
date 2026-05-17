@@ -20,11 +20,15 @@ Core rules:
 - Known projects only: SayNext, Elder Album, Dal Parking Aid / DalParkAid, JobLens, and Study Session Tracker. If a project question is unclear, ask a short clarification instead of inventing a project name.
 - For professional, technical, or academic topics, be precise and knowledgeable. Use correct domain terms when useful.
 - For technical questions, answer the concept first with a useful principle, mechanism, trade-off, tool, or debugging step.
+- For DynamoDB slow query issues, mention the access pattern and whether the partition key, sort key, or GSI/index matches that query; also consider hot partitions.
 - For lecture/explanation context, provide a deeper useful note, concrete example, trade-off, or smart question. Do not write it as fake small talk.
+- For classroom lecture transcripts, sound like a capable student adding one useful point, not like a professor. Good shapes are: "The key difference is...", "A quick example is...", "One way to think about it is...", or "So the limitation is...".
+- If the professor asks the class a concept question, answer directly in 1-2 speakable sentences. If the professor is explaining, add one connection, example, limitation, or clarifying question instead of restating the lecture.
 - For meeting/group work, move the task forward. If someone is blocked by missing API/schema/info, suggest a concrete unblock step like using a mock schema, documenting assumptions, or asking for the exact contract.
 - For casual chat, sound like a normal student: simple, modest, slightly imperfect, not essay-like, not corporate.
 - Obey the requested output language. If Output language is English, answer in English even when the transcript is Chinese or mixed. Use Chinese only when Output language is Chinese.
 - For one-word or fragment transcripts like "And", "Yeah", "Present", or broken ASR, do not invent a full conversation. Give the smallest useful acknowledgement or clarification.
+- For unclear short questions like "Is that normal?", answer briefly if likely, or ask "What do you mean exactly?" Do not say "give me more context", "what are you referring to", or similar meta wording.
 - If the transcript looks like a third-party/public dialogue or speaker-labelled meeting, do not insert Xiang into it, do not say "I'm Xiang", and do not claim a role unless the speaker directly asks Xiang to introduce himself.
 - For public/open transcript or overheard third-party dialogue, do not use Xiang's personal hobbies, projects, school, or career. Keep it neutral.
 - Do not ask a return question unless it clearly helps. Do not act like a therapist, coach, or assistant managing the other person's life.
@@ -51,9 +55,27 @@ const MODEL_NAME = "gpt-4.1-mini";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:4b-instruct";
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 30000);
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || process.env.MODEL_TIMEOUT_MS || 30000);
 const LLM_PROVIDER = (process.env.LLM_PROVIDER || "openai").toLowerCase();
 const PROFILE_VERSION = "3.0";
 const ACTIVE_MODEL_NAME = LLM_PROVIDER === "ollama" ? OLLAMA_MODEL : MODEL_NAME;
+
+const telepromptInstructions = `You write natural spoken teleprompt scripts for Xiang.
+
+Return only the script text. No JSON, no labels, no bullet points, no stage directions.
+
+The script should sound like Xiang speaking:
+- natural spoken English by default
+- simple, slightly imperfect, not corporate
+- clear enough for interviews, IELTS, presentations, or project explanations
+- concrete when useful, but do not invent high-risk facts
+- ordinary low-risk details are allowed for IELTS/daily examples if they fit Xiang
+
+Avoid:
+- "Today I will talk about"
+- "In conclusion"
+- fake senior work experience
+- unsupported company, school, family, health, immigration, award, exact date, or named-person facts`;
 
 export const initialAgentHigh = new Agent({
   name: "SayNextAgentHigh",
@@ -71,6 +93,12 @@ export const initialAgentLow = new Agent({
   name: "SayNextAgentLow",
   model: openai(MODEL_NAME),
   instructions: sayNextInstructions
+});
+
+const telepromptAgent = new Agent({
+  name: "SayNextTelepromptAgent",
+  model: openai(MODEL_NAME),
+  instructions: telepromptInstructions,
 });
 
 export function sanitizeSayNextOutput(text: string): string {
@@ -124,6 +152,7 @@ export function sanitizeSayNextOutput(text: string): string {
   }
 
   cleaned = cleaned
+    .replace(/\s*(?:Can you|Could you)\s+give me more context\??/gi, "")
     .replace(/\bI don'?t really have a super dramatic dream job,\s*but\s*/i, "")
     .replace(/\bI don'?t have a dream job,\s*but\s*/i, "")
     .replace(/\bdream job\b/gi, "ideal role")
@@ -198,7 +227,7 @@ function removeUnsupportedIdentityClaim(output: string, transcript: string): str
 
 function looksLikePublicOpenEvent(eventMemory?: EventMemorySnapshot): boolean {
   const text = `${eventMemory?.scene ?? ""} ${eventMemory?.title ?? ""} ${eventMemory?.summary ?? ""}`.toLowerCase();
-  return /\bsource=open_|public open|open meeting|open lecture|open-domain|third-party\b/.test(text);
+  return /\bsource=open_|source=short_form|public open|open meeting|open lecture|open-domain|third-party\b/.test(text);
 }
 
 function removePublicTranscriptPersonalLeak(output: string, eventMemory?: EventMemorySnapshot): string {
@@ -206,21 +235,40 @@ function removePublicTranscriptPersonalLeak(output: string, eventMemory?: EventM
     return output;
   }
 
+  const leakPattern = /\b(xiang|x-i-a-n-g|li\b|dalhousie|macs|chengdu|saynext|elder album|joblens|dalparkaid|my project|coding|gaming|video games|aws|lambda|dynamodb|my sister|my brother|my family|my childhood|when i was a child|back in chengdu)\b/i;
   const filtered = output
     .split(/(?<=[.!?])\s+/)
     .filter((sentence) => {
-      return !/\b(xiang|dalhousie|macs|chengdu|saynext|elder album|joblens|dalparkaid|my project|coding|gaming|video games|aws|lambda|dynamodb)\b/i.test(sentence);
+      return !leakPattern.test(sentence);
     })
     .join(" ")
     .trim();
 
-  return filtered || output;
+  if (filtered) return filtered;
+  if (/\bspell|name\b/i.test(output)) return "Could you spell it out?";
+  if (leakPattern.test(output)) return "Yeah, that makes sense.";
+  return output;
+}
+
+function removeWrongNameEcho(output: string, transcript: string): string {
+  if (!/\b(name|pronounce|pronunciation|called|correct me)\b/i.test(transcript) || !/\bdaewon\b/i.test(output)) {
+    return output;
+  }
+
+  const filtered = output
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => !/\bdaewon\b/i.test(sentence))
+    .join(" ")
+    .trim();
+
+  return filtered || "I'm good, thanks. My name is Xiang Li, but Xiang is fine.";
 }
 
 function finalizeSayNextOutput(text: string, transcript: string, outputLanguage: OutputLanguage, eventMemory?: EventMemorySnapshot): string {
   const cleaned = sanitizeSayNextOutput(text);
   const withoutIdentityClaim = removeUnsupportedIdentityClaim(cleaned, transcript);
-  const withoutPublicLeak = removePublicTranscriptPersonalLeak(withoutIdentityClaim, eventMemory);
+  const withoutWrongNameEcho = removeWrongNameEcho(withoutIdentityClaim, transcript);
+  const withoutPublicLeak = removePublicTranscriptPersonalLeak(withoutWrongNameEcho, eventMemory);
   return enforceOutputLanguage(withoutPublicLeak, transcript, outputLanguage);
 }
 
@@ -277,6 +325,134 @@ async function generateWithOllama(prompt: string): Promise<string> {
   return String(data.response ?? "");
 }
 
+async function withModelTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function generateLongWithOllama(prompt: string): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(OLLAMA_TIMEOUT_MS, 60000));
+
+  const response = await fetch(`${OLLAMA_BASE_URL.replace(/\/$/, "")}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: controller.signal,
+    body: JSON.stringify({
+      model: OLLAMA_MODEL,
+      system: telepromptInstructions,
+      prompt,
+      stream: false,
+      options: {
+        temperature: 0.45,
+        top_p: 0.9,
+        num_ctx: 4096,
+        num_predict: 420,
+      },
+    }),
+  }).finally(() => clearTimeout(timeout));
+
+  if (!response.ok) {
+    throw new Error(`Ollama teleprompt request failed: ${response.status} ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  return String(data.response ?? "");
+}
+
+function normalizeTelepromptPrefix(text: string): string {
+  return String(text || "")
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, "\"")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.!?]+$/g, "")
+    .toLowerCase();
+}
+
+function stripLeadingOpeningLine(text: string, openingLine?: string): string {
+  const opening = openingLine?.trim();
+  const cleaned = text.trim();
+  if (!opening || !cleaned) return cleaned;
+
+  const directOpening = opening.toLowerCase();
+  const directCleaned = cleaned.toLowerCase();
+  if (directCleaned.startsWith(directOpening)) {
+    return cleaned
+      .slice(opening.length)
+      .replace(/^[\s:,\-.!?]+/, "")
+      .trim();
+  }
+
+  const target = normalizeTelepromptPrefix(opening);
+  const scanLimit = Math.min(cleaned.length, opening.length + 80);
+  for (let index = 0; index < scanLimit; index += 1) {
+    const char = cleaned[index];
+    if (char !== "." && char !== "!" && char !== "?" && char !== "\n") continue;
+
+    const candidate = cleaned.slice(0, index + 1);
+    if (normalizeTelepromptPrefix(candidate) === target) {
+      return cleaned
+        .slice(index + 1)
+        .replace(/^[\s:,\-.!?]+/, "")
+        .trim();
+    }
+  }
+
+  return cleaned;
+}
+
+function sanitizeTelepromptScript(text: string, openingLine?: string): string {
+  let cleaned = String(text || "")
+    .replace(/```(?:json|text)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  if (/^\s*\{/.test(cleaned)) {
+    const output = extractOutputField(cleaned);
+    if (output) cleaned = output;
+  }
+
+  cleaned = cleaned
+    .replace(/^\s*(script|answer|response|teleprompt|continued answer)\s*:\s*/i, "")
+    .replace(/\bI don'?t really have a super dramatic dream job,\s*but\s*/i, "")
+    .replace(/\bI don'?t have a dream job,\s*but\s*/i, "")
+    .replace(/\bdream job\b/gi, "ideal role")
+    .replace(/\bOverall,\s*/gi, "")
+    .replace(/\bIn conclusion,\s*/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  cleaned = stripLeadingOpeningLine(cleaned, openingLine);
+
+  return cleaned;
+}
+
+function isRoomHomeTeleprompt(text: string): boolean {
+  return /\b(room|bedroom|home|house|place where you live|where you live)\b/i.test(text);
+}
+
+function stripUnsupportedRoomVisualDetails(script: string, latestTranscript: string): string {
+  if (!isRoomHomeTeleprompt(latestTranscript)) return script;
+
+  const unsupportedVisualDetail = /\b(window|windows|view|poster|posters|plant|plants|wall|walls|floor|floors|chair|chairs|armchair|decorated|decoration|decorations|tidy|organized|organised|furniture|lamp|bookshelf|shelf|shelves)\b/i;
+  const sentences = script
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  const filtered = sentences.filter((sentence) => !unsupportedVisualDetail.test(sentence));
+
+  return filtered.length > 0 ? filtered.join(" ") : script;
+}
+
 function createInsight(output: string, reasoning: string, timestamp: number, confidence = 0.9): AgentResponse {
   return {
     type: Action.INSIGHT,
@@ -312,6 +488,13 @@ type PromptMode = "casual" | "classroom" | "interview" | "technical" | "service"
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
+}
+
+function countTelepromptWords(text: string): number {
+  const compacted = String(text || "").replace(/\s+/g, " ").trim();
+  const words = compacted.split(/\s+/).filter(Boolean).length;
+  const cjkChars = compacted.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+  return cjkChars > 0 ? Math.max(words, Math.round(cjkChars / 2)) : words;
 }
 
 function includesAny(text: string, keywords: string[]): boolean {
@@ -463,11 +646,25 @@ function formatCompactEventMemory(eventMemory?: EventMemorySnapshot): string {
   const recent = eventMemory.recentTranscripts
     .slice(-3)
     .map((text) => text.length > 140 ? `${text.slice(0, 137)}...` : text);
+  const meetingState = eventMemory.meetingState;
+  const formattedMeetingState = meetingState
+    ? [
+      meetingState.projectTopic ? `Project/topic: ${meetingState.projectTopic}` : "",
+      meetingState.currentGoal ? `Current goal: ${meetingState.currentGoal}` : "",
+      meetingState.currentDecision ? `Current decision: ${meetingState.currentDecision}` : "",
+      meetingState.openBlockers.length ? `Open blockers: ${meetingState.openBlockers.join(" | ")}` : "",
+      meetingState.knownAssumptions.length ? `Known assumptions: ${meetingState.knownAssumptions.join(" | ")}` : "",
+      meetingState.actionItems.length ? `Action items: ${meetingState.actionItems.join(" | ")}` : "",
+      meetingState.xiangResponsibility ? `Xiang responsibility: ${meetingState.xiangResponsibility}` : "",
+      meetingState.nextUsefulMove ? `Next useful move: ${meetingState.nextUsefulMove}` : "",
+    ].filter(Boolean).join("\n")
+    : "";
 
   return [
     `Scene: ${eventMemory.scene}`,
     eventMemory.title ? `Title: ${eventMemory.title}` : "",
     `Summary: ${eventMemory.summary.length > 260 ? `${eventMemory.summary.slice(0, 257)}...` : eventMemory.summary}`,
+    formattedMeetingState ? `Live meeting state:\n${formattedMeetingState}` : "",
     recent.length ? `Recent: ${recent.map((text) => `"${text}"`).join(" | ")}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -567,6 +764,125 @@ function getImmediateResponse(transcript: string, timestamp: number, outputLangu
   return null;
 }
 
+export async function generateTelepromptScript(params: {
+  conversation: Conversation;
+  eventMemory?: EventMemorySnapshot;
+  outputLanguage?: OutputLanguage;
+  activePrenoteContext?: string;
+  activeSceneProfilePrompt?: string;
+  relevantPersonalMemoryContext?: string;
+  openingLine: string;
+  targetMode: "expandable" | "long";
+}): Promise<string> {
+  const latestTranscript = getLatestTranscript(params.conversation);
+  const outputLanguage = params.outputLanguage ?? "english";
+  const promptMode = detectPromptMode(latestTranscript, params.eventMemory);
+  const formattedProfile = buildCompactXiangProfile(promptMode);
+  const formattedEventMemory = formatCompactEventMemory(params.eventMemory);
+  const formattedPrenoteContext = params.activePrenoteContext?.trim() || "No active prenote.";
+  const formattedSceneProfile = params.activeSceneProfilePrompt?.trim() || "No active scene profile.";
+  const formattedPersonalMemory = params.relevantPersonalMemoryContext?.trim() || "No relevant personal memory.";
+  const recentTranscriptText = params.conversation
+    .filter((item) => item.type === "transcript")
+    .slice(-5)
+    .map((item) => `Transcript: "${item.text}"`)
+    .join("\n");
+
+  const targetWords = params.targetMode === "long" ? "150-230" : "90-150";
+  const prompt = `Task:
+Write the continuation script Xiang can read after this opening line:
+"${params.openingLine}"
+
+Target length: ${targetWords} words.
+Output language: ${outputLanguage === "chinese" ? "Chinese" : "English"}.
+
+Rules:
+- Do not repeat the opening line. Start directly with the next sentence after it.
+- Write natural spoken text Xiang can read out loud.
+- Use short paragraphs and clear sentence breaks.
+- For long target length, use 2-3 short spoken paragraphs. Do not stop after only a short memory quote.
+- Prefer relevant personal memory when it directly matches the question.
+- If this is IELTS/daily speaking, add ordinary plausible details if useful, but do not invent specific room, house, family, job, school, health, or immigration facts.
+- For room/home answers, do not invent visual details like windows, views, posters, chairs, wall colors, floors, decorations, tidy/organized habits, or exact furniture unless they appear in memory.
+- If this is interview, project, school, technical, family, health, immigration, or work history, use only supported facts from the context below.
+- If exact facts are missing, stay general instead of inventing.
+- For classroom/technical questions, do not connect the answer to Xiang's project unless the question explicitly asks about his project or experience.
+- For behavioral interviews, match the requested story type exactly:
+  conflict = disagreement, scope, deadline, trade-off, or coordination;
+  feedback = feedback received and what changed;
+  hard bug = debugging process and fix.
+- For meeting blockers, say the blocker, a temporary workaround such as mock/schema/contract if relevant, and the next concrete step.
+- For demo/progress updates, use the active project/context below. If no exact feature or project is named, default to SayNext current work: teleprompt controls/testing, memory retrieval, scene profiles, local/travel mode, or response quality. Do not invent random features, stacks, teammates, users, load balancing, serverless architecture, or production-scale claims.
+- Avoid polished wrap-up phrases like "overall", "in conclusion", "this journey", or exaggerated resume language. Do not mention those phrases as examples either.
+- No bullet points, no labels, no Markdown heading, no JSON.
+
+Latest request:
+"${latestTranscript}"
+
+Recent conversation:
+${recentTranscriptText || "No recent conversation."}
+
+Active scene profile:
+${formattedSceneProfile}
+
+Xiang profile:
+${formattedProfile}
+
+Active event memory:
+${formattedEventMemory}
+
+Relevant personal memory:
+${formattedPersonalMemory}
+
+Active prenote memory:
+${formattedPrenoteContext}`;
+
+  const responseText = LLM_PROVIDER === "ollama"
+    ? await generateLongWithOllama(prompt)
+    : (await withModelTimeout(
+      telepromptAgent.generate(prompt),
+      Math.max(OPENAI_TIMEOUT_MS, 60000),
+      "OpenAI teleprompt request",
+    )).text;
+
+  let script = stripUnsupportedRoomVisualDetails(
+    sanitizeTelepromptScript(responseText, params.openingLine),
+    latestTranscript,
+  );
+
+  const minTargetWords = params.targetMode === "long" ? 110 : 55;
+  if (countTelepromptWords(script) < minTargetWords) {
+    const expandPrompt = `${prompt}
+
+The previous draft was too short for this teleprompt.
+Expand it to the requested target length using the same supported facts.
+Write at least ${params.targetMode === "long" ? 130 : 70} words.
+Do not add unsupported specific details.
+Do not repeat the opening line.
+Return only the final expanded script.
+
+Previous draft:
+${script}`;
+
+    const expandedText = LLM_PROVIDER === "ollama"
+      ? await generateLongWithOllama(expandPrompt)
+      : (await withModelTimeout(
+        telepromptAgent.generate(expandPrompt),
+        Math.max(OPENAI_TIMEOUT_MS, 60000),
+        "OpenAI teleprompt expand request",
+      )).text;
+    const expanded = stripUnsupportedRoomVisualDetails(
+      sanitizeTelepromptScript(expandedText, params.openingLine),
+      latestTranscript,
+    );
+    if (countTelepromptWords(expanded) > countTelepromptWords(script)) {
+      script = expanded;
+    }
+  }
+
+  return script;
+}
+
 export async function processConversation(
   conversation: Conversation,
   frequency: 'low' | 'medium' | 'high' = 'high',
@@ -621,8 +937,12 @@ export async function processConversation(
 - Follow the active scene profile first. It is Xiang's manual instruction for how to behave in this situation.
 - If it is a direct question, answer it directly.
 - If it is professional, technical, or academic, give a rigorous concept answer first. Be specific about mechanism, trade-off, assumption, tool, or example.
+- For DynamoDB/database slow-query questions, name the access pattern and index/GSI fit before talking about capacity or hot partitions.
 - If it is lecture/explanation and not a direct question, give a professional knowledge supplement or useful question, not a conversational reply.
+- In classroom lecture mode, use student-like explanation patterns: key difference, quick example, limitation, or a short clarifying question. Do not mimic the professor's long lecture style.
 - If it is casual, keep it natural and grounded.
+- If the transcript asks Xiang's name, identity, or name pronunciation, answer with Xiang Li / Xiang. Never identify Xiang as another name from the transcript, and do not repeat the wrong name.
+- If someone suggests adding a new feature before fixing a known bug/blocker, push back gently and prioritize the core bug first.
 - Use active prenote memory as prepared context when relevant. It is stronger than generic knowledge, but do not force it if unrelated.
 - Use relevant personal memory only when it directly helps answer the latest transcript. Do not volunteer sensitive details.
 - For low-stakes IELTS/daily personal questions, you may create small plausible details if they sound natural and fit Xiang. Do this to avoid robotic generic answers.
@@ -630,8 +950,9 @@ export async function processConversation(
 - Do not use the personal sample library.
 - The requested Output language below is mandatory.
 - For short fragments, do not create a new topic. Keep it minimal.
+- For unclear short questions, ask a natural clarification like "What do you mean exactly?" Avoid meta wording such as "give me more context" or "what are you referring to".
 - If the audio sounds like other people talking to each other, do not role-play as one of them unless Xiang is clearly being addressed.
-- If active event memory says the source is public/open transcript, do not use Xiang's hobbies, projects, school, career, or personal profile. Reply neutrally to the transcript only.
+- If active event memory says the source is public/open transcript, or its summary contains source=open_* or source=short_form, do not use Xiang's hobbies, projects, school, career, family, childhood, or personal profile. Do not say "my sister", "my family", "when I was a child", or similar personal claims. Reply neutrally to the transcript only.
 - If the latest transcript asks how to answer, output the answer itself, not strategy advice.
 
 --- ACTIVE SCENE PROFILE ---
@@ -692,7 +1013,7 @@ ${formattedHistory}`;
 
     const responseText = LLM_PROVIDER === "ollama"
       ? await generateWithOllama(prompt)
-      : (await agent.generate(prompt)).text;
+      : (await withModelTimeout(agent.generate(prompt), OPENAI_TIMEOUT_MS, "OpenAI SayNext request")).text;
 
     if (responseText) {
       if (LLM_PROVIDER === "ollama") {

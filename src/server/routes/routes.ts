@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { getHealth } from "../api/health";
 import { insightStream } from "../api/insights";
 import { getSettings, updateSettings } from "../api/settings";
-import { resetCurrentSession } from "../api/session";
+import { advanceTeleprompt, cancelTeleprompt, resetCurrentSession, rewindTeleprompt } from "../api/session";
 import { listConversationEvents, listConversationSamples, updateConversationSample } from "../api/conversation-samples";
 import {
   listPersonalMemoryItems,
@@ -18,6 +18,14 @@ import { createPrenote, deletePrenote, getPrenote, listPrenotes, updatePrenote }
 import { getTranscriptExport, listTranscriptExports, summarizeTranscriptExport } from "../api/transcript-exports";
 import { createSceneProfile, deleteSceneProfile, getSceneProfile, listSceneProfiles, updateSceneProfile } from "../api/scene-profiles";
 import { createPersonalMemory, deletePersonalMemory, listPersonalMemories, searchPersonalMemories, updatePersonalMemory } from "../api/personal-memories";
+import {
+  extractSessionMemoryCandidatesApi,
+  deleteSessionMemoryCandidate,
+  listSessionMemoryCandidates,
+  promoteSessionMemoryCandidate,
+  rejectSessionMemoryCandidate,
+  updateSessionMemoryCandidate,
+} from "../api/session-memory-candidates";
 
 export const api = new Hono();
 
@@ -31,6 +39,9 @@ api.get("/insight-stream", insightStream);
 api.get("/settings", getSettings);
 api.patch("/settings", updateSettings);
 api.post("/session/reset", resetCurrentSession);
+api.post("/teleprompt/next", advanceTeleprompt);
+api.post("/teleprompt/previous", rewindTeleprompt);
+api.post("/teleprompt/cancel", cancelTeleprompt);
 
 // Conversation samples for rating and future personalization datasets
 api.get("/conversation-samples", listConversationSamples);
@@ -68,3 +79,9 @@ api.delete("/scene-profiles/:id", deleteSceneProfile);
 api.get("/transcript-exports", listTranscriptExports);
 api.get("/transcript-exports/:sessionId", getTranscriptExport);
 api.post("/transcript-exports/:sessionId/summary", summarizeTranscriptExport);
+api.get("/session-memory-candidates", listSessionMemoryCandidates);
+api.post("/session-memory/:sessionId/extract", extractSessionMemoryCandidatesApi);
+api.patch("/session-memory-candidates/:id", updateSessionMemoryCandidate);
+api.post("/session-memory-candidates/:id/promote", promoteSessionMemoryCandidate);
+api.post("/session-memory-candidates/:id/reject", rejectSessionMemoryCandidate);
+api.delete("/session-memory-candidates/:id", deleteSessionMemoryCandidate);

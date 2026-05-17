@@ -1,12 +1,13 @@
 import { AppSession } from '@mentra/sdk';
 import { Action, AgentType, type AgentResponse, type AgentInsight, type Conversation, type AgentRoute } from "../types";
-import { processConversation, type OutputLanguage } from "./initial-agent";
+import { generateTelepromptScript, processConversation, type OutputLanguage } from "./initial-agent";
 import { routeToSpecialist } from "./specialist-agents";
-import { INSIGHTS_HISTORY_LENGTH, TRANSCRIPT_HISTORY_LENGTH, INSIGHT_CACHE_SIZE, SIMILARITY_THRESHOLD, INSIGHT_DISPLAY_DURATION_MS, MANUAL_PAUSE_DISPLAY_DURATION_MS } from '../../config';
+import { INSIGHTS_HISTORY_LENGTH, TRANSCRIPT_HISTORY_LENGTH, INSIGHT_CACHE_SIZE, SIMILARITY_THRESHOLD, INSIGHT_DISPLAY_DURATION_MS, MANUAL_PAUSE_DISPLAY_DURATION_MS, TELEPROMPT_DISPLAY_DURATION_MS } from '../../config';
 import { findBestMatch } from 'string-similarity';
 import { LocationManager } from '../../manager/LocationManager';
 import { conversationLogger } from '../../data/conversation-logger';
-import { EventMemoryManager } from '../../memory/event-memory';
+import { EventMemoryManager, type EventMemorySnapshot } from '../../memory/event-memory';
+import { makeTelepromptOpeningLine, shouldStartTeleprompt, TelepromptRuntime, type TelepromptDisplay } from '../../teleprompt/teleprompt-runtime';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 
@@ -26,6 +27,7 @@ export class MergeResponseHandler {
   private isPausedForReading: boolean = false;
   private processingSeq: number = 0;
   private recentInsightCache: string[] = [];
+  private teleprompt: TelepromptRuntime = new TelepromptRuntime();
   public frequency: 'low' | 'medium' | 'high';
   public outputLanguage: OutputLanguage;
 
@@ -71,6 +73,30 @@ export class MergeResponseHandler {
       timestamp
     });
 
+    const telepromptResult = this.teleprompt.isActive()
+      ? this.teleprompt.handleTranscript(text, timestamp)
+      : null;
+
+    if (telepromptResult) {
+      if (telepromptResult.action === "advance" || telepromptResult.action === "finish") {
+        this.showTelepromptDisplay(telepromptResult.display);
+        this.onStatus?.({ type: "processing_done", reason: `teleprompt_${telepromptResult.action}` });
+        this.trimConversationHistory();
+        return;
+      }
+
+      if (telepromptResult.action === "hold" && telepromptResult.consumed) {
+        this.onStatus?.({ type: "processing_done", reason: "teleprompt_hold" });
+        this.trimConversationHistory();
+        return;
+      }
+
+      if (telepromptResult.action === "cancel") {
+        this.session.logger.info(`Teleprompt cancelled: ${telepromptResult.reason}`);
+        this.onStatus?.({ type: "teleprompt_cancelled", reason: telepromptResult.reason });
+      }
+    }
+
     // --- CONTEXT ASSEMBLY ---
     const recentTranscripts = this.conversation
       .filter(item => item.type === 'transcript' || item.type === 'silent')
@@ -86,7 +112,25 @@ export class MergeResponseHandler {
 
     const activePrenoteContext = conversationLogger.getActivePrenoteRuntimeContext(this.userId);
     const activeSceneProfilePrompt = conversationLogger.getActiveSceneProfilePrompt(this.userId);
-    const relevantPersonalMemoryContext = conversationLogger.getRelevantPersonalMemoryContext(this.userId, text, 3);
+    const memoryQuery = eventSnapshot.recentTranscripts.slice(-4).join("\n") || text;
+    const relevantPersonalMemoryContext = conversationLogger.getRelevantPersonalMemoryContext(this.userId, memoryQuery, 3);
+
+    const telepromptNeed = shouldStartTeleprompt(text, `${eventSnapshot.scene} ${activeSceneProfilePrompt}`);
+    if (telepromptNeed !== "none") {
+      this.startTelepromptAnswer({
+        text,
+        timestamp,
+        context,
+        eventSnapshot,
+        activePrenoteContext,
+        activeSceneProfilePrompt,
+        relevantPersonalMemoryContext,
+        targetMode: telepromptNeed,
+      });
+      this.onStatus?.({ type: "processing_done", reason: `teleprompt_${telepromptNeed}` });
+      this.trimConversationHistory();
+      return;
+    }
 
     // Get Initial Agent's decision, passing the current frequency
     const response = await processConversation(
@@ -116,9 +160,7 @@ export class MergeResponseHandler {
     this.session.logger.info({conversation: this.conversation}, `Conversation`);
 
     // Trim conversation history if it gets too long
-    if (this.conversation.length > (TRANSCRIPT_HISTORY_LENGTH + INSIGHTS_HISTORY_LENGTH)) {
-      this.conversation = this.conversation.slice(-(TRANSCRIPT_HISTORY_LENGTH + INSIGHTS_HISTORY_LENGTH));
-    }
+    this.trimConversationHistory();
   }
 
   private logConversationSample(text: string, timestamp: number, response: AgentResponse): void {
@@ -140,6 +182,141 @@ export class MergeResponseHandler {
     } catch (error) {
       this.session.logger.error(`Failed to log conversation sample: ${error}`);
     }
+  }
+
+  private createTelepromptInsight(output: string, timestamp: number, reasoning: string): AgentInsight {
+    return {
+      type: Action.INSIGHT,
+      reasoning,
+      timestamp,
+      output,
+      confidence: 0.82,
+      metadata: {
+        agentType: AgentType.Initial,
+        agentInput: {
+          model: "teleprompt",
+          profileVersion: "teleprompt-v1",
+          retrievedSampleIds: [],
+        },
+      },
+    };
+  }
+
+  private startTelepromptAnswer(params: {
+    text: string;
+    timestamp: number;
+    context: Conversation;
+    eventSnapshot: EventMemorySnapshot;
+    activePrenoteContext: string;
+    activeSceneProfilePrompt: string;
+    relevantPersonalMemoryContext: string;
+    targetMode: "expandable" | "long";
+  }): void {
+    const openingLine = makeTelepromptOpeningLine(params.text);
+    const display = this.teleprompt.startPending(params.text, openingLine, params.timestamp);
+    const openingInsight = this.createTelepromptInsight(openingLine, params.timestamp, `Started ${params.targetMode} teleprompt`);
+
+    this.conversation.push(openingInsight);
+    this.eventMemory.addResponse(openingInsight);
+    this.logConversationSample(params.text, params.timestamp, openingInsight);
+    this.showTelepromptDisplay(display, openingInsight);
+    this.session.logger.info(`Teleprompt ${params.targetMode} started for: "${params.text}"`);
+
+    void generateTelepromptScript({
+      conversation: params.context,
+      eventMemory: params.eventSnapshot,
+      outputLanguage: this.outputLanguage,
+      activePrenoteContext: params.activePrenoteContext,
+      activeSceneProfilePrompt: params.activeSceneProfilePrompt,
+      relevantPersonalMemoryContext: params.relevantPersonalMemoryContext,
+      openingLine,
+      targetMode: params.targetMode,
+    }).then((script) => {
+      const readyDisplay = this.teleprompt.setScript(script);
+      if (!readyDisplay) return;
+      this.showTelepromptDisplay(readyDisplay);
+      this.onStatus?.({
+        type: "teleprompt_ready",
+        text: readyDisplay.text,
+        currentIndex: readyDisplay.currentIndex,
+        total: readyDisplay.total,
+      });
+    }).catch((error) => {
+      this.session.logger.error(`Teleprompt generation failed: ${error}`);
+      this.teleprompt.cancel();
+      this.onStatus?.({ type: "teleprompt_cancelled", reason: "generation_failed" });
+    });
+  }
+
+  private showTelepromptDisplay(display: TelepromptDisplay, agentResponse?: AgentInsight): void {
+    this.tryShowInsight(display.text, TELEPROMPT_DISPLAY_DURATION_MS, { skipCache: true }, agentResponse);
+    this.onStatus?.({
+      type: "teleprompt",
+      text: display.text,
+      currentIndex: display.currentIndex,
+      total: display.total,
+      status: display.status,
+    });
+  }
+
+  advanceTelepromptManually(): boolean {
+    const result = this.teleprompt.advanceManual(Date.now());
+
+    if (result.action === "advance" || result.action === "finish") {
+      this.showTelepromptDisplay(result.display);
+      this.onStatus?.({ type: "processing_done", reason: `teleprompt_manual_${result.action}` });
+      return true;
+    }
+
+    if (result.action === "cancel") {
+      this.session.logger.info(`Teleprompt cancelled by manual advance: ${result.reason}`);
+      this.onStatus?.({ type: "teleprompt_cancelled", reason: result.reason });
+      this.onStatus?.({ type: "processing_done", reason: "teleprompt_manual_cancel" });
+      return false;
+    }
+
+    this.onStatus?.({
+      type: "processing_done",
+      reason: result.action === "hold" && result.consumed ? "teleprompt_manual_waiting" : "teleprompt_manual_inactive",
+    });
+    return false;
+  }
+
+  rewindTelepromptManually(): boolean {
+    const result = this.teleprompt.rewindManual(Date.now());
+
+    if (result.action === "rewind") {
+      this.showTelepromptDisplay(result.display);
+      this.onStatus?.({ type: "processing_done", reason: "teleprompt_manual_rewind" });
+      return true;
+    }
+
+    if (result.action === "cancel") {
+      this.session.logger.info(`Teleprompt cancelled by manual rewind: ${result.reason}`);
+      this.onStatus?.({ type: "teleprompt_cancelled", reason: result.reason });
+      this.onStatus?.({ type: "processing_done", reason: "teleprompt_manual_cancel" });
+      return false;
+    }
+
+    this.onStatus?.({
+      type: "processing_done",
+      reason: result.action === "hold" && result.consumed ? "teleprompt_manual_waiting" : "teleprompt_manual_inactive",
+    });
+    return false;
+  }
+
+  cancelTelepromptManually(): boolean {
+    const result = this.teleprompt.cancelManual();
+
+    if (result.action === "cancel") {
+      this.onStatus?.({ type: "teleprompt_cancelled", reason: result.reason });
+      this.onStatus?.({ type: "processing_done", reason: "teleprompt_manual_cancel" });
+      this.session.layouts.showTextWall("SayNext is listening.", { durationMs: 1500 });
+      return true;
+    }
+
+    this.onStatus?.({ type: "processing_done", reason: "teleprompt_manual_inactive" });
+    return false;
   }
 
   /**
@@ -353,6 +530,12 @@ export class MergeResponseHandler {
     }, durationMs);
   }
 
+  private trimConversationHistory(): void {
+    if (this.conversation.length > (TRANSCRIPT_HISTORY_LENGTH + INSIGHTS_HISTORY_LENGTH)) {
+      this.conversation = this.conversation.slice(-(TRANSCRIPT_HISTORY_LENGTH + INSIGHTS_HISTORY_LENGTH));
+    }
+  }
+
   /**
    * Get the current conversation for debugging/testing
    */
@@ -374,6 +557,7 @@ export class MergeResponseHandler {
 
   resetRuntimeState(): void {
     this.processingSeq++;
+    this.teleprompt.cancel();
     this.conversation = [];
     this.recentInsightCache = [];
     this.lastInsightText = null;
@@ -401,6 +585,7 @@ export class MergeResponseHandler {
   }
 
   close(): void {
+    this.teleprompt.cancel();
     this.eventMemory.closeActiveEvent();
     if (this.eventIdleTimer) {
       clearTimeout(this.eventIdleTimer);
