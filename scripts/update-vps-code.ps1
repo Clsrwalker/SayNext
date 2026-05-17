@@ -55,7 +55,10 @@ saynext-mode-status
 "@
 
   ssh $VpsHost $remoteScript
-  exit $LASTEXITCODE
+  if ($LASTEXITCODE -ne 0) {
+    throw "VPS git-based update failed with exit code $LASTEXITCODE"
+  }
+  exit 0
 }
 
 Run "Build local committed-code archive" {
@@ -65,6 +68,9 @@ Run "Build local committed-code archive" {
 
 Run "Upload code archive to VPS" {
   scp $archivePath "${VpsHost}:$remoteArchive"
+  if ($LASTEXITCODE -ne 0) {
+    throw "SCP upload failed with exit code $LASTEXITCODE"
+  }
 }
 
 $remoteInstall = @"
@@ -99,6 +105,8 @@ BUN_BIN=/root/.bun/bin/bun
 '@
 }
 
+$remoteInstall += "`n"
+
 if ($NoRestart) {
   $remoteInstall += "echo 'Skipping saynext restart'`n"
 } else {
@@ -115,6 +123,9 @@ $remoteInstall += "`nsaynext-mode-status`n"
 
 Run "Install archive on VPS" {
   ssh $VpsHost $remoteInstall
+  if ($LASTEXITCODE -ne 0) {
+    throw "VPS archive update failed with exit code $LASTEXITCODE"
+  }
 }
 
 Write-Host "`nVPS code update complete."
