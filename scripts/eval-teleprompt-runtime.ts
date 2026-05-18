@@ -462,6 +462,65 @@ const interruptionCases: TelepromptCase[] = interruptionTexts.flatMap((text, ind
   },
 ]);
 
+const partialThenOtherInputs: Array<{ label: string; trigger: string; script: string }> = [
+  { label: "saynext", trigger: "Can you walk me through your SayNext project?", script: saynextScript },
+  { label: "cloud", trigger: "Please explain your cloud architecture answer in detail.", script: cloudScript },
+  { label: "ielts-room", trigger: "IELTS Part 2: Describe a room where you like to spend time.", script: ieltsDormScript },
+  { label: "interview-bug", trigger: "Tell me about a time you solved a difficult bug.", script: interviewBugScript },
+  { label: "daily-opinion", trigger: "Can you explain in detail why you like staying indoors?", script: dailyOpinionScript },
+  { label: "meeting-progress", trigger: "For this presentation, explain the current progress and remaining risks.", script: meetingProgressScript },
+];
+
+const partialThenOtherInterruptions = [
+  "Actually the backend schema changed after standup",
+  "Actually I already sent the API contract",
+  "Actually we are using a different endpoint now",
+  "No the database query is the real bottleneck",
+  "No the professor said the opposite in class",
+  "But the requirement changed yesterday",
+  "But the mobile screen cannot show that much text",
+  "But we already finished that part",
+  "But I think the user flow is different now",
+  "Hold on the API response is different now",
+  "Wait the dataset is not labeled",
+  "Sorry the meeting topic moved to deployment",
+  "One more thing the cost limit is lower now",
+  "Also the user asked for offline mode",
+  "The main issue is actually authentication",
+  "The blocker is not the frontend anymore",
+  "We changed the schema in the last pull request",
+  "I already tested this on the VPS",
+  "This is not for glasses it is mainly the phone app",
+  "Could you stop and answer my question about cost",
+];
+
+const partialThenOtherCases: TelepromptCase[] = partialThenOtherInputs.flatMap((input) =>
+  partialThenOtherInterruptions.map((interruption, index) => ({
+    id: `partial-read-then-other-${input.label}-${index + 1}`,
+    group: "partial read then other speaker",
+    trigger: input.trigger,
+    expectedStart: "long" as const,
+    script: input.script,
+    steps: [
+      {
+        transcript: index % 2 === 0 ? "__CURRENT_FIRST_HALF__" : "__CURRENT_PARTIAL_FILLER__",
+        expect: "hold_consumed" as const,
+        note: "ASR only captured part of Xiang reading; teleprompt should hold, not advance or cancel",
+      },
+      {
+        transcript: interruption,
+        expect: "cancel" as const,
+        note: "other speaker starts before ASR finished Xiang's reading; teleprompt should cancel",
+      },
+      {
+        transcript: "What should we check first?",
+        expect: "hold_open" as const,
+        note: "after cancel, later speech should be open for normal recognition instead of being swallowed",
+      },
+    ],
+  })),
+);
+
 const noCancelTexts = [
   "yeah",
   "okay",
@@ -918,6 +977,7 @@ const cases: TelepromptCase[] = [
   ...expandableCases,
   ...readFlowCases,
   ...interruptionCases,
+  ...partialThenOtherCases,
   ...backchannelCases,
   ...asrBorderCases,
   ...learnerStartCases,

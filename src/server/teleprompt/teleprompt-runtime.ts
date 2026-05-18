@@ -130,6 +130,37 @@ function normalize(text: string): string {
     .trim();
 }
 
+function normalizeInterruptionText(text: string): string {
+  return compact(text)
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasExplicitInterruptionMarker(text: string): boolean {
+  const normalized = normalizeInterruptionText(text);
+  if (!normalized) return false;
+
+  return (
+    /\bactually\s+(?:i already|we are|we already|we changed|user|backend|deadline|api|schema|cost|main issue|blocker|requirement|database|endpoint)\b/.test(normalized) ||
+    /\bactually\s+the\s+(?:deadline|backend|api|schema|cost|main issue|blocker|requirement|database|endpoint)\b/.test(normalized) ||
+    /\bno\s+(?:the|we|it|this|that)\b/.test(normalized) ||
+    /\bbut\s+(?:i think the|i already|user|mobile|requirement|backend|api)\b/.test(normalized) ||
+    /\bbut\s+the\s+(?:requirement|mobile screen|schema|backend|api|database|deadline|user flow|cost|blocker)\b/.test(normalized) ||
+    /\bbut\s+we\s+(?:already|changed|are using|need|cannot|can't)\b/.test(normalized) ||
+    /\bsorry\s+(?:the|meeting|to interrupt)\b/.test(normalized) ||
+    /\bone more thing\b/.test(normalized) ||
+    /\balso\s+(?:user|we|i)\b/.test(normalized) ||
+    /\balso\s+the\s+user\b/.test(normalized) ||
+    /\bthe\s+(?:blocker|requirement|deadline|database query|api response|dataset|cost limit)\b/.test(normalized) ||
+    /\bthe main issue\s+(?:is|was)\b/.test(normalized) ||
+    /\bwe changed\b/.test(normalized) ||
+    /\bi already\b/.test(normalized) ||
+    /\bthis is not for\b/.test(normalized)
+  );
+}
+
 function tokenOverlap(a: string, b: string): number {
   const left = new Set(normalize(a).split(/\s+/).filter((token) => token.length > 2 && !TOKEN_OVERLAP_STOP_WORDS.has(token)));
   const right = new Set(normalize(b).split(/\s+/).filter((token) => token.length > 2 && !TOKEN_OVERLAP_STOP_WORDS.has(token)));
@@ -202,6 +233,7 @@ function isLikelyInterruption(text: string): boolean {
   const normalized = normalize(text);
   if (!normalized || isShortBackchannel(text)) return false;
   if (isLikelyNewQuestion(text)) return true;
+  if (hasExplicitInterruptionMarker(text)) return true;
 
   return (
     /\b(thank you|thanks)\b.*\b(now|next|move|part two|part three|another|question|topic)\b/.test(normalized) ||
@@ -409,6 +441,7 @@ export class TelepromptRuntime {
       currentCoverage >= MIN_CURRENT_READING_EVIDENCE ||
       currentOverlap >= MIN_CURRENT_READING_EVIDENCE ||
       hasTargetOpeningEvidence(text, currentChunk);
+    const explicitInterruption = hasExplicitInterruptionMarker(text);
 
     const isCurrentChunkMatch = bestMatchIndex === 0;
     const isStrongFutureChunkMatch =
@@ -449,6 +482,11 @@ export class TelepromptRuntime {
     if (wordCount(text) >= LONG_UNMATCHED_TRANSCRIPT_WORDS && bestMatchIndex > 0 && !isStrongFutureChunkMatch && !hasCurrentReadingEvidence) {
       this.cancel();
       return { action: "cancel", reason: "future_chunk_mismatch_during_teleprompt" };
+    }
+
+    if (explicitInterruption && !hasCurrentReadingEvidence) {
+      this.cancel();
+      return { action: "cancel", reason: "interruption_during_teleprompt" };
     }
 
     if (
