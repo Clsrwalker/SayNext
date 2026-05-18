@@ -90,7 +90,7 @@ echo `$was_active
 
 $remoteWasActive = ""
 Run "Stop VPS app, back up VPS database, and package it" {
-  $remoteWasActive = (ssh $VpsHost $remotePackage).Trim()
+  $remoteWasActive = (Invoke-RemoteBash $remotePackage | Select-Object -Last 1).Trim()
   Write-Host "Previous VPS saynext state: $remoteWasActive"
 }
 

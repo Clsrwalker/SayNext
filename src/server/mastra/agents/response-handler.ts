@@ -17,6 +17,11 @@ const STRONG_ECHO_SIMILARITY = 0.82;
 const MEDIUM_ECHO_SIMILARITY = 0.68;
 const STRONG_ECHO_TRANSCRIPT_COVERAGE = 0.75;
 const MEDIUM_ECHO_TRANSCRIPT_COVERAGE = 0.55;
+const PARTIAL_ECHO_TRANSCRIPT_COVERAGE = 0.45;
+const PARTIAL_ECHO_SUGGESTION_COVERAGE = 0.38;
+const LOOSE_PARTIAL_ECHO_SIMILARITY = 0.46;
+const LOOSE_PARTIAL_ECHO_TRANSCRIPT_COVERAGE = 0.42;
+const LOOSE_PARTIAL_ECHO_SUGGESTION_COVERAGE = 0.26;
 const SUGGESTION_ECHO_STOP_WORDS = new Set([
   "the",
   "a",
@@ -73,6 +78,7 @@ export type SuggestionEchoMatch = {
   matched: boolean;
   similarity: number;
   transcriptCoverage: number;
+  suggestionCoverage: number;
   candidate: string;
 };
 
@@ -107,6 +113,19 @@ function tokenCoverage(source: string, target: string): number {
   return matches / targetTokens.length;
 }
 
+function suggestionCoverage(source: string, target: string): number {
+  const sourceTokens = echoTokens(source);
+  const targetTokens = new Set(echoTokens(target));
+  if (!sourceTokens.length || !targetTokens.size) return 0;
+
+  let matches = 0;
+  for (const token of sourceTokens) {
+    if (targetTokens.has(token)) matches += 1;
+  }
+  if (matches < 3) return 0;
+  return matches / sourceTokens.length;
+}
+
 function isLikelyFreshQuestionOrInterruption(text: string): boolean {
   const normalized = normalizeSuggestionEchoText(text);
   if (!normalized) return false;
@@ -116,7 +135,9 @@ function isLikelyFreshQuestionOrInterruption(text: string): boolean {
   }
   return (
     /\b(hold on|wait|stop there|sorry to interrupt|before you continue|quick question|another question|next question|move on|switch topic|different topic)\b/.test(normalized)
-    || /\b(can you|could you|would you|do you|did you|what about|how about|tell me|describe|explain)\b/.test(normalized)
+    || /\b(can you|could you|would you|do you|did you|is it|are you|have you|has it|what about|how about|tell me|describe|explain)\b/.test(normalized)
+    || /\b(what|why|how|when|where|who|which)\s+(?:is|are|was|were|do|does|did|can|could|would|should|the|your|you|we|it|that|this|about|kind|type|tech|class|project|game|problem|issue|mean|stack|model|course)\b/.test(normalized)
+    || /\bwhy\s+not\b/.test(normalized)
   );
 }
 
@@ -145,27 +166,34 @@ function extractDisplayedSuggestionCandidates(text: string): string[] {
 
 export function detectSuggestionEcho(transcript: string, displayedCandidates: string[]): SuggestionEchoMatch {
   if (isLikelyFreshQuestionOrInterruption(transcript)) {
-    return { matched: false, similarity: 0, transcriptCoverage: 0, candidate: "" };
+    return { matched: false, similarity: 0, transcriptCoverage: 0, suggestionCoverage: 0, candidate: "" };
   }
 
   const normalizedTranscript = normalizeSuggestionEchoText(transcript);
   if (wordCountForEcho(normalizedTranscript) < MIN_ECHO_WORDS) {
-    return { matched: false, similarity: 0, transcriptCoverage: 0, candidate: "" };
+    return { matched: false, similarity: 0, transcriptCoverage: 0, suggestionCoverage: 0, candidate: "" };
   }
 
-  let best: SuggestionEchoMatch = { matched: false, similarity: 0, transcriptCoverage: 0, candidate: "" };
+  let best: SuggestionEchoMatch = { matched: false, similarity: 0, transcriptCoverage: 0, suggestionCoverage: 0, candidate: "" };
   for (const candidate of displayedCandidates) {
     const normalizedCandidate = normalizeSuggestionEchoText(candidate);
     if (!normalizedCandidate) continue;
 
     const similarity = findBestMatch(normalizedTranscript, [normalizedCandidate]).bestMatch.rating;
     const transcriptCoverage = tokenCoverage(normalizedCandidate, normalizedTranscript);
+    const candidateCoverage = suggestionCoverage(normalizedCandidate, normalizedTranscript);
     const matched = similarity >= STRONG_ECHO_SIMILARITY
       || transcriptCoverage >= STRONG_ECHO_TRANSCRIPT_COVERAGE
-      || (similarity >= MEDIUM_ECHO_SIMILARITY && transcriptCoverage >= MEDIUM_ECHO_TRANSCRIPT_COVERAGE);
+      || (similarity >= MEDIUM_ECHO_SIMILARITY && transcriptCoverage >= MEDIUM_ECHO_TRANSCRIPT_COVERAGE)
+      || (candidateCoverage >= PARTIAL_ECHO_SUGGESTION_COVERAGE && transcriptCoverage >= PARTIAL_ECHO_TRANSCRIPT_COVERAGE)
+      || (
+        similarity >= LOOSE_PARTIAL_ECHO_SIMILARITY
+        && transcriptCoverage >= LOOSE_PARTIAL_ECHO_TRANSCRIPT_COVERAGE
+        && candidateCoverage >= LOOSE_PARTIAL_ECHO_SUGGESTION_COVERAGE
+      );
 
-    if (similarity + transcriptCoverage > best.similarity + best.transcriptCoverage) {
-      best = { matched, similarity, transcriptCoverage, candidate };
+    if (similarity + transcriptCoverage + candidateCoverage > best.similarity + best.transcriptCoverage + best.suggestionCoverage) {
+      best = { matched, similarity, transcriptCoverage, suggestionCoverage: candidateCoverage, candidate };
     }
   }
 
@@ -815,7 +843,7 @@ export class MergeResponseHandler {
     if (!match.matched) return false;
 
     this.session.logger.info(
-      `Suggestion echo detected similarity=${match.similarity.toFixed(2)} coverage=${match.transcriptCoverage.toFixed(2)} candidate="${match.candidate}"`,
+      `Suggestion echo detected similarity=${match.similarity.toFixed(2)} transcriptCoverage=${match.transcriptCoverage.toFixed(2)} suggestionCoverage=${match.suggestionCoverage.toFixed(2)} candidate="${match.candidate}"`,
     );
     return true;
   }
