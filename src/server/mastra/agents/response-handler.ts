@@ -10,6 +10,167 @@ import { EventMemoryManager, type EventMemorySnapshot } from '../../memory/event
 import { makeTelepromptOpeningLine, shouldStartTeleprompt, TelepromptRuntime, type TelepromptDisplay } from '../../teleprompt/teleprompt-runtime';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
+const SUGGESTION_ECHO_WINDOW_MS = 45 * 1000;
+const MAX_DISPLAYED_SUGGESTIONS = 12;
+const MIN_ECHO_WORDS = 3;
+const STRONG_ECHO_SIMILARITY = 0.82;
+const MEDIUM_ECHO_SIMILARITY = 0.68;
+const STRONG_ECHO_TRANSCRIPT_COVERAGE = 0.75;
+const MEDIUM_ECHO_TRANSCRIPT_COVERAGE = 0.55;
+const SUGGESTION_ECHO_STOP_WORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "but",
+  "so",
+  "to",
+  "of",
+  "in",
+  "on",
+  "for",
+  "with",
+  "that",
+  "this",
+  "it",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "i",
+  "me",
+  "my",
+  "you",
+  "your",
+  "we",
+  "our",
+  "they",
+  "their",
+  "yeah",
+  "uh",
+  "um",
+  "like",
+  "kind",
+  "sort",
+  "just",
+  "really",
+  "probably",
+  "maybe",
+]);
+
+type DisplayedSuggestion = {
+  text: string;
+  candidates: string[];
+  shownAt: number;
+  expiresAt: number;
+};
+
+export type SuggestionEchoMatch = {
+  matched: boolean;
+  similarity: number;
+  transcriptCoverage: number;
+  candidate: string;
+};
+
+function normalizeSuggestionEchoText(text: string): string {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\b(uh|um|erm|hmm|mm|ah|like|you know|i mean|sort of|kind of|actually|basically|honestly)\b/g, " ")
+    .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function echoTokens(text: string): string[] {
+  return normalizeSuggestionEchoText(text)
+    .split(/\s+/)
+    .filter((token) => token.length > 2 && !SUGGESTION_ECHO_STOP_WORDS.has(token));
+}
+
+function wordCountForEcho(text: string): number {
+  return normalizeSuggestionEchoText(text).split(/\s+/).filter(Boolean).length;
+}
+
+function tokenCoverage(source: string, target: string): number {
+  const sourceTokens = new Set(echoTokens(source));
+  const targetTokens = echoTokens(target);
+  if (!sourceTokens.size || !targetTokens.length) return 0;
+
+  let matches = 0;
+  for (const token of targetTokens) {
+    if (sourceTokens.has(token)) matches += 1;
+  }
+  return matches / targetTokens.length;
+}
+
+function isLikelyFreshQuestionOrInterruption(text: string): boolean {
+  const normalized = normalizeSuggestionEchoText(text);
+  if (!normalized) return false;
+  if (/\?\s*$/.test(text.trim())) return true;
+  if (/^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|tell me|describe|explain)\b/.test(normalized)) {
+    return true;
+  }
+  return (
+    /\b(hold on|wait|stop there|sorry to interrupt|before you continue|quick question|another question|next question|move on|switch topic|different topic)\b/.test(normalized)
+    || /\b(can you|could you|would you|do you|did you|what about|how about|tell me|describe|explain)\b/.test(normalized)
+  );
+}
+
+function extractDisplayedSuggestionCandidates(text: string): string[] {
+  const cleaned = String(text || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/^\d+\s*\/\s*\d+$/.test(line) && !/^next:?$/i.test(line))
+    .join("\n")
+    .replace(/^done\.\s*saynext is listening\.?$/i, "")
+    .trim();
+
+  if (!cleaned) return [];
+
+  const chunks = [
+    cleaned,
+    ...cleaned.split(/\n+next:\n+/i),
+    ...cleaned.split(/(?<=[.!?])\s+/),
+  ]
+    .map((item) => item.replace(/^next:\s*/i, "").trim())
+    .filter((item) => wordCountForEcho(item) >= MIN_ECHO_WORDS);
+
+  return Array.from(new Set(chunks));
+}
+
+export function detectSuggestionEcho(transcript: string, displayedCandidates: string[]): SuggestionEchoMatch {
+  if (isLikelyFreshQuestionOrInterruption(transcript)) {
+    return { matched: false, similarity: 0, transcriptCoverage: 0, candidate: "" };
+  }
+
+  const normalizedTranscript = normalizeSuggestionEchoText(transcript);
+  if (wordCountForEcho(normalizedTranscript) < MIN_ECHO_WORDS) {
+    return { matched: false, similarity: 0, transcriptCoverage: 0, candidate: "" };
+  }
+
+  let best: SuggestionEchoMatch = { matched: false, similarity: 0, transcriptCoverage: 0, candidate: "" };
+  for (const candidate of displayedCandidates) {
+    const normalizedCandidate = normalizeSuggestionEchoText(candidate);
+    if (!normalizedCandidate) continue;
+
+    const similarity = findBestMatch(normalizedTranscript, [normalizedCandidate]).bestMatch.rating;
+    const transcriptCoverage = tokenCoverage(normalizedCandidate, normalizedTranscript);
+    const matched = similarity >= STRONG_ECHO_SIMILARITY
+      || transcriptCoverage >= STRONG_ECHO_TRANSCRIPT_COVERAGE
+      || (similarity >= MEDIUM_ECHO_SIMILARITY && transcriptCoverage >= MEDIUM_ECHO_TRANSCRIPT_COVERAGE);
+
+    if (similarity + transcriptCoverage > best.similarity + best.transcriptCoverage) {
+      best = { matched, similarity, transcriptCoverage, candidate };
+    }
+  }
+
+  return best;
+}
 
 export class MergeResponseHandler {
   private session: AppSession;
@@ -27,6 +188,7 @@ export class MergeResponseHandler {
   private isPausedForReading: boolean = false;
   private processingSeq: number = 0;
   private recentInsightCache: string[] = [];
+  private recentDisplayedSuggestions: DisplayedSuggestion[] = [];
   private teleprompt: TelepromptRuntime = new TelepromptRuntime();
   public frequency: 'low' | 'medium' | 'high';
   public outputLanguage: OutputLanguage;
@@ -59,6 +221,12 @@ export class MergeResponseHandler {
     if (this.isPausedForReading) {
       this.session.logger.info(`Manual pause active, ignoring transcript: "${text}"`);
       this.onStatus?.({ type: "processing_done", reason: "paused" });
+      return;
+    }
+
+    if (!this.teleprompt.isActive() && this.isRecentDisplayedSuggestionEcho(text, timestamp)) {
+      this.session.logger.info(`Ignoring self-read suggestion echo: "${text}"`);
+      this.onStatus?.({ type: "processing_done", reason: "suggestion_echo" });
       return;
     }
 
@@ -418,6 +586,7 @@ export class MergeResponseHandler {
 
     this.isDisplaying = true;
     this.currentDisplayText = output;
+    this.rememberDisplayedSuggestion(output, durationMs);
     if (!options.skipCache) {
       this.lastInsightText = output;
     }
@@ -481,6 +650,7 @@ export class MergeResponseHandler {
     this.isDisplaying = true;
     this.currentDisplayText = text;
     this.lastInsightText = text;
+    this.rememberDisplayedSuggestion(text, MANUAL_PAUSE_DISPLAY_DURATION_MS);
     this.session.layouts.showTextWall(text, { durationMs: MANUAL_PAUSE_DISPLAY_DURATION_MS });
 
     this.pausedDisplayRefreshTimer = setTimeout(() => {
@@ -560,6 +730,7 @@ export class MergeResponseHandler {
     this.teleprompt.cancel();
     this.conversation = [];
     this.recentInsightCache = [];
+    this.recentDisplayedSuggestions = [];
     this.lastInsightText = null;
     this.currentDisplayText = null;
     this.isDisplaying = false;
@@ -611,5 +782,41 @@ export class MergeResponseHandler {
       this.eventIdleTimer = null;
       this.session.logger.info("Closed active conversation event after idle timeout");
     }, EVENT_IDLE_CLOSE_MS);
+  }
+
+  private rememberDisplayedSuggestion(text: string, durationMs: number): void {
+    const candidates = extractDisplayedSuggestionCandidates(text);
+    if (!candidates.length) return;
+
+    const now = Date.now();
+    const windowMs = Math.max(durationMs, SUGGESTION_ECHO_WINDOW_MS);
+    this.recentDisplayedSuggestions.push({
+      text,
+      candidates,
+      shownAt: now,
+      expiresAt: now + windowMs,
+    });
+
+    this.pruneDisplayedSuggestions(now);
+  }
+
+  private pruneDisplayedSuggestions(now = Date.now()): void {
+    this.recentDisplayedSuggestions = this.recentDisplayedSuggestions
+      .filter((item) => item.expiresAt >= now)
+      .slice(-MAX_DISPLAYED_SUGGESTIONS);
+  }
+
+  private isRecentDisplayedSuggestionEcho(text: string, timestamp: number): boolean {
+    this.pruneDisplayedSuggestions(timestamp);
+    if (!this.recentDisplayedSuggestions.length) return false;
+
+    const candidates = this.recentDisplayedSuggestions.flatMap((item) => item.candidates);
+    const match = detectSuggestionEcho(text, candidates);
+    if (!match.matched) return false;
+
+    this.session.logger.info(
+      `Suggestion echo detected similarity=${match.similarity.toFixed(2)} coverage=${match.transcriptCoverage.toFixed(2)} candidate="${match.candidate}"`,
+    );
+    return true;
   }
 }
