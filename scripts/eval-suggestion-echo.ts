@@ -7,6 +7,12 @@ type EchoCategory =
   | "partial-read-plus-own-thought"
   | "broken-reread"
   | "filler-heavy-reread"
+  | "misread-words"
+  | "asr-wrong-words"
+  | "omitted-words"
+  | "grammar-error-reread"
+  | "reordered-reread"
+  | "mixed-realistic-noise"
   | "reread-then-question"
   | "negative-controls";
 
@@ -232,6 +238,102 @@ const manualNegativeControls = [
   "Let's move to the next topic.",
 ];
 
+const testStopWords = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "but",
+  "so",
+  "to",
+  "of",
+  "in",
+  "on",
+  "for",
+  "with",
+  "that",
+  "this",
+  "it",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "i",
+  "me",
+  "my",
+  "you",
+  "your",
+  "we",
+  "our",
+  "they",
+  "their",
+]);
+
+const asrSubstitutions: Record<string, string[]> = {
+  "api": ["a p i", "AP I"],
+  "assistant": ["assistance"],
+  "availability": ["ability"],
+  "backend": ["back end"],
+  "caching": ["catching"],
+  "cold": ["code"],
+  "concurrency": ["currency", "con current see"],
+  "conversation": ["conservation"],
+  "dynamodb": ["dynamo db", "dino db"],
+  "frontend": ["front end"],
+  "gsi": ["g s i"],
+  "lambda": ["lamda", "landa"],
+  "latency": ["late see", "latencey"],
+  "memory": ["memories"],
+  "multi-az": ["multi a z", "multi AZ"],
+  "partition": ["position"],
+  "provisioned": ["provision", "revision"],
+  "relevant": ["relative"],
+  "retrieval": ["retrieve all", "retriever"],
+  "retrieves": ["retrieve", "reviews"],
+  "schema": ["scheme", "ski ma"],
+  "saynext": ["say next", "say net", "say necks"],
+  "serverless": ["server less"],
+  "supervised": ["super visor"],
+  "transcript": ["trans craft"],
+  "transcripts": ["transcript", "trans crafts"],
+};
+
+function cleanTokenKey(token: string): string {
+  return token.toLowerCase().replace(/[^\p{Letter}\p{Number}-]+/gu, "");
+}
+
+function contentWords(text: string): string[] {
+  return words(text).filter((token) => !testStopWords.has(cleanTokenKey(token)) && cleanTokenKey(token).length > 2);
+}
+
+function typoToken(token: string, index: number): string {
+  const key = cleanTokenKey(token);
+  if (key.length < 6) return token;
+  if (index % 4 === 0) return key.replace(/[aeiou]/, "");
+  if (index % 4 === 1) return `${key.slice(0, -1)}${key.at(-1)}`;
+  if (index % 4 === 2) return key.replace(/tion$/, "shin").replace(/ing$/, "in");
+  return key.replace(/r/g, "l").replace(/v/g, "b");
+}
+
+function substituteToken(token: string, index: number): string {
+  const key = cleanTokenKey(token);
+  const options = asrSubstitutions[key];
+  if (options?.length) return options[index % options.length]!;
+  return typoToken(token, index);
+}
+
+function fragmentWords(suggestion: string, index: number, ratio = 0.72): string[] {
+  const parts = words(truncateWords(suggestion, 38));
+  const length = clamp(Math.ceil(parts.length * ratio), 9, Math.min(28, parts.length));
+  const maxOffset = Math.max(0, parts.length - length);
+  const offset = maxOffset === 0 ? 0 : (index * 7) % (maxOffset + 1);
+  return parts.slice(offset, offset + length);
+}
+
 function partialReadPlusOwnThought(suggestion: string, index: number): string {
   const parts = words(truncateWords(suggestion, 36));
   const length = clamp(Math.ceil(parts.length * (0.42 + (index % 4) * 0.06)), 7, Math.min(20, parts.length));
@@ -269,6 +371,94 @@ function fillerHeavyReread(suggestion: string, index: number): string {
     if ((i + index) % 4 === 0) out.push(fillerPhrases[(i + index) % fillerPhrases.length]!);
     out.push(fragment[i]!);
     if ((i + index) % 9 === 0) out.push(fragment[i]!);
+  }
+  return out.join(" ");
+}
+
+function misreadWords(suggestion: string, index: number): string {
+  const fragment = fragmentWords(suggestion, index, 0.72);
+  const out = fragment.map((token, i) => {
+    if ((i + index) % 5 === 0) return substituteToken(token, i + index);
+    return token;
+  });
+  if (index % 4 === 0) out.splice(2, 0, fillerPhrases[index % fillerPhrases.length]!);
+  return out.join(" ");
+}
+
+function asrWrongWords(suggestion: string, index: number): string {
+  const fragment = fragmentWords(suggestion, index, 0.78);
+  const out: string[] = [];
+  for (let i = 0; i < fragment.length; i += 1) {
+    const token = fragment[i]!;
+    const key = cleanTokenKey(token);
+    if ((i + index) % 9 === 0 && testStopWords.has(key)) continue;
+    if ((i + index) % 4 === 0) {
+      out.push(substituteToken(token, i + index));
+      continue;
+    }
+    out.push(token);
+  }
+  return out.join(" ");
+}
+
+function omittedWords(suggestion: string, index: number): string {
+  const fragment = fragmentWords(suggestion, index, 0.82);
+  const out = fragment.filter((token, i) => {
+    const key = cleanTokenKey(token);
+    if (testStopWords.has(key) && (i + index) % 2 === 0) return false;
+    if (!testStopWords.has(key) && (i + index) % 7 === 0) return false;
+    return true;
+  });
+  return out.join(" ");
+}
+
+function grammarErrorReread(suggestion: string, index: number): string {
+  let text = fromWords(fragmentWords(suggestion, index, 0.8));
+  const replacements: Array<[RegExp, string]> = [
+    [/\bI built\b/gi, "I build"],
+    [/\bit listens\b/gi, "it listen"],
+    [/\bretrieves\b/gi, "retrieve"],
+    [/\bgives\b/gi, "give"],
+    [/\btrains\b/gi, "train"],
+    [/\bdepends\b/gi, "depend"],
+    [/\bimproves\b/gi, "improve"],
+    [/\bchanges\b/gi, "change"],
+    [/\bwas\b/gi, "is"],
+    [/\bwere\b/gi, "are"],
+    [/\ba pretty big adjustment\b/gi, "pretty big adjust"],
+  ];
+  for (const [pattern, replacement] of replacements) {
+    text = text.replace(pattern, replacement);
+  }
+  if (index % 3 === 0) text = text.replace(/\bthe\b/gi, "").replace(/\ba\b/gi, "");
+  if (index % 3 === 1) text = text.replace(/\btranscripts\b/gi, "transcript").replace(/\bfields\b/gi, "field");
+  return normalizeSpaces(text);
+}
+
+function reorderedReread(suggestion: string, index: number): string {
+  const fragment = fragmentWords(suggestion, index, 0.76);
+  const split = clamp(Math.floor(fragment.length * (0.42 + (index % 3) * 0.08)), 4, fragment.length - 3);
+  const first = fragment.slice(0, split);
+  const second = fragment.slice(split);
+  if (index % 3 === 0) return `${fromWords(second)} and before that ${fromWords(first)}`;
+  if (index % 3 === 1) return `${fromWords(second)} ${fromWords(first)}`;
+  return `${fromWords(first.slice(Math.floor(first.length / 2)))} ${fromWords(second)} ${fromWords(first.slice(0, Math.floor(first.length / 2)))}`;
+}
+
+function mixedRealisticNoise(suggestion: string, index: number): string {
+  const fragment = fragmentWords(suggestion, index, 0.82);
+  const out: string[] = [];
+  for (let i = 0; i < fragment.length; i += 1) {
+    const token = fragment[i]!;
+    const key = cleanTokenKey(token);
+    if ((i + index) % 6 === 0 && testStopWords.has(key)) continue;
+    if ((i + index) % 5 === 0) out.push(fillerPhrases[(i + index) % fillerPhrases.length]!);
+    if ((i + index) % 7 === 0) {
+      out.push(substituteToken(token, i + index));
+      continue;
+    }
+    out.push(token);
+    if ((i + index) % 11 === 0) out.push(token);
   }
   return out.join(" ");
 }
@@ -319,6 +509,36 @@ function buildCases(): EchoCase[] {
       expected: true,
       source: index < baseSuggestions.length ? "template" : "db-ai-reply/filler",
     }),
+    "misread-words": (suggestion, index) => ({
+      transcript: misreadWords(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/misread",
+    }),
+    "asr-wrong-words": (suggestion, index) => ({
+      transcript: asrWrongWords(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/asr-wrong",
+    }),
+    "omitted-words": (suggestion, index) => ({
+      transcript: omittedWords(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/omitted",
+    }),
+    "grammar-error-reread": (suggestion, index) => ({
+      transcript: grammarErrorReread(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/grammar",
+    }),
+    "reordered-reread": (suggestion, index) => ({
+      transcript: reorderedReread(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/reordered",
+    }),
+    "mixed-realistic-noise": (suggestion, index) => ({
+      transcript: mixedRealisticNoise(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/mixed-noise",
+    }),
     "reread-then-question": (suggestion, index) => ({
       transcript: rereadThenQuestion(suggestion, index),
       expected: false,
@@ -335,6 +555,12 @@ function buildCases(): EchoCase[] {
     "partial-read-plus-own-thought",
     "broken-reread",
     "filler-heavy-reread",
+    "misread-words",
+    "asr-wrong-words",
+    "omitted-words",
+    "grammar-error-reread",
+    "reordered-reread",
+    "mixed-realistic-noise",
     "reread-then-question",
     "negative-controls",
   ];

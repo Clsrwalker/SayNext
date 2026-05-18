@@ -150,7 +150,8 @@ function isLikelyFreshQuestionOrInterruption(text: string): boolean {
   }
   return (
     /\b(hold on|wait|stop there|sorry to interrupt|before you continue|quick question|another question|next question|move on|switch topic|different topic)\b/.test(normalized)
-    || /\b(can you|could you|would you|do you|did you|does that|does it|does this|is it|is that|are you|have you|has it|what about|how about|tell me|describe this|describe that|explain this|explain that)\b/.test(normalized)
+    || /\b(can you|could you|would you|do you|did you|does that|does it|does this|is it|are you|have you|has it|what about|how about|tell me|describe this|describe that|explain this|explain that)\b/.test(normalized)
+    || /\bis that\s+(?:for|a|an|the|your|because|like|possible|true|right|okay|clear)\b/.test(normalized)
     || /\bwhat\s+(?:class|tech stack|stack|game|project|model|course|happens|do you|did you|would you|is it|is that|are you|was|is|are|kind of|type of)\b/.test(normalized)
     || /\bwhy\s+(?:not|did|do|does|is|are|would|should)\b/.test(normalized)
     || /\bhow\s+(?:long|did|do|does|would|can|could|is|are)\b/.test(normalized)
