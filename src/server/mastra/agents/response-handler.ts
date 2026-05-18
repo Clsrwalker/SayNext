@@ -94,6 +94,48 @@ function normalizeSuggestionEchoText(text: string): string {
     .trim();
 }
 
+function normalizeInterruptionText(text: string): string {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasEmbeddedInterruptionMarker(text: string): boolean {
+  const normalized = normalizeInterruptionText(text);
+  if (!normalized) return false;
+
+  const markers = [
+    /\bactually\s+(?:i already|we are|we already|we changed|user|backend|deadline|api|schema|cost|main issue|blocker|requirement|database|endpoint)\b/g,
+    /\bactually\s+the\s+(?:deadline|backend|api|schema|cost|main issue|blocker|requirement|database|endpoint)\b/g,
+    /\bno\s+(?:the|we|it|this|that)\b/g,
+    /\bbut\s+(?:i think the|i already|user|mobile|requirement|backend|api)\b/g,
+    /\bbut\s+the\s+(?:requirement|mobile screen|schema|backend|api|database|deadline|user flow|cost|blocker)\b/g,
+    /\bbut\s+we\s+(?:already|changed|are using|need|cannot|can't)\b/g,
+    /\bsorry\s+(?:the|meeting|to interrupt)\b/g,
+    /\bone more thing\b/g,
+    /\balso\s+(?:user|we|i)\b/g,
+    /\balso\s+the\s+user\b/g,
+    /\bthe\s+(?:blocker|requirement|deadline|database query|api response|dataset|cost limit)\b/g,
+    /\bthe main issue\s+(?:is|was)\b/g,
+    /\bwe changed\b/g,
+    /\bi already\b/g,
+    /\bthis is not for\b/g,
+  ];
+
+  for (const marker of markers) {
+    marker.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = marker.exec(normalized)) !== null) {
+      const prefixWords = normalized.slice(0, match.index).split(/\s+/).filter(Boolean);
+      if (prefixWords.length >= 4) return true;
+    }
+  }
+
+  return false;
+}
+
 function echoTokens(text: string): string[] {
   return normalizeSuggestionEchoText(text)
     .split(/\s+/)
@@ -146,6 +188,9 @@ function isLikelyFreshQuestionOrInterruption(text: string): boolean {
     return true;
   }
   if (/^(have|has)\s+(?:you|we|they|it|this|that|the)\b/.test(normalized)) {
+    return true;
+  }
+  if (hasEmbeddedInterruptionMarker(text)) {
     return true;
   }
   return (
@@ -221,7 +266,9 @@ export function detectSuggestionEcho(transcript: string, displayedCandidates: st
         && transcriptCoverage >= 0.39
         && candidateCoverage >= 0.35
       );
-    const strongWholeEcho = similarity >= 0.86 || (transcriptCoverage >= 0.88 && candidateCoverage >= 0.65);
+    const strongWholeEcho = similarity >= 0.84
+      || (transcriptCoverage >= 0.84 && candidateCoverage >= 0.55)
+      || (transcriptCoverage >= 0.92 && candidateCoverage >= 0.5);
     const matched = freshQuestionOrInterruption ? strongWholeEcho : normalEchoMatch;
 
     if (similarity + transcriptCoverage + candidateCoverage > best.similarity + best.transcriptCoverage + best.suggestionCoverage) {
