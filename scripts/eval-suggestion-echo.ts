@@ -1,382 +1,365 @@
+import fs from "node:fs";
+import path from "node:path";
+import { conversationLogger } from "../src/server/data/conversation-logger";
 import { detectSuggestionEcho } from "../src/server/mastra/agents/response-handler";
 
+type EchoCategory =
+  | "partial-read-plus-own-thought"
+  | "broken-reread"
+  | "filler-heavy-reread"
+  | "reread-then-question"
+  | "negative-controls";
+
 type EchoCase = {
-  category: string;
+  category: EchoCategory;
   name: string;
   suggestion: string;
   transcript: string;
   expected: boolean;
+  source: string;
 };
 
-const dailySuggestion = "Good morning! I just have class later, so probably a bit of studying and then maybe some games to relax.";
-const projectSuggestion = "I built SayNext as a mobile real-time conversation assistant. It listens to transcripts, retrieves relevant memory, and gives short replies that I can say naturally.";
-const cloudSuggestion = "For Lambda cold starts, I would first check package size, initialization code, and whether provisioned concurrency makes sense for the traffic pattern.";
-const meetingSuggestion = "I can take the API contract first, mock the missing fields, and then update the frontend once the backend schema is confirmed.";
+const args = process.argv.slice(2);
+const userId = args.find((arg) => arg.includes("@")) || "li2897283405@gmail.com";
+const perCategory = Number(args.find((arg) => arg.startsWith("--per-category="))?.slice("--per-category=".length) || 120);
+const seed = Number(args.find((arg) => arg.startsWith("--seed="))?.slice("--seed=".length) || 20260517);
+const verbose = args.includes("--verbose");
 
-const cases: EchoCase[] = [
-  // Incomplete reread + Xiang continues with his own wording.
-  {
-    category: "partial-read-plus-own-thought",
-    name: "daily partial then extra plan",
-    suggestion: dailySuggestion,
-    transcript: "I just have class later, probably study a bit, and then I might go to the library if I still have energy",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "project partial then extra detail",
-    suggestion: projectSuggestion,
-    transcript: "I built SayNext as a mobile real-time conversation assistant, and honestly the hard part was making it not sound robotic",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "cloud partial then own example",
-    suggestion: cloudSuggestion,
-    transcript: "For Lambda cold starts I would check package size and initialization code, and maybe compare it with a warm start log",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "meeting partial then personal ownership",
-    suggestion: meetingSuggestion,
-    transcript: "I can take the API contract first and mock the missing fields, then I can unblock my part today",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "only tail plus own wording",
-    suggestion: dailySuggestion,
-    transcript: "a bit of studying and maybe some games later, probably nothing too crazy",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "project partial then phone clarification",
-    suggestion: projectSuggestion,
-    transcript: "I built SayNext as a mobile real time assistant, basically a phone app, not really a smart glasses app itself",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "cloud partial then vpc detail",
-    suggestion: cloudSuggestion,
-    transcript: "I would first check package size and initialization code, and if it is in a VPC I would check that too",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "meeting partial then assumptions",
-    suggestion: meetingSuggestion,
-    transcript: "I can mock the missing fields and document my assumptions so the team is not blocked",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "daily beginning then different ending",
-    suggestion: dailySuggestion,
-    transcript: "Good morning I just have class later, and after that I will probably just stay home",
-    expected: true,
-  },
-  {
-    category: "partial-read-plus-own-thought",
-    name: "project middle then extra process",
-    suggestion: projectSuggestion,
-    transcript: "it retrieves relevant memory and gives short replies naturally, and I tested a lot of awkward conversation cases",
-    expected: true,
-  },
+const repoRoot = process.cwd();
 
-  // Broken / stuttered / interrupted reread.
-  {
-    category: "broken-reread",
-    name: "daily broken chunks",
-    suggestion: dailySuggestion,
-    transcript: "Good morning I just, I just have class later, so probably a bit, a bit of studying",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "project broken chunks",
-    suggestion: projectSuggestion,
-    transcript: "I built SayNext as a mobile, mobile real time conversation assistant, it listens to transcript and retrieves memory",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "cloud broken chunks",
-    suggestion: cloudSuggestion,
-    transcript: "Lambda cold starts, I would first check package size, initialization, uh initialization code",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "meeting broken chunks",
-    suggestion: meetingSuggestion,
-    transcript: "I can take the API contract first, mock the missing fields, and then update, update the frontend",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "asr clipped beginning",
-    suggestion: projectSuggestion,
-    transcript: "real time conversation assistant it listens to transcripts retrieves relevant memory and gives short replies",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "daily repeated fragments",
-    suggestion: dailySuggestion,
-    transcript: "class later class later probably studying studying and then maybe games",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "project missing grammar",
-    suggestion: projectSuggestion,
-    transcript: "SayNext mobile real time assistant listen transcript retrieve memory give short reply natural",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "cloud clipped technical",
-    suggestion: cloudSuggestion,
-    transcript: "cold starts check package size init code provisioned concurrency traffic pattern",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "meeting no function words",
-    suggestion: meetingSuggestion,
-    transcript: "take API contract mock missing fields update frontend backend schema confirmed",
-    expected: true,
-  },
-  {
-    category: "broken-reread",
-    name: "daily starts late and repeats",
-    suggestion: dailySuggestion,
-    transcript: "probably a bit a bit of studying then maybe maybe some games to relax",
-    expected: true,
-  },
+function makeRandom(initialSeed: number) {
+  let state = initialSeed >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
 
-  // Heavy filler / natural spoken hesitation while reading.
-  {
-    category: "filler-heavy-reread",
-    name: "daily many fillers",
-    suggestion: dailySuggestion,
-    transcript: "yeah honestly I just have like class later so probably kind of a bit of studying and then maybe some games to relax",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "project many fillers",
-    suggestion: projectSuggestion,
-    transcript: "so basically I built SayNext as like a mobile real time conversation assistant and it kind of retrieves relevant memory",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "cloud many fillers",
-    suggestion: cloudSuggestion,
-    transcript: "I mean for Lambda cold starts I would probably first check package size and like initialization code",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "meeting many fillers",
-    suggestion: meetingSuggestion,
-    transcript: "yeah I can maybe take the API contract first and mock the missing fields for now",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "double filler and repetition",
-    suggestion: dailySuggestion,
-    transcript: "um yeah I just have class later, like class later, so probably a bit of studying",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "project casual filler",
-    suggestion: projectSuggestion,
-    transcript: "honestly yeah I built SayNext as kind of a mobile real time conversation assistant, like it listens to transcripts",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "cloud hesitation",
-    suggestion: cloudSuggestion,
-    transcript: "uh for Lambda cold starts I would like first check package size, maybe initialization code, you know",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "meeting hesitant ownership",
-    suggestion: meetingSuggestion,
-    transcript: "I guess I can take the API contract first and like mock the missing fields for now",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "daily filler before tail",
-    suggestion: dailySuggestion,
-    transcript: "yeah so probably a bit of studying and then honestly maybe some games to relax",
-    expected: true,
-  },
-  {
-    category: "filler-heavy-reread",
-    name: "project filler and asr singular",
-    suggestion: projectSuggestion,
-    transcript: "so it listen to transcript and retrieve relevant memory and gives like short reply I can say naturally",
-    expected: true,
-  },
+const random = makeRandom(seed);
 
-  // Reading starts, then the other person interrupts with a real question.
-  // These should not be swallowed; the new question should drive SayNext.
-  {
-    category: "reread-then-question",
-    name: "daily read then followup question",
-    suggestion: dailySuggestion,
-    transcript: "I just have class later so probably a bit of studying. What class do you have?",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "project read then ask tech stack",
-    suggestion: projectSuggestion,
-    transcript: "I built SayNext as a mobile real time conversation assistant. What tech stack did you use?",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "cloud read then challenge",
-    suggestion: cloudSuggestion,
-    transcript: "For Lambda cold starts I would check package size. But why not just use containers?",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "meeting read then blocker question",
-    suggestion: meetingSuggestion,
-    transcript: "I can take the API contract first. Can you finish it before Friday?",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "interrupt marker",
-    suggestion: projectSuggestion,
-    transcript: "I built SayNext as a mobile real time conversation assistant. Wait, before you continue, is this for glasses or phone?",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "no punctuation tech stack question",
-    suggestion: projectSuggestion,
-    transcript: "I built SayNext as a mobile real time conversation assistant what tech stack did you use",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "no punctuation class question",
-    suggestion: dailySuggestion,
-    transcript: "I just have class later so probably a bit of studying what class is it",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "no punctuation why challenge",
-    suggestion: cloudSuggestion,
-    transcript: "I would first check package size and initialization code why not just use containers",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "no punctuation can you question",
-    suggestion: meetingSuggestion,
-    transcript: "I can take the API contract first can you finish it before Friday",
-    expected: false,
-  },
-  {
-    category: "reread-then-question",
-    name: "read then switch topic",
-    suggestion: dailySuggestion,
-    transcript: "probably a bit of studying and then maybe some games anyway different topic what are you doing tomorrow",
-    expected: false,
-  },
+function pick<T>(items: T[], fallback: T): T {
+  if (!items.length) return fallback;
+  return items[Math.floor(random() * items.length)] ?? fallback;
+}
 
-  // Negative controls: overlapping topic, but not a self-read.
-  {
-    category: "negative-controls",
-    name: "daily natural response",
-    suggestion: dailySuggestion,
-    transcript: "Sounds chill. Are you mostly taking it easy today?",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "project real followup",
-    suggestion: projectSuggestion,
-    transcript: "That sounds useful, but how do you prevent it from giving awkward replies?",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "cloud concept question",
-    suggestion: cloudSuggestion,
-    transcript: "How does provisioned concurrency actually reduce cold start latency?",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "meeting answer from teammate",
-    suggestion: meetingSuggestion,
-    transcript: "I already have the schema ready, I can send it after this call.",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "short backchannel",
-    suggestion: dailySuggestion,
-    transcript: "yeah",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "teammate mentions api contract",
-    suggestion: meetingSuggestion,
-    transcript: "The API contract is ready now, I added the missing fields this morning.",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "classmate mentions lambda",
-    suggestion: cloudSuggestion,
-    transcript: "Our Lambda function is slow because the database query is taking too long.",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "friend talks about games",
-    suggestion: dailySuggestion,
-    transcript: "I played games all night and now I am kind of tired.",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "interviewer asks project without question mark",
-    suggestion: projectSuggestion,
-    transcript: "Tell me more about how the memory retrieval works",
-    expected: false,
-  },
-  {
-    category: "negative-controls",
-    name: "professor asks explain without question mark",
-    suggestion: cloudSuggestion,
-    transcript: "Explain how provisioned concurrency changes the scaling behavior",
-    expected: false,
-  },
+function normalizeSpaces(text: string): string {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function stripDisplayChrome(text: string): string {
+  return normalizeSpaces(text)
+    .replace(/^\d+\s*\/\s*\d+\s*/g, "")
+    .replace(/\bNext:\s*/gi, " ")
+    .replace(/\bDone\. SayNext is listening\.?/gi, "")
+    .replace(/^AI:\s*/i, "")
+    .trim();
+}
+
+function words(text: string): string[] {
+  return stripDisplayChrome(text)
+    .replace(/[^\p{Letter}\p{Number}'-]+/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function fromWords(items: string[]): string {
+  return normalizeSpaces(items.join(" "));
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function truncateWords(text: string, maxWords: number): string {
+  const parts = words(text);
+  if (parts.length <= maxWords) return stripDisplayChrome(text);
+  return fromWords(parts.slice(0, maxWords));
+}
+
+function wordCount(text: string): number {
+  return words(text).length;
+}
+
+function uniqueByText(items: string[], max = 240): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const cleaned = stripDisplayChrome(item);
+    const key = cleaned.toLowerCase();
+    if (wordCount(cleaned) < 5 || seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function isQuestionLikeSuggestion(text: string): boolean {
+  const normalized = stripDisplayChrome(text).toLowerCase();
+  return /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|tell me|describe|explain)\b/.test(normalized)
+    || /\b(could you|can you|do you want me to|please clarify|what do you mean|could you clarify|repeat|remind me|which .* mean)\b/.test(normalized);
+}
+
+function readDocSnippets(): string[] {
+  const docs = [
+    "docs/lecture_transcript.md",
+    "docs/lecture_transcript2.md",
+    "docs/lecture_transcript3.md",
+    "docs/transcript3.md",
+  ];
+
+  const snippets: string[] = [];
+  for (const relative of docs) {
+    const file = path.join(repoRoot, relative);
+    if (!fs.existsSync(file)) continue;
+    const text = fs.readFileSync(file, "utf8");
+    const pieces = text
+      .replace(/\r\n/g, "\n")
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map((item) => normalizeSpaces(item))
+      .filter((item) => item.length >= 35 && item.length <= 220);
+    for (let i = 0; i < pieces.length; i += Math.max(1, Math.floor(pieces.length / 120))) {
+      if (pieces[i]) snippets.push(pieces[i]);
+    }
+  }
+  return snippets;
+}
+
+function loadDbPools() {
+  const samples = conversationLogger.listSamples(userId, 200);
+  return {
+    aiReplies: uniqueByText(samples.map((sample) => sample.aiReply || "").filter(Boolean), 120),
+    transcripts: uniqueByText(samples.map((sample) => sample.transcript || "").filter(Boolean), 160),
+  };
+}
+
+const baseSuggestions = [
+  "Good morning! I just have class later, so probably a bit of studying and then maybe some games to relax.",
+  "I built SayNext as a mobile real-time conversation assistant. It listens to transcripts, retrieves relevant memory, and gives short replies that I can say naturally.",
+  "For Lambda cold starts, I would first check package size, initialization code, and whether provisioned concurrency makes sense for the traffic pattern.",
+  "I can take the API contract first, mock the missing fields, and then update the frontend once the backend schema is confirmed.",
+  "A quick example of supervised learning is email spam detection, because the model trains on emails that are already labeled spam or not spam.",
+  "I went to Aubrey Drive High School in Dartmouth after moving to Canada, and it was a pretty big adjustment at first.",
+  "For DynamoDB, I would start from the access pattern and check whether the partition key, sort key, or GSI actually supports that query.",
+  "I prefer indoors most of the time, but sometimes I like walking around a park alone when I need a quiet reset.",
+  "I would keep the first version simple: define the schema, mock the API response, then connect the real endpoint when it is ready.",
+  "The main tradeoff is that caching improves latency, but it also introduces invalidation problems when the underlying data changes.",
+  "For a project bug, I usually reproduce it first, check the logs, narrow the failing layer, and then test the smallest fix.",
+  "I am interested in AI software because it feels practical; you can build something that directly helps people communicate or work faster.",
+  "In a meeting, I would ask for the exact acceptance criteria first, because otherwise we might all implement slightly different versions.",
+  "The key idea is that multi-AZ improves availability by letting the system fail over if one availability zone has a problem.",
+  "I usually learn better by building something and testing it, instead of just memorizing the theory from slides.",
+  "For the UI, I would rather keep the flow simple and reduce the number of choices the user has to think about.",
+  "If the model gives a weird answer, I would check the input context first before blaming the model, because retrieval often causes the issue.",
+  "Honestly, I am pretty low energy, so after class I usually just study a bit, watch something, or play games.",
+  "One limitation is that this design depends heavily on transcript quality, so noisy ASR can easily push the system in the wrong direction.",
+  "For interviews, I try to keep the answer specific: what the problem was, what I did, and what changed after that.",
 ];
 
-const byCategory = new Map<string, { total: number; failed: number }>();
+const ownThoughtContinuations = [
+  "and then I would probably explain it in a more casual way.",
+  "and honestly that is the part I would want to improve next.",
+  "so I would probably use that as the main example.",
+  "and I can add a small detail if they ask follow up.",
+  "which is why I think the process matters more than just the final answer.",
+  "and that is basically how I would say it out loud.",
+  "but I would keep it short because too much detail sounds weird.",
+  "and I would connect it back to the actual situation.",
+  "so it does not sound like I memorized a script.",
+  "and if they want more detail I can go deeper after that.",
+  "then I can mention the concrete tradeoff instead of overexplaining.",
+  "and I would probably pause there instead of adding random extra stuff.",
+];
+
+const fillerPhrases = [
+  "yeah",
+  "uh",
+  "um",
+  "like",
+  "you know",
+  "I mean",
+  "honestly",
+  "basically",
+  "kind of",
+  "sort of",
+  "actually",
+  "probably",
+];
+
+const questionSuffixes = [
+  "what class is it",
+  "what tech stack did you use",
+  "why not just use containers",
+  "can you finish it before Friday",
+  "how did you test that",
+  "what was the hardest part",
+  "is that for a phone app or glasses",
+  "can you explain that simpler",
+  "what do you mean by memory retrieval",
+  "how does that work in real time",
+  "why did you choose DynamoDB",
+  "what happens if the transcript is wrong",
+  "can you give me a concrete example",
+  "how would you debug that",
+  "what is the tradeoff here",
+  "did you build that by yourself",
+  "how long did it take",
+  "what would you improve next",
+  "does that work offline",
+  "can you repeat the last part",
+];
+
+const manualNegativeControls = [
+  "Sounds chill. Are you mostly taking it easy today?",
+  "That sounds useful, but how do you prevent it from giving awkward replies?",
+  "How does provisioned concurrency actually reduce cold start latency?",
+  "I already have the schema ready, I can send it after this call.",
+  "The API contract is ready now, I added the missing fields this morning.",
+  "Our Lambda function is slow because the database query is taking too long.",
+  "I played games all night and now I am kind of tired.",
+  "Tell me more about how the memory retrieval works.",
+  "Explain how provisioned concurrency changes the scaling behavior.",
+  "The professor said we should compare supervised and unsupervised learning.",
+  "I think the frontend state is not updating because the dependency array is wrong.",
+  "Can you talk about your internship preparation plan?",
+  "The meeting is mostly about deadlines and who owns each task.",
+  "The transcript keeps changing before finalizing, so we should wait for final output.",
+  "There is an echo in the online meeting and the microphone may be picking up the speaker.",
+  "What game have you been playing recently?",
+  "Could you describe your favorite room?",
+  "Why did you choose computer science?",
+  "What is the difference between horizontal and vertical scaling?",
+  "Let's move to the next topic.",
+];
+
+function partialReadPlusOwnThought(suggestion: string, index: number): string {
+  const parts = words(truncateWords(suggestion, 36));
+  const length = clamp(Math.ceil(parts.length * (0.42 + (index % 4) * 0.06)), 7, Math.min(20, parts.length));
+  const maxOffset = Math.max(0, parts.length - length);
+  const offset = maxOffset === 0 ? 0 : (index * 3) % (maxOffset + 1);
+  const fragment = fromWords(parts.slice(offset, offset + length));
+  return `${fragment}, ${ownThoughtContinuations[index % ownThoughtContinuations.length]}`;
+}
+
+function brokenReread(suggestion: string, index: number): string {
+  const parts = words(truncateWords(suggestion, 34));
+  const length = clamp(Math.ceil(parts.length * 0.62), 7, Math.min(22, parts.length));
+  const maxOffset = Math.max(0, parts.length - length);
+  const offset = maxOffset === 0 ? 0 : (index * 5) % (maxOffset + 1);
+  const fragment = parts.slice(offset, offset + length);
+  const out: string[] = [];
+  for (let i = 0; i < fragment.length; i += 1) {
+    const token = fragment[i]!;
+    if ((i + index) % 7 === 0) out.push(token);
+    if ((i + index) % 5 === 0) out.push(token);
+    out.push(token);
+  }
+  if (index % 3 === 0) {
+    return out.filter((token) => !/^(the|a|an|is|are|was|were|to|and|or|but|that|this|it)$/i.test(token)).join(" ");
+  }
+  return out.join(" ");
+}
+
+function fillerHeavyReread(suggestion: string, index: number): string {
+  const parts = words(truncateWords(suggestion, 34));
+  const length = clamp(Math.ceil(parts.length * 0.72), 9, Math.min(26, parts.length));
+  const fragment = parts.slice(0, length);
+  const out: string[] = [];
+  for (let i = 0; i < fragment.length; i += 1) {
+    if ((i + index) % 4 === 0) out.push(fillerPhrases[(i + index) % fillerPhrases.length]!);
+    out.push(fragment[i]!);
+    if ((i + index) % 9 === 0) out.push(fragment[i]!);
+  }
+  return out.join(" ");
+}
+
+function rereadThenQuestion(suggestion: string, index: number): string {
+  const parts = words(truncateWords(suggestion, 34));
+  const length = clamp(Math.ceil(parts.length * 0.35), 5, Math.min(14, parts.length));
+  const fragment = fromWords(parts.slice(0, length));
+  const question = questionSuffixes[index % questionSuffixes.length]!;
+  if (index % 3 === 0) return `${fragment}. ${question}?`;
+  if (index % 3 === 1) return `${fragment} wait before you continue ${question}`;
+  return `${fragment} ${question}`;
+}
+
+function negativeControl(index: number, negatives: string[], suggestion: string): string {
+  for (let attempt = 0; attempt < negatives.length; attempt += 1) {
+    const text = negatives[(index + attempt * 17) % negatives.length] || manualNegativeControls[index % manualNegativeControls.length]!;
+    const candidate = truncateWords(text, 34);
+    if (!detectSuggestionEcho(candidate, [suggestion]).matched) {
+      return candidate;
+    }
+  }
+  return manualNegativeControls[index % manualNegativeControls.length]!;
+}
+
+function buildCases(): EchoCase[] {
+  const db = loadDbPools();
+  const docSnippets = readDocSnippets();
+  const suggestions = uniqueByText([...baseSuggestions, ...db.aiReplies], 180)
+    .map((item) => truncateWords(item, 36))
+    .filter((item) => wordCount(item) >= 8 && !isQuestionLikeSuggestion(item));
+  const negatives = uniqueByText([...manualNegativeControls, ...db.transcripts, ...docSnippets], 260)
+    .filter((item) => wordCount(item) >= 5);
+
+  const builders: Record<EchoCategory, (suggestion: string, index: number) => { transcript: string; expected: boolean; source: string }> = {
+    "partial-read-plus-own-thought": (suggestion, index) => ({
+      transcript: partialReadPlusOwnThought(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/template",
+    }),
+    "broken-reread": (suggestion, index) => ({
+      transcript: brokenReread(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/stutter",
+    }),
+    "filler-heavy-reread": (suggestion, index) => ({
+      transcript: fillerHeavyReread(suggestion, index),
+      expected: true,
+      source: index < baseSuggestions.length ? "template" : "db-ai-reply/filler",
+    }),
+    "reread-then-question": (suggestion, index) => ({
+      transcript: rereadThenQuestion(suggestion, index),
+      expected: false,
+      source: "template/interruption",
+    }),
+    "negative-controls": (suggestion, index) => ({
+      transcript: negativeControl(index, negatives, suggestion),
+      expected: false,
+      source: index < manualNegativeControls.length ? "manual-negative" : "db-or-doc-transcript",
+    }),
+  };
+
+  const categories: EchoCategory[] = [
+    "partial-read-plus-own-thought",
+    "broken-reread",
+    "filler-heavy-reread",
+    "reread-then-question",
+    "negative-controls",
+  ];
+
+  const cases: EchoCase[] = [];
+  for (const category of categories) {
+    for (let i = 0; i < perCategory; i += 1) {
+      const suggestion = suggestions[i % suggestions.length] || baseSuggestions[i % baseSuggestions.length]!;
+      const built = builders[category](suggestion, i);
+      cases.push({
+        category,
+        name: `${category}-${String(i + 1).padStart(3, "0")}`,
+        suggestion,
+        transcript: built.transcript,
+        expected: built.expected,
+        source: built.source,
+      });
+    }
+  }
+
+  return cases;
+}
+
+const cases = buildCases();
+const byCategory = new Map<EchoCategory, { total: number; failed: number }>();
 let failed = 0;
 
 for (const testCase of cases) {
@@ -390,21 +373,35 @@ for (const testCase of cases) {
   }
   byCategory.set(testCase.category, stats);
 
-  console.log([
-    passed ? "PASS" : "FAIL",
-    testCase.category,
-    testCase.name,
-    `expected=${testCase.expected}`,
-    `actual=${result.matched}`,
-    `similarity=${result.similarity.toFixed(2)}`,
-    `transcriptCoverage=${result.transcriptCoverage.toFixed(2)}`,
-    `suggestionCoverage=${result.suggestionCoverage.toFixed(2)}`,
-  ].join(" | "));
+  if (verbose || !passed) {
+    console.log([
+      passed ? "PASS" : "FAIL",
+      testCase.category,
+      testCase.name,
+      `source=${testCase.source}`,
+      `expected=${testCase.expected}`,
+      `actual=${result.matched}`,
+      `similarity=${result.similarity.toFixed(2)}`,
+      `transcriptCoverage=${result.transcriptCoverage.toFixed(2)}`,
+      `suggestionCoverage=${result.suggestionCoverage.toFixed(2)}`,
+    ].join(" | "));
+    if (!passed) {
+      console.log(`  suggestion: ${testCase.suggestion}`);
+      console.log(`  transcript: ${testCase.transcript}`);
+      console.log(`  matchedCandidate: ${result.candidate}`);
+    }
+  }
 }
 
-console.log("\nSummary");
+console.log(`SUGGESTION_ECHO_EVAL seed=${seed} perCategory=${perCategory} cases=${cases.length}`);
+console.log("Summary");
 for (const [category, stats] of byCategory) {
-  console.log(`${category}: ${stats.total - stats.failed}/${stats.total} passed`);
+  const passed = stats.total - stats.failed;
+  console.log(`${category}: ${passed}/${stats.total} passed`);
+  if (stats.total < 100) {
+    console.error(`Category ${category} has fewer than 100 cases.`);
+    failed += 1;
+  }
 }
 
 if (failed > 0) {

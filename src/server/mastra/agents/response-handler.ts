@@ -22,6 +22,9 @@ const PARTIAL_ECHO_SUGGESTION_COVERAGE = 0.38;
 const LOOSE_PARTIAL_ECHO_SIMILARITY = 0.46;
 const LOOSE_PARTIAL_ECHO_TRANSCRIPT_COVERAGE = 0.42;
 const LOOSE_PARTIAL_ECHO_SUGGESTION_COVERAGE = 0.26;
+const SHORT_PARTIAL_ECHO_SIMILARITY = 0.41;
+const SHORT_PARTIAL_ECHO_TRANSCRIPT_COVERAGE = 0.24;
+const SHORT_PARTIAL_ECHO_SUGGESTION_COVERAGE = 0.42;
 const SUGGESTION_ECHO_STOP_WORDS = new Set([
   "the",
   "a",
@@ -130,14 +133,28 @@ function isLikelyFreshQuestionOrInterruption(text: string): boolean {
   const normalized = normalizeSuggestionEchoText(text);
   if (!normalized) return false;
   if (/\?\s*$/.test(text.trim())) return true;
-  if (/^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|tell me|describe|explain)\b/.test(normalized)) {
+  if (/^(what|why|how|when|where|who|which|tell me|describe|explain)\b/.test(normalized)) {
+    return true;
+  }
+  if (/^(can|could|would|do|does|did)\s+(?:you|we|they|i|it|this|that|the)\b/.test(normalized)) {
+    return true;
+  }
+  if (/^(is)\s+(?:it|that|this|there|your|the|a|an)\b/.test(normalized)) {
+    return true;
+  }
+  if (/^(are)\s+(?:you|we|they|there|the)\b/.test(normalized)) {
+    return true;
+  }
+  if (/^(have|has)\s+(?:you|we|they|it|this|that|the)\b/.test(normalized)) {
     return true;
   }
   return (
     /\b(hold on|wait|stop there|sorry to interrupt|before you continue|quick question|another question|next question|move on|switch topic|different topic)\b/.test(normalized)
-    || /\b(can you|could you|would you|do you|did you|is it|are you|have you|has it|what about|how about|tell me|describe|explain)\b/.test(normalized)
-    || /\b(what|why|how|when|where|who|which)\s+(?:is|are|was|were|do|does|did|can|could|would|should|the|your|you|we|it|that|this|about|kind|type|tech|class|project|game|problem|issue|mean|stack|model|course)\b/.test(normalized)
-    || /\bwhy\s+not\b/.test(normalized)
+    || /\b(can you|could you|would you|do you|did you|does that|does it|does this|is it|is that|are you|have you|has it|what about|how about|tell me|describe this|describe that|explain this|explain that)\b/.test(normalized)
+    || /\bwhat\s+(?:class|tech stack|stack|game|project|model|course|happens|do you|did you|would you|is it|is that|are you|was|is|are|kind of|type of)\b/.test(normalized)
+    || /\bwhy\s+(?:not|did|do|does|is|are|would|should)\b/.test(normalized)
+    || /\bhow\s+(?:long|did|do|does|would|can|could|is|are)\b/.test(normalized)
+    || /\bhow\s+(?:much|many)\s+(?:does|did|do|is|are|was|were|would|can|could)\b/.test(normalized)
   );
 }
 
@@ -165,15 +182,12 @@ function extractDisplayedSuggestionCandidates(text: string): string[] {
 }
 
 export function detectSuggestionEcho(transcript: string, displayedCandidates: string[]): SuggestionEchoMatch {
-  if (isLikelyFreshQuestionOrInterruption(transcript)) {
-    return { matched: false, similarity: 0, transcriptCoverage: 0, suggestionCoverage: 0, candidate: "" };
-  }
-
   const normalizedTranscript = normalizeSuggestionEchoText(transcript);
   if (wordCountForEcho(normalizedTranscript) < MIN_ECHO_WORDS) {
     return { matched: false, similarity: 0, transcriptCoverage: 0, suggestionCoverage: 0, candidate: "" };
   }
 
+  const freshQuestionOrInterruption = isLikelyFreshQuestionOrInterruption(transcript);
   let best: SuggestionEchoMatch = { matched: false, similarity: 0, transcriptCoverage: 0, suggestionCoverage: 0, candidate: "" };
   for (const candidate of displayedCandidates) {
     const normalizedCandidate = normalizeSuggestionEchoText(candidate);
@@ -182,7 +196,7 @@ export function detectSuggestionEcho(transcript: string, displayedCandidates: st
     const similarity = findBestMatch(normalizedTranscript, [normalizedCandidate]).bestMatch.rating;
     const transcriptCoverage = tokenCoverage(normalizedCandidate, normalizedTranscript);
     const candidateCoverage = suggestionCoverage(normalizedCandidate, normalizedTranscript);
-    const matched = similarity >= STRONG_ECHO_SIMILARITY
+    const normalEchoMatch = similarity >= STRONG_ECHO_SIMILARITY
       || transcriptCoverage >= STRONG_ECHO_TRANSCRIPT_COVERAGE
       || (similarity >= MEDIUM_ECHO_SIMILARITY && transcriptCoverage >= MEDIUM_ECHO_TRANSCRIPT_COVERAGE)
       || (candidateCoverage >= PARTIAL_ECHO_SUGGESTION_COVERAGE && transcriptCoverage >= PARTIAL_ECHO_TRANSCRIPT_COVERAGE)
@@ -190,7 +204,24 @@ export function detectSuggestionEcho(transcript: string, displayedCandidates: st
         similarity >= LOOSE_PARTIAL_ECHO_SIMILARITY
         && transcriptCoverage >= LOOSE_PARTIAL_ECHO_TRANSCRIPT_COVERAGE
         && candidateCoverage >= LOOSE_PARTIAL_ECHO_SUGGESTION_COVERAGE
+      )
+      || (
+        similarity >= SHORT_PARTIAL_ECHO_SIMILARITY
+        && transcriptCoverage >= SHORT_PARTIAL_ECHO_TRANSCRIPT_COVERAGE
+        && candidateCoverage >= SHORT_PARTIAL_ECHO_SUGGESTION_COVERAGE
+      )
+      || (
+        similarity >= 0.48
+        && transcriptCoverage >= 0.35
+        && candidateCoverage >= 0.28
+      )
+      || (
+        similarity >= 0.42
+        && transcriptCoverage >= 0.39
+        && candidateCoverage >= 0.35
       );
+    const strongWholeEcho = similarity >= 0.86 || (transcriptCoverage >= 0.88 && candidateCoverage >= 0.65);
+    const matched = freshQuestionOrInterruption ? strongWholeEcho : normalEchoMatch;
 
     if (similarity + transcriptCoverage + candidateCoverage > best.similarity + best.transcriptCoverage + best.suggestionCoverage) {
       best = { matched, similarity, transcriptCoverage, suggestionCoverage: candidateCoverage, candidate };
