@@ -5,7 +5,6 @@ import {
   fetchTranscriptExport,
   fetchTranscriptExports,
   type TranscriptExportDetail,
-  type TranscriptExportSample,
   type TranscriptExportSession,
 } from "../api/transcript-export.api";
 import {
@@ -26,7 +25,7 @@ interface MemoryReviewProps {
   onBack: () => void;
 }
 
-type PageMode = "list" | "detail";
+type PageMode = "list" | "detail" | "preview";
 
 const STATUS_OPTIONS: Array<{ value: SessionMemoryCandidateStatus | "all"; label: string }> = [
   { value: "pending", label: "Pending" },
@@ -84,11 +83,6 @@ function formatSessionOption(session: TranscriptExportSession): string {
   return `${formatShortDate(session.startTimestamp)} - ${title} (${session.transcriptCount})`;
 }
 
-function getPreviewSamples(detail: TranscriptExportDetail): TranscriptExportSample[] {
-  if (detail.samples.length <= 10) return detail.samples;
-  return [...detail.samples.slice(0, 5), ...detail.samples.slice(-5)];
-}
-
 function splitLines(value: string): string[] {
   return value
     .split(/\n+/)
@@ -109,7 +103,6 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [sessionPreview, setSessionPreview] = useState<TranscriptExportDetail | null>(null);
-  const [showSessionPreview, setShowSessionPreview] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
@@ -174,7 +167,6 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
 
   useEffect(() => {
     setSessionPreview(null);
-    setShowSessionPreview(false);
   }, [selectedSessionId]);
 
   const loadSessionPreview = async () => {
@@ -188,7 +180,7 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
     try {
       const detail = await fetchTranscriptExport(userId, selectedSessionId);
       setSessionPreview(detail);
-      setShowSessionPreview(true);
+      setPage("preview");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load session preview");
     } finally {
@@ -240,6 +232,7 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
         ? `Extracted ${result.candidates.length} candidates and promoted ${promotedCount} safe knowledge item${promotedCount === 1 ? "" : "s"}.${runtimeLabel}`
         : `Extracted ${result.candidates.length} candidates.${runtimeLabel}`);
       await loadCandidates();
+      setPage("list");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to extract candidates");
     } finally {
@@ -437,31 +430,6 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
                   {selectedSession.scenes.length > 0 && (
                     <p className="text-[12px] mt-2 text-muted-foreground">scenes: {selectedSession.scenes.join(", ")}</p>
                   )}
-
-                  {showSessionPreview && sessionPreview && (
-                    <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
-                      <p className="text-[12px] mb-2 text-muted-foreground">
-                        {sessionPreview.samples.length > 10
-                          ? `Showing first 5 and last 5 transcript samples out of ${sessionPreview.samples.length}.`
-                          : `Showing ${sessionPreview.samples.length} transcript sample${sessionPreview.samples.length === 1 ? "" : "s"}.`}
-                      </p>
-                      <div className="max-h-[260px] overflow-y-auto space-y-2 pr-1" style={{ WebkitOverflowScrolling: "touch" }}>
-                        {getPreviewSamples(sessionPreview).map((sample) => (
-                          <div key={`${sample.id}-${sample.timestamp}`} className="rounded-[8px] border p-2" style={{ borderColor: "var(--border)" }}>
-                            <p className="text-[11px] text-muted-foreground">{formatShortDate(sample.timestamp)} - {sample.actionType}</p>
-                            <p className="text-[13px] leading-relaxed mt-1" style={{ color: "var(--secondary-foreground)" }}>
-                              {sample.transcript || "(empty transcript)"}
-                            </p>
-                            {sample.aiReply && (
-                              <p className="text-[12px] leading-relaxed mt-1 text-muted-foreground">
-                                AI: {compactText(sample.aiReply, 180)}
-                              </p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -548,6 +516,91 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
                 </div>
               )}
             </>
+          ) : page === "preview" ? (
+            sessionPreview ? (
+              <div className="space-y-4">
+                <div>
+                  <h1 className="text-[24px] font-bold leading-tight" style={{ color: "var(--secondary-foreground)" }}>
+                    Session Preview
+                  </h1>
+                  <p className="text-[13px] mt-1 text-muted-foreground">
+                    Check the transcript before extracting memory candidates.
+                  </p>
+                </div>
+
+                {error && <p className="text-[13px] text-red-500">{error}</p>}
+                {extractStatus && <p className="text-[13px] text-muted-foreground">{extractStatus}</p>}
+
+                <div className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--primary-foreground)" }}>
+                  <h2 className="text-[17px] font-semibold leading-snug" style={{ color: "var(--secondary-foreground)" }}>
+                    {sessionPreview.session.title || "Untitled session"}
+                  </h2>
+                  <div className="grid grid-cols-2 gap-2 mt-3 text-[12px] text-muted-foreground">
+                    <p>start: {formatShortDate(sessionPreview.session.startTimestamp)}</p>
+                    <p>end: {formatShortDate(sessionPreview.session.lastTimestamp)}</p>
+                    <p>transcripts: {sessionPreview.session.transcriptCount}</p>
+                    <p>AI replies: {sessionPreview.session.aiReplyCount}</p>
+                  </div>
+                  {sessionPreview.session.scenes.length > 0 && (
+                    <p className="text-[12px] mt-2 text-muted-foreground">scenes: {sessionPreview.session.scenes.join(", ")}</p>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={goList}
+                    className="rounded-[8px] px-4 py-3 text-[14px] font-semibold border active:scale-[0.98]"
+                    style={{ color: "var(--secondary-foreground)", borderColor: "var(--border)" }}
+                  >
+                    Back
+                  </button>
+                  <button
+                    onClick={handleExtract}
+                    disabled={isExtracting}
+                    className="rounded-[8px] px-4 py-3 text-[14px] font-semibold disabled:opacity-60 active:scale-[0.98]"
+                    style={{ backgroundColor: "var(--secondary-foreground)", color: "var(--primary-foreground)" }}
+                  >
+                    {isExtracting ? "Extracting..." : "Extract this session"}
+                  </button>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <h2 className="text-[16px] font-semibold" style={{ color: "var(--secondary-foreground)" }}>
+                      Transcript
+                    </h2>
+                    <p className="text-[12px] text-muted-foreground">{sessionPreview.samples.length} samples</p>
+                  </div>
+                  <div className="space-y-2">
+                    {sessionPreview.samples.length > 0 ? sessionPreview.samples.map((sample, index) => (
+                      <div key={`${sample.id}-${sample.timestamp}`} className="rounded-[8px] border p-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--primary-foreground)" }}>
+                        <p className="text-[11px] text-muted-foreground">
+                          #{index + 1} - {formatShortDate(sample.timestamp)} - {sample.actionType}
+                        </p>
+                        <p className="text-[14px] leading-relaxed mt-1 whitespace-pre-wrap" style={{ color: "var(--secondary-foreground)" }}>
+                          {sample.transcript || "(empty transcript)"}
+                        </p>
+                        {sample.aiReply && (
+                          <p className="text-[12px] leading-relaxed mt-2 text-muted-foreground whitespace-pre-wrap">
+                            AI: {sample.aiReply}
+                          </p>
+                        )}
+                      </div>
+                    )) : (
+                      <textarea
+                        readOnly
+                        value={sessionPreview.transcriptText || "(No transcript text)"}
+                        rows={18}
+                        className="w-full rounded-[8px] px-3 py-3 text-[13px] outline-none resize-y border leading-relaxed"
+                        style={{ backgroundColor: "var(--primary-foreground)", color: "var(--secondary-foreground)", borderColor: "var(--border)" }}
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-[14px] text-muted-foreground">Session preview not loaded.</p>
+            )
           ) : selectedCandidate ? (
             <div className="space-y-3">
               <div>
