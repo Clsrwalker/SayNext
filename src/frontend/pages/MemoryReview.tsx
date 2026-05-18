@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronRight, RefreshCcw, Save, Search, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, Eye, RefreshCcw, Save, Search, Trash2, X } from "lucide-react";
 import Header from "../components/Header";
-import { fetchTranscriptExports, type TranscriptExportSession } from "../api/transcript-export.api";
+import {
+  fetchTranscriptExport,
+  fetchTranscriptExports,
+  type TranscriptExportDetail,
+  type TranscriptExportSample,
+  type TranscriptExportSession,
+} from "../api/transcript-export.api";
 import {
   deleteSessionMemoryCandidate,
   extractSessionMemoryCandidates,
@@ -54,6 +60,35 @@ function formatDate(value?: string | null): string {
   return date.toLocaleString([], { hour12: false });
 }
 
+function formatShortDate(value?: string | null): string {
+  if (!value) return "none";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function compactText(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 3)}...`;
+}
+
+function formatSessionOption(session: TranscriptExportSession): string {
+  const title = compactText(session.title || "Untitled session", 34);
+  return `${formatShortDate(session.startTimestamp)} - ${title} (${session.transcriptCount})`;
+}
+
+function getPreviewSamples(detail: TranscriptExportDetail): TranscriptExportSample[] {
+  if (detail.samples.length <= 10) return detail.samples;
+  return [...detail.samples.slice(0, 5), ...detail.samples.slice(-5)];
+}
+
 function splitLines(value: string): string[] {
   return value
     .split(/\n+/)
@@ -73,7 +108,10 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
   const [sessions, setSessions] = useState<TranscriptExportSession[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [sessionPreview, setSessionPreview] = useState<TranscriptExportDetail | null>(null);
+  const [showSessionPreview, setShowSessionPreview] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState("");
@@ -92,6 +130,7 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
   const [evidence, setEvidence] = useState("");
 
   const selectedCandidate = candidates.find((candidate) => candidate.id === selectedId) || null;
+  const selectedSession = sessions.find((session) => session.sessionId === selectedSessionId) || null;
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -113,7 +152,7 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
     try {
       const [loadedCandidates, loadedSessions] = await Promise.all([
         fetchSessionMemoryCandidates({ userId, status, limit: 200 }),
-        fetchTranscriptExports(userId, 20),
+        fetchTranscriptExports(userId, 50),
       ]);
       setCandidates(loadedCandidates);
       setSessions(loadedSessions);
@@ -132,6 +171,30 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
   useEffect(() => {
     localStorage.setItem(`saynext:memoryReviewMode:${userId}`, reviewMode);
   }, [userId, reviewMode]);
+
+  useEffect(() => {
+    setSessionPreview(null);
+    setShowSessionPreview(false);
+  }, [selectedSessionId]);
+
+  const loadSessionPreview = async () => {
+    if (!selectedSessionId) {
+      setError("No transcript session selected.");
+      return;
+    }
+
+    setIsLoadingPreview(true);
+    setError("");
+    try {
+      const detail = await fetchTranscriptExport(userId, selectedSessionId);
+      setSessionPreview(detail);
+      setShowSessionPreview(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load session preview");
+    } finally {
+      setIsLoadingPreview(false);
+    }
+  };
 
   const openCandidate = (candidate: SessionMemoryCandidate) => {
     setSelectedId(candidate.id);
@@ -337,11 +400,70 @@ function MemoryReview({ userId, onBack }: MemoryReviewProps) {
                 >
                   {sessions.map((session) => (
                     <option key={session.sessionId} value={session.sessionId}>
-                      {session.title.slice(0, 42)} ({session.transcriptCount})
+                      {formatSessionOption(session)}
                     </option>
                   ))}
                 </select>
               </div>
+
+              {selectedSession && (
+                <div className="rounded-[8px] border p-3 mb-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--primary-foreground)" }}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[12px] font-semibold text-muted-foreground">Selected session</p>
+                      <h2 className="text-[15px] font-semibold leading-snug mt-1" style={{ color: "var(--secondary-foreground)" }}>
+                        {selectedSession.title || "Untitled session"}
+                      </h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={loadSessionPreview}
+                      disabled={isLoadingPreview}
+                      className="shrink-0 flex items-center justify-center gap-2 rounded-[8px] px-3 py-2 text-[12px] font-semibold border disabled:opacity-60 active:scale-[0.98]"
+                      style={{ color: "var(--secondary-foreground)", borderColor: "var(--border)" }}
+                    >
+                      <Eye size={15} />
+                      {isLoadingPreview ? "Loading" : "Preview"}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 mt-3 text-[12px] text-muted-foreground">
+                    <p>start: {formatShortDate(selectedSession.startTimestamp)}</p>
+                    <p>end: {formatShortDate(selectedSession.lastTimestamp)}</p>
+                    <p>transcripts: {selectedSession.transcriptCount}</p>
+                    <p>AI replies: {selectedSession.aiReplyCount}</p>
+                  </div>
+
+                  {selectedSession.scenes.length > 0 && (
+                    <p className="text-[12px] mt-2 text-muted-foreground">scenes: {selectedSession.scenes.join(", ")}</p>
+                  )}
+
+                  {showSessionPreview && sessionPreview && (
+                    <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+                      <p className="text-[12px] mb-2 text-muted-foreground">
+                        {sessionPreview.samples.length > 10
+                          ? `Showing first 5 and last 5 transcript samples out of ${sessionPreview.samples.length}.`
+                          : `Showing ${sessionPreview.samples.length} transcript sample${sessionPreview.samples.length === 1 ? "" : "s"}.`}
+                      </p>
+                      <div className="max-h-[260px] overflow-y-auto space-y-2 pr-1" style={{ WebkitOverflowScrolling: "touch" }}>
+                        {getPreviewSamples(sessionPreview).map((sample) => (
+                          <div key={`${sample.id}-${sample.timestamp}`} className="rounded-[8px] border p-2" style={{ borderColor: "var(--border)" }}>
+                            <p className="text-[11px] text-muted-foreground">{formatShortDate(sample.timestamp)} - {sample.actionType}</p>
+                            <p className="text-[13px] leading-relaxed mt-1" style={{ color: "var(--secondary-foreground)" }}>
+                              {sample.transcript || "(empty transcript)"}
+                            </p>
+                            {sample.aiReply && (
+                              <p className="text-[12px] leading-relaxed mt-1 text-muted-foreground">
+                                AI: {compactText(sample.aiReply, 180)}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="rounded-[8px] border p-3 mb-3" style={{ borderColor: "var(--border)", backgroundColor: "var(--primary-foreground)" }}>
                 <div className="grid grid-cols-3 gap-2 mb-2">
