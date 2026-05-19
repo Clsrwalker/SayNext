@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { finalizeSayNextOutput, resolveOpenAiModelConfig, sanitizeSayNextOutput } from "../mastra/agents/initial-agent";
+import { finalizeSayNextOutput, processConversation, resolveOpenAiModelConfig, sanitizeSayNextOutput } from "../mastra/agents/initial-agent";
+import { Action } from "../mastra/types";
 
 test("removes you-can-say prefix", () => {
   expect(sanitizeSayNextOutput("You can say: I'm leaning toward co-op, but I'm still checking the deadline."))
@@ -49,6 +50,38 @@ test("resolves separate live and long OpenAI models", () => {
     liveModel: "gpt-live",
     longModel: "gpt-long",
   });
+});
+
+test("immediately answers noisy programming language experience question", async () => {
+  const response = await processConversation(
+    [{ type: "transcript", text: "What's programming have you do you have an experiment with?", timestamp: Date.now() }],
+    "high",
+    undefined,
+    "english",
+  );
+
+  expect(response.type).toBe(Action.INSIGHT);
+  if (response.type === Action.INSIGHT) {
+    expect(response.output).toContain("TypeScript");
+    expect(response.output).toContain("JavaScript");
+    expect(response.output).toContain("C#");
+    expect(response.output).toContain("SQL");
+  }
+});
+
+test("immediately answers clipped program language correction", async () => {
+  const response = await processConversation(
+    [{ type: "transcript", text: "I mean the program langu", timestamp: Date.now() }],
+    "high",
+    undefined,
+    "english",
+  );
+
+  expect(response.type).toBe(Action.INSIGHT);
+  if (response.type === Action.INSIGHT) {
+    expect(response.output).toMatch(/TypeScript|JavaScript/);
+    expect(response.reasoning).toBe("Immediate supported programming language experience answer");
+  }
 });
 
 test("normalizes written punctuation into spoken display text", () => {

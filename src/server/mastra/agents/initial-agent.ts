@@ -2824,6 +2824,30 @@ function getImmediateResponse(transcript: string, timestamp: number, outputLangu
     );
   }
 
+  const asksProgrammingLanguageExperience = (
+    /\b(programming|program|coding|technical)\b/i.test(normalized)
+    && (
+      /\b(langu|language|languages)\b/i.test(normalized)
+      || /\b(experience|experiment|experiments|worked|used|use|comfortable|know)\b/i.test(normalized)
+    )
+    && /\b(what|which|do you|have you|you have|mean|with|use|used|know|comfortable)\b/i.test(normalized)
+    && !/\b(natural language|second language|spoken language|human language|english|german|japanese|learn another language)\b/i.test(normalized)
+  ) || (
+    /\b(tech stack|technical stack)\b/i.test(normalized)
+    && /\b(you|your|experience|use|comfortable|worked)\b/i.test(normalized)
+  );
+
+  if (asksProgrammingLanguageExperience) {
+    return createInsight(
+      outputLanguage === "chinese"
+        ? "\u4e3b\u8981\u662f TypeScript \u548c JavaScript\uff0c\u505a web \u9879\u76ee\u6bd4\u8f83\u591a\u3002\u6211\u4e5f\u6709 C# \u548c ASP.NET \u9879\u76ee\u7ecf\u9a8c\uff0c\u518d\u52a0\u4e0a SQL \u548c\u6570\u636e\u5e93\u3002\u6211\u66f4\u5f3a\u7684\u662f\u628a API\u3001\u524d\u540e\u7aef\u548c\u7cfb\u7edf\u96c6\u6210\u8d77\u6765\u3002"
+        : "Mainly TypeScript and JavaScript for web projects. I also have C# and ASP.NET experience from an earlier project, plus SQL and database work. My stronger area is practical full-stack integration, not algorithm-heavy coding.",
+      "Immediate supported programming language experience answer",
+      timestamp,
+      0.92,
+    );
+  }
+
   if (
     /\b(before\s+canada|before\s+coming\s+to\s+canada|before\s+i\s+came\s+to\s+canada|high\s+school\s+in\s+china|school\s+in\s+china|high\s+school\b.*\bchina|china\b.*\bhigh\s+school|school\b.*\bchina)\b/i.test(normalized)
     && /\b(school|study|studied|high\s+school|where|what)\b/i.test(normalized)
