@@ -43,3 +43,12 @@ cd D:\SayNext
 ```
 
 After pulling VPS data back to Local, run Memory Review and retrieval/LLM tests before promoting new memory.
+
+## Prenote Uploads
+
+Prenote uploads are not promoted directly into long-term memory.
+
+- Uploading a Prenote stores the original/extracted text and builds a chunk index for live retrieval.
+- The Prenote detail page button sends the material to `Memory Review` as a pending `knowledge_fact` candidate.
+- Review/edit the candidate first, then promote it only after targeted, negative, regression, random, and LLM-output tests are clean.
+- Low-quality OCR, extraction errors, or very long Prenotes are flagged for manual review instead of auto-promotion.

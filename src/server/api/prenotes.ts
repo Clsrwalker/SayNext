@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { conversationLogger, type PrenoteRecord } from "../data/conversation-logger";
 import { extractTextFromFile, processPrenote } from "../prenotes/prenote-processor";
+import { queuePrenoteKnowledgeReview } from "../prenotes/prenote-review";
 
 const PRENOTE_UPLOAD_DIR = process.env.PRENOTE_UPLOAD_DIR || join(process.cwd(), "data", "prenote-files");
 
@@ -12,6 +13,7 @@ function safePathPart(value: string): string {
 }
 
 function serializePrenote(prenote: PrenoteRecord, options: { includeFullText?: boolean } = {}) {
+  const effectiveRuntimeContext = conversationLogger.getEffectivePrenoteRuntimeContext(prenote);
   return {
     id: prenote.id,
     userId: prenote.userId,
@@ -19,7 +21,7 @@ function serializePrenote(prenote: PrenoteRecord, options: { includeFullText?: b
     description: prenote.description,
     status: prenote.status,
     isActive: prenote.isActive,
-    runtimeContext: prenote.runtimeContext,
+    runtimeContext: effectiveRuntimeContext,
     model: prenote.model,
     error: prenote.error,
     createdAt: prenote.createdAt,
@@ -42,9 +44,10 @@ function serializePrenote(prenote: PrenoteRecord, options: { includeFullText?: b
       extractedTextLength: file.extractedText.length,
       createdAt: file.createdAt,
     })),
+    chunkCount: conversationLogger.getPrenoteChunkCount(prenote.id),
     sourceTextLength: prenote.sourceText.length,
     extractedTextLength: prenote.extractedText.length,
-    runtimeContextLength: prenote.runtimeContext.length,
+    runtimeContextLength: effectiveRuntimeContext.length,
   };
 }
 
@@ -103,6 +106,95 @@ export const getPrenote = (c: Context) => {
   if (!prenote || prenote.userId !== userId) return c.json({ error: "Prenote not found" }, 404);
 
   return c.json({ prenote: serializePrenote(prenote, { includeFullText: true }) });
+};
+
+export const listPrenoteChunksApi = (c: Context) => {
+  const userId = getUserId(c);
+  const id = Number(c.req.param("id"));
+  if (!userId) return c.json({ error: "userId is required" }, 400);
+  if (!Number.isFinite(id)) return c.json({ error: "Invalid prenote id" }, 400);
+
+  const prenote = conversationLogger.getPrenote(id);
+  if (!prenote || prenote.userId !== userId) return c.json({ error: "Prenote not found" }, 404);
+
+  const chunks = conversationLogger.listPrenoteChunks(id).map((chunk) => ({
+    id: chunk.id,
+    chunkIndex: chunk.chunkIndex,
+    headingPath: chunk.headingPath,
+    charStart: chunk.charStart,
+    charEnd: chunk.charEnd,
+    tokenEstimate: chunk.tokenEstimate,
+    keywords: chunk.keywords,
+    embeddingModel: chunk.embeddingModel,
+    textPreview: chunk.text.length > 700 ? `${chunk.text.slice(0, 697)}...` : chunk.text,
+    textLength: chunk.text.length,
+  }));
+
+  return c.json({ chunks });
+};
+
+export const reindexPrenoteChunksApi = async (c: Context) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id)) return c.json({ error: "Invalid prenote id" }, 400);
+
+  const body = await readJsonBody(c);
+  const userId = String(body?.userId || c.req.query("userId") || "").trim();
+  if (!userId) return c.json({ error: "userId is required" }, 400);
+
+  const prenote = conversationLogger.getPrenote(id);
+  if (!prenote || prenote.userId !== userId) return c.json({ error: "Prenote not found" }, 404);
+
+  const chunks = await conversationLogger.rebuildPrenoteChunks(id);
+  return c.json({ ok: true, chunkCount: chunks.length });
+};
+
+export const queuePrenoteKnowledgeReviewApi = async (c: Context) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id)) return c.json({ error: "Invalid prenote id" }, 400);
+
+  const body = await readJsonBody(c);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+
+  const userId = String(body.userId || c.req.query("userId") || "").trim();
+  if (!userId) return c.json({ error: "userId is required" }, 400);
+
+  const candidate = queuePrenoteKnowledgeReview({
+    userId,
+    prenoteId: id,
+    title: typeof body.title === "string" ? body.title : undefined,
+    content: typeof body.content === "string" ? body.content : undefined,
+    usageRule: typeof body.usageRule === "string" ? body.usageRule : undefined,
+    keywords: Array.isArray(body.keywords) ? body.keywords.map(String) : undefined,
+    sensitivity: body.sensitivity === "low" || body.sensitivity === "high" ? body.sensitivity : "medium",
+  });
+
+  if (!candidate) return c.json({ error: "Prenote not found or has no reviewable content" }, 404);
+
+  return c.json({
+    candidate: {
+      id: candidate.id,
+      userId: candidate.userId,
+      sessionId: candidate.sessionId,
+      candidateType: candidate.candidateType,
+      title: candidate.title,
+      category: candidate.category,
+      sensitivity: candidate.sensitivity,
+      content: candidate.content,
+      usageRule: candidate.usageRule,
+      keywords: candidate.keywords,
+      evidence: candidate.evidence,
+      confidence: candidate.confidence,
+      valueScore: candidate.valueScore,
+      riskScore: candidate.riskScore,
+      status: candidate.status,
+      model: candidate.model,
+      contentHash: candidate.contentHash,
+      promotedMemoryId: candidate.promotedMemoryId,
+      rejectionReason: candidate.rejectionReason,
+      createdAt: candidate.createdAt,
+      updatedAt: candidate.updatedAt,
+    },
+  }, 201);
 };
 
 export const createPrenote = async (c: Context) => {
@@ -165,6 +257,17 @@ export const createPrenote = async (c: Context) => {
     contentHash: processed.contentHash,
     error: extractionErrors.join("\n"),
   });
+
+  let chunkingError = "";
+  try {
+    await conversationLogger.rebuildPrenoteChunks(prenote.id);
+  } catch (error) {
+    chunkingError = error instanceof Error ? error.message : "Unknown prenote chunk indexing error";
+    conversationLogger.updatePrenoteProcessing(prenote.id, {
+      status: "ready",
+      error: [extractionErrors.join("\n"), `Chunk indexing: ${chunkingError}`].filter(Boolean).join("\n"),
+    });
+  }
 
   if (setActive) {
     conversationLogger.setPrenoteActive(userId, prenote.id, true);

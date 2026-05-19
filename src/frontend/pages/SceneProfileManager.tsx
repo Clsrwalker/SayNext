@@ -248,33 +248,44 @@ function SceneProfileManager({ userId, onBack }: SceneProfileManagerProps) {
                 <p className="text-[14px] text-muted-foreground">Loading...</p>
               ) : (
                 <div className="space-y-3">
-                  {profiles.map((profile) => (
-                    <FieldShell key={profile.id}>
-                      <div className="flex items-start gap-3 p-4">
-                        <input
-                          aria-label={`Use ${profile.name}`}
-                          type="radio"
-                          name="active-scene-profile"
-                          checked={profile.isActive}
-                          onClick={(event) => event.stopPropagation()}
-                          onChange={() => handleSetActive(profile)}
-                          className="mt-1 w-[24px] h-[24px] shrink-0"
-                          style={{ accentColor: "var(--secondary-foreground)" }}
-                        />
+                  {profiles.map((profile) => {
+                    const isAuto = profile.builtinKey === "auto";
+                    return (
+                      <FieldShell key={profile.id}>
+                        <div className="flex items-start gap-3 p-4">
+                          <input
+                            aria-label={`Use ${profile.name}`}
+                            type="radio"
+                            name="active-scene-profile"
+                            checked={profile.isActive}
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={() => handleSetActive(profile)}
+                            className="mt-1 w-[24px] h-[24px] shrink-0"
+                            style={{ accentColor: "var(--secondary-foreground)" }}
+                          />
 
-                        <button type="button" onClick={() => openDetail(profile.id)} className="min-w-0 flex-1 text-left">
-                          <h2 className="text-[16px] font-semibold leading-snug truncate" style={{ color: "var(--secondary-foreground)" }}>
-                            {profile.name}
-                          </h2>
-                          <p className="text-[12px] mt-1 text-muted-foreground">
-                            {profile.isBuiltin ? "built-in" : "custom"} - {profile.promptLength} chars prompt
-                          </p>
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!isAuto) openDetail(profile.id);
+                            }}
+                            className="min-w-0 flex-1 text-left"
+                          >
+                            <h2 className="text-[16px] font-semibold leading-snug truncate" style={{ color: "var(--secondary-foreground)" }}>
+                              {profile.name}
+                            </h2>
+                            <p className="text-[12px] mt-1 text-muted-foreground">
+                              {isAuto
+                                ? "fast local router - chooses scene per turn"
+                                : `${profile.isBuiltin ? "built-in" : "custom"} - ${profile.promptLength} chars prompt`}
+                            </p>
+                          </button>
 
-                        <ChevronRight size={18} className="mt-2 shrink-0 text-muted-foreground" />
-                      </div>
-                    </FieldShell>
-                  ))}
+                          {!isAuto && <ChevronRight size={18} className="mt-2 shrink-0 text-muted-foreground" />}
+                        </div>
+                      </FieldShell>
+                    );
+                  })}
                 </div>
               )}
             </>

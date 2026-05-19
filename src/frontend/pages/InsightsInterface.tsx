@@ -60,6 +60,49 @@ const THINKING_WORDS = [
   'imagining',
 ];
 
+function hashInsightText(text: string): string {
+  let hash = 0;
+  for (let index = 0; index < text.length; index++) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function normalizeInsightId(insight: Insight): Insight {
+  const fallback = `${insight.timestamp || new Date().toISOString()}-${hashInsightText(insight.text || '')}`;
+  return {
+    ...insight,
+    id: insight.id || fallback,
+  };
+}
+
+function dedupeInsightsById(items: Insight[]): Insight[] {
+  const seen = new Map<string, string>();
+  const output: Insight[] = [];
+
+  for (const rawItem of items) {
+    const item = normalizeInsightId(rawItem);
+    const existingText = seen.get(item.id);
+
+    if (existingText === item.text) {
+      continue;
+    }
+
+    if (existingText !== undefined) {
+      const fallbackId = `${item.id}-${hashInsightText(item.text || '')}`;
+      if (seen.has(fallbackId)) continue;
+      seen.set(fallbackId, item.text);
+      output.push({ ...item, id: fallbackId });
+      continue;
+    }
+
+    seen.set(item.id, item.text);
+    output.push(item);
+  }
+
+  return output;
+}
+
 /**
  * Memoized insight bubble component
  */
@@ -243,16 +286,14 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             setThinkingWord(randomWord);
             setIsProcessing(false);
 
-            setInsights((prev) => [
-              ...prev,
-              {
-                id: data.id || Date.now().toString(),
-                text: data.text,
-                timestamp: data.timestamp || new Date().toISOString(),
-                agentType: data.agentType,
-                reasoning: data.reasoning,
-              },
-            ]);
+            const nextInsight = {
+              id: data.id || Date.now().toString(),
+              text: data.text,
+              timestamp: data.timestamp || new Date().toISOString(),
+              agentType: data.agentType,
+              reasoning: data.reasoning,
+            };
+            setInsights((prev) => dedupeInsightsById([...prev, nextInsight]));
           } else if (data.type === 'processing') {
             const randomWord = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)];
             setThinkingWord(randomWord);
@@ -279,10 +320,10 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
               agentType: 'Teleprompt',
               reasoning: 'Live teleprompt',
             };
-            setInsights((prev) => [
+            setInsights((prev) => dedupeInsightsById([
               ...prev.filter((insight) => insight.id !== 'teleprompt-live'),
               telepromptInsight,
-            ]);
+            ]));
           } else if (data.type === 'teleprompt_cancelled') {
             setIsProcessing(false);
             setTelepromptState(null);
@@ -292,13 +333,13 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           } else if (data.type === 'history') {
             // Instant scroll, no animation — mark all IDs as already rendered
             scrollInstantRef.current = true;
-            const historyInsights = (data.insights || []).map((ins: any) => ({
+            const historyInsights = dedupeInsightsById((data.insights || []).map((ins: any) => ({
               id: ins.id,
               text: ins.text,
               timestamp: ins.timestamp,
               agentType: ins.agentType,
               reasoning: ins.reasoning,
-            }));
+            })));
             for (const ins of historyInsights) {
               renderedIdsRef.current.add(ins.id);
             }

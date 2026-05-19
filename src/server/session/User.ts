@@ -183,13 +183,18 @@ export class User {
           return;
         }
 
-        if (textToProcess === this.lastProcessedUtterance) {
+        const shouldForwardLateFinalToTeleprompt =
+          reason === 'isFinal' &&
+          this.lastProcessedReason === 'timeout' &&
+          this.responseHandler?.isTelepromptActive();
+
+        if (textToProcess === this.lastProcessedUtterance && !shouldForwardLateFinalToTeleprompt) {
           session.logger.info(`Skipping duplicate utterance: "${textToProcess}"`);
           this.currentUtteranceBuffer = "";
           return;
         }
 
-        if (isLateFinalCorrectionDuplicate(textToProcess, reason)) {
+        if (isLateFinalCorrectionDuplicate(textToProcess, reason) && !shouldForwardLateFinalToTeleprompt) {
           session.logger.info(`Skipping late final ASR correction duplicate: "${textToProcess}"`);
           this.currentUtteranceBuffer = "";
           return;
@@ -203,7 +208,7 @@ export class User {
         // Broadcast processing event for webview thinking indicator
         this.broadcastInsightEvent({ type: 'processing' });
         const timestamp = Date.now();
-        this.responseHandler?.processTranscript(textToProcess, timestamp).catch(error => {
+        this.responseHandler?.processTranscript(textToProcess, timestamp, reason).catch(error => {
           session.logger.error(`Failed to process transcript: ${error}`);
           this.broadcastInsightEvent({ type: 'processing_done', reason: 'processing_error' });
         });

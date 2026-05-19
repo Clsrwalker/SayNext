@@ -14,7 +14,16 @@ import {
   processConversationEventForPersonalization,
   processConversationSampleForPersonalization,
 } from "../api/personalization-pipeline";
-import { createPrenote, deletePrenote, getPrenote, listPrenotes, updatePrenote } from "../api/prenotes";
+import {
+  createPrenote,
+  deletePrenote,
+  getPrenote,
+  listPrenoteChunksApi,
+  listPrenotes,
+  queuePrenoteKnowledgeReviewApi,
+  reindexPrenoteChunksApi,
+  updatePrenote,
+} from "../api/prenotes";
 import { getTranscriptExport, listTranscriptExports, summarizeTranscriptExport } from "../api/transcript-exports";
 import { createSceneProfile, deleteSceneProfile, getSceneProfile, listSceneProfiles, updateSceneProfile } from "../api/scene-profiles";
 import { createPersonalMemory, deletePersonalMemory, listPersonalMemories, searchPersonalMemories, updatePersonalMemory } from "../api/personal-memories";
@@ -65,6 +74,9 @@ api.delete("/personal-memories/:id", deletePersonalMemory);
 api.get("/prenotes", listPrenotes);
 api.post("/prenotes", createPrenote);
 api.get("/prenotes/:id", getPrenote);
+api.get("/prenotes/:id/chunks", listPrenoteChunksApi);
+api.post("/prenotes/:id/reindex", reindexPrenoteChunksApi);
+api.post("/prenotes/:id/review-candidate", queuePrenoteKnowledgeReviewApi);
 api.patch("/prenotes/:id", updatePrenote);
 api.delete("/prenotes/:id", deletePrenote);
 

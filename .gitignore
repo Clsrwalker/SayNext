@@ -3,7 +3,12 @@ node_modules/
 package-lock.json
 .DS_Store
 *.log
-/data/
+/data/*
+!/data/reference/
+/data/reference/*
+!/data/reference/open-sources/
+/data/reference/open-sources/*
+!/data/reference/open-sources/manifest.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

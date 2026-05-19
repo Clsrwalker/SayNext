@@ -1,14 +1,22 @@
 import { findBestMatch } from "string-similarity";
 
-const MAX_CHUNK_CHARS = 135;
+const MAX_CHUNK_CHARS = 240;
+const MAX_SHORT_MERGE_CHARS = 280;
+const MIN_CHUNK_CHARS = 48;
 const MATCH_WINDOW = 4;
 const MIN_ADVANCE_SCORE = 0.42;
 const MIN_TOKEN_OVERLAP = 0.45;
 const MIN_ADVANCE_WORD_RATIO = 0.65;
 const MIN_TARGET_TOKEN_COVERAGE = 0.58;
+const MIN_TIMEOUT_ADVANCE_WORD_RATIO = 0.9;
+const MIN_TIMEOUT_TARGET_TOKEN_COVERAGE = 0.85;
+const MIN_TIMEOUT_ADVANCE_MATCH = 0.72;
 const MIN_CURRENT_READING_EVIDENCE = 0.30;
+const MIN_PREVIOUS_REPEAT_COVERAGE = 0.42;
+const PREVIOUS_REPEAT_LOOKBACK = 2;
 const LONG_UNMATCHED_TRANSCRIPT_WORDS = 12;
 const PENDING_UNMATCHED_TRANSCRIPT_WORDS = 10;
+const PENDING_READBACK_BUFFER_LIMIT = 6;
 const MAX_IDLE_MS = 3 * 60 * 1000;
 const TOKEN_OVERLAP_STOP_WORDS = new Set([
   "about",
@@ -66,6 +74,8 @@ export type TelepromptTranscriptResult =
   | { action: "finish"; display: TelepromptDisplay }
   | { action: "cancel"; reason: string };
 
+export type TelepromptTranscriptSource = "final" | "timeout";
+
 type ActiveTeleprompt = {
   id: string;
   sourceTranscript: string;
@@ -73,6 +83,8 @@ type ActiveTeleprompt = {
   chunks: string[];
   currentIndex: number;
   status: TelepromptStatus;
+  pendingReadbacks: string[];
+  currentReadbackText: string;
   createdAt: number;
   lastActivityAt: number;
 };
@@ -100,8 +112,13 @@ function chunkScript(text: string): string[] {
       continue;
     }
 
-    if (`${current} ${sentence}`.length <= MAX_CHUNK_CHARS) {
-      current = `${current} ${sentence}`;
+    const combined = `${current} ${sentence}`;
+    const canMerge =
+      combined.length <= MAX_CHUNK_CHARS ||
+      (current.length < MIN_CHUNK_CHARS && combined.length <= MAX_SHORT_MERGE_CHARS);
+
+    if (canMerge) {
+      current = combined;
     } else {
       chunks.push(current);
       current = sentence;
@@ -191,6 +208,40 @@ function targetTokenCoverage(source: string, target: string): number {
   return matches / targetTokens.size;
 }
 
+function sharedContentTokenCount(a: string, b: string): number {
+  const left = new Set(contentTokens(a));
+  const right = new Set(contentTokens(b));
+  if (!left.size || !right.size) return 0;
+
+  let matches = 0;
+  for (const token of left) {
+    if (right.has(token)) matches += 1;
+  }
+  return matches;
+}
+
+function hasRareSharedContentToken(a: string, b: string): boolean {
+  const left = new Set(contentTokens(a));
+  const right = new Set(contentTokens(b));
+  if (!left.size || !right.size) return false;
+
+  for (const token of left) {
+    if (right.has(token) && (token.length >= 6 || /\d/.test(token))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasPendingSourceTopicEvidence(text: string, sourceTranscript: string): boolean {
+  if (wordCount(text) < 5) return false;
+  if (!normalize(text) || !normalize(sourceTranscript)) return false;
+
+  const sharedCount = sharedContentTokenCount(text, sourceTranscript);
+  if (sharedCount >= 2) return true;
+  return sharedCount >= 1 && hasRareSharedContentToken(text, sourceTranscript);
+}
+
 function hasTargetOpeningEvidence(source: string, target: string): boolean {
   const sourceTokens = new Set(contentTokens(source));
   const targetTokens = contentTokens(target).slice(0, 5);
@@ -248,10 +299,71 @@ function isLikelyInterruption(text: string): boolean {
   );
 }
 
+function isLikelyRepeatOfChunk(text: string, chunk: string): boolean {
+  if (wordCount(text) < 5 || !chunk) return false;
+
+  const normalizedText = normalize(text);
+  const normalizedChunk = normalize(chunk);
+  if (!normalizedText || !normalizedChunk) return false;
+
+  const similarity = findBestMatch(normalizedText, [normalizedChunk]).bestMatch.rating;
+  const overlap = tokenOverlap(text, chunk);
+  const coverage = targetTokenCoverage(text, chunk);
+  const completeness = wordCountRatio(text, chunk);
+
+  return (
+    completeness >= 0.35 &&
+    coverage >= MIN_PREVIOUS_REPEAT_COVERAGE &&
+    (
+      similarity >= 0.42 ||
+      overlap >= 0.35 ||
+      hasTargetOpeningEvidence(text, chunk)
+    )
+  );
+}
+
+function inferCurrentIndexFromPendingReadbacks(readbacks: string[], chunks: string[]): number {
+  let currentIndex = 0;
+
+  for (const text of readbacks) {
+    if (currentIndex >= chunks.length) break;
+
+    const window = chunks.slice(currentIndex, currentIndex + MATCH_WINDOW);
+    const normalizedWindow = window.map(normalize);
+    const normalizedText = normalize(text);
+    if (!normalizedText || !normalizedWindow.length) continue;
+
+    const { bestMatch, bestMatchIndex } = findBestMatch(normalizedText, normalizedWindow);
+    const matchedChunk = window[bestMatchIndex] || "";
+    const overlap = tokenOverlap(text, matchedChunk);
+    const coverage = targetTokenCoverage(text, matchedChunk);
+    const completeness = wordCountRatio(text, matchedChunk);
+    const isCurrentChunkMatch = bestMatchIndex === 0;
+    const isStrongFutureChunkMatch =
+      bestMatchIndex > 0 &&
+      completeness >= 0.78 &&
+      bestMatch.rating >= 0.62 &&
+      overlap >= 0.62 &&
+      coverage >= 0.68;
+
+    if (
+      completeness >= MIN_ADVANCE_WORD_RATIO &&
+      coverage >= MIN_TARGET_TOKEN_COVERAGE &&
+      (
+        (isCurrentChunkMatch && (bestMatch.rating >= MIN_ADVANCE_SCORE || overlap >= MIN_TOKEN_OVERLAP)) ||
+        isStrongFutureChunkMatch
+      )
+    ) {
+      currentIndex = Math.min(currentIndex + Math.max(0, bestMatchIndex) + 1, chunks.length);
+    }
+  }
+
+  return Math.min(currentIndex, Math.max(0, chunks.length - 1));
+}
+
 function formatTeleprompt(active: ActiveTeleprompt): TelepromptDisplay {
   const total = Math.max(active.chunks.length, 1);
   const current = active.chunks[active.currentIndex] || active.openingLine;
-  const next = active.chunks[active.currentIndex + 1];
   const progress = active.status === "pending" ? "" : `${Math.min(active.currentIndex + 1, total)} / ${total}`;
 
   return {
@@ -262,7 +374,6 @@ function formatTeleprompt(active: ActiveTeleprompt): TelepromptDisplay {
       progress,
       "",
       current,
-      next ? `\nNext:\n${next}` : "",
     ].filter(Boolean).join("\n"),
   };
 }
@@ -287,6 +398,8 @@ export class TelepromptRuntime {
       chunks: [openingLine],
       currentIndex: 0,
       status: "pending",
+      pendingReadbacks: [],
+      currentReadbackText: "",
       createdAt: timestamp,
       lastActivityAt: timestamp,
     };
@@ -305,9 +418,13 @@ export class TelepromptRuntime {
       return null;
     }
 
+    const pendingReadbackText = compact(this.active.pendingReadbacks.join(" "));
+    const replayedCurrentIndex = inferCurrentIndexFromPendingReadbacks(this.active.pendingReadbacks, chunks);
     this.active.chunks = chunks;
-    this.active.currentIndex = 0;
+    this.active.currentIndex = replayedCurrentIndex;
     this.active.status = "ready";
+    this.active.currentReadbackText = replayedCurrentIndex === 0 ? pendingReadbackText : "";
+    this.active.pendingReadbacks = [];
     this.active.lastActivityAt = timestamp;
     return formatTeleprompt(this.active);
   }
@@ -341,6 +458,7 @@ export class TelepromptRuntime {
     }
 
     this.active.currentIndex = Math.min(this.active.currentIndex + 1, this.active.chunks.length);
+    this.active.currentReadbackText = "";
 
     if (this.active.currentIndex >= this.active.chunks.length) {
       const display = formatFinished(this.active);
@@ -371,6 +489,7 @@ export class TelepromptRuntime {
     }
 
     this.active.currentIndex = Math.max(0, this.active.currentIndex - 1);
+    this.active.currentReadbackText = "";
 
     return {
       action: "rewind",
@@ -387,7 +506,7 @@ export class TelepromptRuntime {
     return { action: "cancel", reason: "manual_cancel" };
   }
 
-  handleTranscript(text: string, timestamp = Date.now()): TelepromptTranscriptResult {
+  handleTranscript(text: string, timestamp = Date.now(), source: TelepromptTranscriptSource = "final"): TelepromptTranscriptResult {
     if (!this.active) {
       return { action: "hold", consumed: false };
     }
@@ -400,6 +519,18 @@ export class TelepromptRuntime {
     this.active.lastActivityAt = timestamp;
 
     if (this.active.status === "pending") {
+      if (hasPendingSourceTopicEvidence(text, this.active.sourceTranscript)) {
+        this.active.pendingReadbacks = [...this.active.pendingReadbacks, text].slice(-PENDING_READBACK_BUFFER_LIMIT);
+        return { action: "hold", consumed: true };
+      }
+
+      if (
+        isLikelyRepeatOfChunk(text, this.active.openingLine) ||
+        hasTargetOpeningEvidence(text, this.active.openingLine)
+      ) {
+        return { action: "hold", consumed: true };
+      }
+
       if (isLikelyInterruption(text)) {
         this.cancel();
         return { action: "cancel", reason: "interruption_while_preparing" };
@@ -424,24 +555,48 @@ export class TelepromptRuntime {
       this.active.currentIndex + MATCH_WINDOW,
     );
 
+    const currentChunk = window[0] || "";
+    const rawCurrentOverlap = tokenOverlap(text, currentChunk);
+    const rawCurrentCoverage = targetTokenCoverage(text, currentChunk);
+    const explicitInterruption = hasExplicitInterruptionMarker(text);
+    const rawHasCurrentReadingEvidence =
+      rawCurrentCoverage >= MIN_CURRENT_READING_EVIDENCE ||
+      rawCurrentOverlap >= MIN_CURRENT_READING_EVIDENCE ||
+      hasTargetOpeningEvidence(text, currentChunk);
+    const shouldAccumulateCurrentReadback =
+      !explicitInterruption &&
+      (
+        rawHasCurrentReadingEvidence ||
+        (Boolean(this.active.currentReadbackText) && !isLikelyInterruption(text))
+      );
+    const matchText = shouldAccumulateCurrentReadback
+      ? compact(`${this.active.currentReadbackText} ${text}`)
+      : text;
+    if (shouldAccumulateCurrentReadback) {
+      this.active.currentReadbackText = matchText;
+    }
+
     const normalizedWindow = window.map(normalize);
-    const normalizedText = normalize(text);
+    const normalizedText = normalize(matchText);
     const { bestMatch, bestMatchIndex } = normalizedWindow.length
       ? findBestMatch(normalizedText, normalizedWindow)
       : { bestMatch: { rating: 0 }, bestMatchIndex: -1 };
 
     const matchedChunk = window[bestMatchIndex] || "";
-    const overlap = tokenOverlap(text, matchedChunk);
-    const coverage = targetTokenCoverage(text, matchedChunk);
-    const completeness = wordCountRatio(text, matchedChunk);
-    const currentChunk = window[0] || "";
-    const currentOverlap = tokenOverlap(text, currentChunk);
-    const currentCoverage = targetTokenCoverage(text, currentChunk);
+    const overlap = tokenOverlap(matchText, matchedChunk);
+    const coverage = targetTokenCoverage(matchText, matchedChunk);
+    const completeness = wordCountRatio(matchText, matchedChunk);
+    const currentOverlap = tokenOverlap(matchText, currentChunk);
+    const currentCoverage = targetTokenCoverage(matchText, currentChunk);
     const hasCurrentReadingEvidence =
       currentCoverage >= MIN_CURRENT_READING_EVIDENCE ||
       currentOverlap >= MIN_CURRENT_READING_EVIDENCE ||
-      hasTargetOpeningEvidence(text, currentChunk);
-    const explicitInterruption = hasExplicitInterruptionMarker(text);
+      hasTargetOpeningEvidence(matchText, currentChunk);
+    const previousChunks = this.active.chunks.slice(
+      Math.max(0, this.active.currentIndex - PREVIOUS_REPEAT_LOOKBACK),
+      this.active.currentIndex,
+    );
+    const repeatsPreviousChunk = previousChunks.some((chunk) => isLikelyRepeatOfChunk(matchText, chunk));
 
     const isCurrentChunkMatch = bestMatchIndex === 0;
     const isStrongFutureChunkMatch =
@@ -450,8 +605,16 @@ export class TelepromptRuntime {
       bestMatch.rating >= 0.62 &&
       overlap >= 0.62 &&
       coverage >= 0.68;
+    const timeoutAdvanceAllowed =
+      source !== "timeout" ||
+      (
+        completeness >= MIN_TIMEOUT_ADVANCE_WORD_RATIO &&
+        coverage >= MIN_TIMEOUT_TARGET_TOKEN_COVERAGE &&
+        (bestMatch.rating >= MIN_TIMEOUT_ADVANCE_MATCH || overlap >= MIN_TIMEOUT_ADVANCE_MATCH)
+      );
 
     if (
+      timeoutAdvanceAllowed &&
       completeness >= MIN_ADVANCE_WORD_RATIO &&
       coverage >= MIN_TARGET_TOKEN_COVERAGE &&
       (
@@ -461,6 +624,7 @@ export class TelepromptRuntime {
     ) {
       const matchedAbsoluteIndex = this.active.currentIndex + Math.max(0, bestMatchIndex);
       this.active.currentIndex = Math.min(matchedAbsoluteIndex + 1, this.active.chunks.length);
+      this.active.currentReadbackText = "";
 
       if (this.active.currentIndex >= this.active.chunks.length) {
         const display = formatFinished(this.active);
@@ -472,6 +636,10 @@ export class TelepromptRuntime {
         action: "advance",
         display: formatTeleprompt(this.active),
       };
+    }
+
+    if (repeatsPreviousChunk && !isLikelyInterruption(text) && !explicitInterruption) {
+      return { action: "hold", consumed: true };
     }
 
     if (wordCount(text) >= LONG_UNMATCHED_TRANSCRIPT_WORDS && !hasCurrentReadingEvidence && coverage < MIN_TARGET_TOKEN_COVERAGE) {
@@ -516,6 +684,9 @@ export function makeTelepromptOpeningLine(text: string): string {
   const normalized = normalize(text);
 
   if (/\b(lambda|lamba|lamda|serverless|server less|cold start|cold starts|database index|data base in dex|data base index|supervised learning|supervise learning|superwise learning|regularization|backpropagation|cloud architecture|multi az|multi-az|dynamodb|api gateway|s3|vpc|terraform|docker|container|kubernetes)\b/.test(normalized)) {
+    if (/\b(lambda|lamba|lamda|cold start|cold starts|cold stared|cold starter)\b/.test(normalized)) {
+      return "Yeah, Lambda cold start usually happens when a function has been idle, so AWS has to start a runtime container again.";
+    }
     return "Yeah, I can explain that. The main idea is pretty straightforward.";
   }
 
@@ -524,15 +695,19 @@ export function makeTelepromptOpeningLine(text: string): string {
   }
 
   if (/\b(saynext|say next)\b/.test(normalized)) {
-    return "Yeah, I can talk about SayNext. It's a mobile app I've been building for real-time conversation help.";
+    return "Yeah, I can talk about Hybrid Search Memory Assistant. It's my real-time AI conversation project.";
+  }
+
+  if (/\b(forgot to explain what the project is|never told you which app|forgot to explain the context|without knowing the project|not sure what the project is)\b/.test(normalized)) {
+    return "Yeah, I would need a bit more context first, but I can outline how I would approach it.";
   }
 
   if (/\b(project|app|application|built|made)\b/.test(normalized)) {
-    return "Yeah, one project I can talk about is SayNext, a mobile app I've been building recently.";
+    return "Yeah, one real project I can talk about is Hybrid Search Memory Assistant, a real-time AI conversation assistant.";
   }
 
   if (/\b(hard bug|debug|challenge|failure|conflict|feedback|leadership)\b/.test(normalized)) {
-    return "Yeah, one example is from SayNext, where I had to deal with messy real-time context and improve the design.";
+    return "Yeah, one example is from Hybrid Search Memory Assistant, where I had to deal with messy real-time transcript context.";
   }
 
   if (/\b(ielts|part 2|describe|talk about a time|an occasion)\b/.test(normalized)) {
@@ -591,6 +766,15 @@ export function shouldStartTeleprompt(text: string, sceneHint = ""): "none" | "e
     /\b(can|could|would)\s+you\s+(talk about|tell about)\b/.test(textNormalized) ||
     /^tell about\b/.test(textNormalized)
   );
+  const meetingScene = /\b(meeting|group discussion|group_discussion|discussion)\b/.test(sceneNormalized);
+  const firstPersonMeetingStatement = meetingScene
+    && !/[?]\s*$/.test(text.trim())
+    && /^(i think|i feel|i guess|we need|we should|we can|we could|maybe we|let'?s|actually|the main issue|the blocker|my update|for now)\b/.test(textNormalized)
+    && !explicitLong
+    && !roughLongIntent
+    && !/\b(tell me about|walk me through|walk us through|can you explain|could you explain|please explain|can you describe|could you describe|please describe)\b/.test(textNormalized);
+  if (firstPersonMeetingStatement) return "none";
+
   const classroomLecture = /\bclassroom\b/.test(sceneNormalized) && /\b(teacher|lecture|explaining|concept)\b/.test(sceneNormalized);
   if (classroomLecture) {
     const directClassroomQuestion = /\?$/.test(text.trim())
@@ -607,6 +791,13 @@ export function shouldStartTeleprompt(text: string, sceneHint = ""): "none" | "e
     ) {
       return "expandable";
     }
+    const shortTechnicalDefinitionQuestion = wordCount <= 12
+      && structuredTopic
+      && /^(what\s+(is|are|does)|what'?s)\b/.test(textNormalized)
+      && !/\b(detail|details|detailed|long answer|longer answer|full answer|whole answer|tell me about|tell me more|describe|walk me through|walk me thru|walk us through|walk us thru|presentation|speech)\b/.test(textNormalized);
+    if (shortTechnicalDefinitionQuestion) {
+      return "none";
+    }
     if (technicalExplainIntent) {
       return "expandable";
     }
@@ -615,6 +806,14 @@ export function shouldStartTeleprompt(text: string, sceneHint = ""): "none" | "e
 
   if (/\b(tell me about|tell me more about|talk about how|can you describe|could you describe|please describe|describe a|describe an|describe your|descrip a|descrip an|descripe a|descripe an|can you explain|could you explain|please explain|can you explan|could you explan|please explan|walk me through|walk me thru|walk us through|walk us thru|how did you test|how did you improve|why did you choose|what do you think about|what is your opinion about|what's your opinion about)\b/.test(textNormalized)) {
     return "expandable";
+  }
+
+  const shortTechnicalDefinitionQuestion = wordCount <= 12
+    && structuredTopic
+    && /^(what\s+(is|are|does)|what'?s)\b/.test(textNormalized)
+    && !/\b(detail|details|detailed|long answer|longer answer|full answer|whole answer|tell me about|tell me more|describe|walk me through|walk me thru|walk us through|walk us thru|presentation|speech)\b/.test(textNormalized);
+  if (shortTechnicalDefinitionQuestion) {
+    return "none";
   }
 
   if (technicalExplainIntent || projectNarrativeIntent) {

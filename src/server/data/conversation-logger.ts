@@ -2,6 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
+import { buildLosslessRuntimeContext, isLosslessPrenoteRuntimeContext } from "../prenotes/prenote-processor";
 
 export interface ConversationSampleRecord {
   id: number;
@@ -314,6 +315,32 @@ export interface PrenoteFileRecord {
   createdAt: string;
 }
 
+export interface PrenoteChunkRecord {
+  id: number;
+  prenoteId: number;
+  userId: string;
+  chunkIndex: number;
+  headingPath: string;
+  text: string;
+  charStart: number;
+  charEnd: number;
+  tokenEstimate: number;
+  keywords: string[];
+  embedding: number[];
+  embeddingModel: string;
+  contentHash: string;
+  createdAt: string;
+}
+
+export interface PrenoteChunkSearchResult extends PrenoteChunkRecord {
+  prenoteTitle: string;
+  score: number;
+  lexicalRank?: number;
+  vectorRank?: number;
+  keywordScore: number;
+  tokenOverlapScore: number;
+}
+
 export interface CreatePrenoteInput {
   userId: string;
   title: string;
@@ -374,8 +401,29 @@ export interface UpdateSceneProfileInput {
 }
 
 const DEFAULT_DB_PATH = join(process.cwd(), "data", "saynext.sqlite");
+const PRENOTE_CHUNK_MAX_CHARS = Number(process.env.PRENOTE_CHUNK_MAX_CHARS || 3600);
+const PRENOTE_CHUNK_MIN_CHARS = Number(process.env.PRENOTE_CHUNK_MIN_CHARS || 900);
+const PRENOTE_CHUNK_OVERLAP_CHARS = Number(process.env.PRENOTE_CHUNK_OVERLAP_CHARS || 450);
+const PRENOTE_RETRIEVAL_TOP_K = Number(process.env.PRENOTE_RETRIEVAL_TOP_K || 4);
+const PRENOTE_RETRIEVAL_MAX_CHARS = Number(process.env.PRENOTE_RETRIEVAL_MAX_CHARS || 9000);
+const PRENOTE_EMBEDDING_PROVIDER = (process.env.PRENOTE_EMBEDDING_PROVIDER || "auto").toLowerCase();
+const PRENOTE_EMBEDDING_MODEL = process.env.PRENOTE_EMBEDDING_MODEL || "text-embedding-3-small";
+const PRENOTE_OPENAI_EMBEDDING_BATCH_SIZE = Number(process.env.PRENOTE_OPENAI_EMBEDDING_BATCH_SIZE || 64);
+const PRENOTE_QUERY_EMBEDDING_CACHE_TTL_MS = Number(process.env.PRENOTE_QUERY_EMBEDDING_CACHE_TTL_MS || 120000);
+const PRENOTE_QUERY_EMBEDDING_CACHE_MAX = Number(process.env.PRENOTE_QUERY_EMBEDDING_CACHE_MAX || 128);
+const prenoteQueryEmbeddingCache = new Map<string, { embedding: number[]; model: string; expiresAt: number }>();
+export type PrenoteRetrievalMode = "fast" | "semantic";
 
 const DEFAULT_SCENE_PROFILES = [
+  {
+    builtinKey: "auto",
+    name: "Auto",
+    prompt: `Scene: Auto
+
+Fast Router mode.
+When this profile is active, SayNext chooses Daily Chat, Classroom, Interview, or Meeting locally for each turn.
+This profile does not generate replies directly and does not call an extra LLM router.`,
+  },
   {
     builtinKey: "daily_chat",
     name: "Daily Chat",
@@ -569,6 +617,8 @@ For cloud/AWS/serverless questions, JobLens AI or cloud architecture projects ar
 For mobile or real-time assistant questions, SayNext is relevant.
 For teamwork, planning, UI/UX, or delivery questions, use course/team projects when relevant.
 Do not force a project example when the question is purely conceptual.
+Do not force a project example for generic IELTS-style life questions such as confidence, home, free time, hobbies, places, childhood, food, weather, or daily routine.
+Only use AWS, Lambda, DynamoDB, or specific project names when the question asks about technical experience, projects, work, cloud, mobile apps, debugging, teamwork, or engineering decisions.
 
 Behavioral Interview Rules:
 Make stories sound real and modest.
@@ -772,13 +822,23 @@ const SEARCH_STOPWORDS = new Set([
 ]);
 
 function tokenizeSearchText(text: string): string[] {
-  return Array.from(new Set(
-    String(text || "")
-      .toLowerCase()
-      .match(/[\p{L}\p{N}]+/gu)
-      ?.filter((token) => token.length > 1 && !SEARCH_STOPWORDS.has(token))
-      ?? [],
-  ));
+  const baseTokens = String(text || "")
+    .toLowerCase()
+    .match(/[\p{L}\p{N}]+/gu)
+    ?.filter((token) => token.length > 1 && !SEARCH_STOPWORDS.has(token))
+    ?? [];
+  const expandedTokens = [...baseTokens];
+
+  for (const token of baseTokens) {
+    if (!/[\p{Script=Han}]/u.test(token) || token.length <= 2) continue;
+    for (let size = 2; size <= 3; size += 1) {
+      for (let index = 0; index <= token.length - size; index += 1) {
+        expandedTokens.push(token.slice(index, index + size));
+      }
+    }
+  }
+
+  return Array.from(new Set(expandedTokens));
 }
 
 function expandAsrSearchQuery(text: string): string {
@@ -822,6 +882,18 @@ function expandAsrSearchQuery(text: string): string {
   }
   if (/睡|作息|几点睡|起床/.test(raw)) {
     expansions.push("sleep schedule routine irregular");
+  }
+
+  if (/[\u3400-\u9fff]/.test(raw)) {
+    if (/\bdeadline\b/i.test(raw) || /截止|哪天|什么时候|交/.test(raw)) {
+      expansions.push("deadline due date final report");
+    }
+    if (/\broom|location|rehearsal\b/i.test(raw) || /哪里|在哪|房间|教室|地点/.test(raw)) {
+      expansions.push("room location rehearsal building");
+    }
+    if (/\bdemo|rubric\b/i.test(raw) || /演示|展示|评分|要点/.test(raw)) {
+      expansions.push("demo rubric mention include");
+    }
   }
 
   if (/[\u3400-\u9fff]/.test(raw) && expansions.length > 1) {
@@ -877,6 +949,248 @@ function cosineSimilarity(a: number[], b: number[]): number {
     dot += a[i] * b[i];
   }
   return dot;
+}
+
+function normalizeVector(values: number[]): number[] {
+  const finite = values.map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  const norm = Math.sqrt(finite.reduce((sum, value) => sum + value * value, 0));
+  return norm > 0 ? finite.map((value) => Number((value / norm).toFixed(8))) : finite;
+}
+
+async function createPrenoteEmbeddings(texts: string[]): Promise<{ embeddings: number[][]; model: string }> {
+  const normalizedTexts = texts.map((text) => String(text || "").slice(0, 12000));
+  const shouldUseOpenAI = PRENOTE_EMBEDDING_PROVIDER === "openai"
+    || (PRENOTE_EMBEDDING_PROVIDER === "auto" && Boolean(process.env.OPENAI_API_KEY));
+
+  if (shouldUseOpenAI) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      if (PRENOTE_EMBEDDING_PROVIDER === "openai") {
+        throw new Error("OPENAI_API_KEY is required for PRENOTE_EMBEDDING_PROVIDER=openai");
+      }
+    } else {
+      try {
+        const embeddings: number[][] = [];
+        for (let index = 0; index < normalizedTexts.length; index += PRENOTE_OPENAI_EMBEDDING_BATCH_SIZE) {
+          const batch = normalizedTexts.slice(index, index + PRENOTE_OPENAI_EMBEDDING_BATCH_SIZE);
+          const response = await fetch("https://api.openai.com/v1/embeddings", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model: PRENOTE_EMBEDDING_MODEL,
+              input: batch,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`OpenAI embedding request failed: ${response.status} ${await response.text()}`);
+          }
+
+          const data = await response.json();
+          const batchEmbeddings = [...(data.data ?? [])]
+            .sort((a: any, b: any) => Number(a.index ?? 0) - Number(b.index ?? 0))
+            .map((item: any) => normalizeVector(Array.isArray(item.embedding) ? item.embedding : []));
+          embeddings.push(...batchEmbeddings);
+        }
+
+        if (embeddings.length === normalizedTexts.length) {
+          return { embeddings, model: PRENOTE_EMBEDDING_MODEL };
+        }
+      } catch (error) {
+        if (PRENOTE_EMBEDDING_PROVIDER === "openai") throw error;
+        console.warn(`[Prenote] OpenAI embeddings unavailable, falling back to local hybrid vectors: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+
+  return {
+    embeddings: normalizedTexts.map((text) => localHybridEmbedding(text)),
+    model: "local-hybrid",
+  };
+}
+
+async function createPrenoteQueryEmbedding(query: string): Promise<{ embedding: number[]; model: string }> {
+  const cacheKey = `${PRENOTE_EMBEDDING_PROVIDER}|${PRENOTE_EMBEDDING_MODEL}|${query.slice(0, 4000)}`;
+  const now = Date.now();
+  const cached = prenoteQueryEmbeddingCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return { embedding: cached.embedding, model: cached.model };
+  }
+
+  const result = await createPrenoteEmbeddings([query]);
+  const value = { embedding: result.embeddings[0] ?? [], model: result.model };
+  if (PRENOTE_QUERY_EMBEDDING_CACHE_TTL_MS > 0) {
+    if (prenoteQueryEmbeddingCache.size >= PRENOTE_QUERY_EMBEDDING_CACHE_MAX) {
+      const oldestKey = prenoteQueryEmbeddingCache.keys().next().value;
+      if (oldestKey) prenoteQueryEmbeddingCache.delete(oldestKey);
+    }
+    prenoteQueryEmbeddingCache.set(cacheKey, {
+      ...value,
+      expiresAt: now + PRENOTE_QUERY_EMBEDDING_CACHE_TTL_MS,
+    });
+  }
+  return value;
+}
+
+interface BuiltPrenoteChunk {
+  chunkIndex: number;
+  headingPath: string;
+  text: string;
+  charStart: number;
+  charEnd: number;
+  tokenEstimate: number;
+  keywords: string[];
+  contentHash: string;
+}
+
+function estimateChunkTokens(text: string): number {
+  return Math.ceil(String(text || "").length / 4);
+}
+
+function extractChunkKeywords(text: string, headingPath: string): string[] {
+  const tokens = tokenizeSearchText(`${headingPath}\n${text}`);
+  const counts = new Map<string, number>();
+  for (const token of tokens) {
+    if (token.length < 3) continue;
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 30)
+    .map(([token]) => token);
+}
+
+function detectPrenoteHeading(block: string): string | null {
+  const firstLine = block.split(/\n/).find(Boolean)?.trim() ?? "";
+  if (!firstLine) return null;
+
+  const fileBoundary = firstLine.match(/^\[File:\s*(.{1,180})\]$/i);
+  if (fileBoundary) return `File: ${fileBoundary[1].trim()}`;
+
+  const markdown = firstLine.match(/^#{1,6}\s+(.{2,120})$/);
+  if (markdown) return markdown[1].trim();
+
+  const numbered = firstLine.match(/^(?:chapter|section|part)?\s*\d+(?:\.\d+)*[.)]?\s+(.{3,120})$/i);
+  if (numbered) return firstLine.trim();
+
+  if (firstLine.length <= 90 && /[:：]$/.test(firstLine) && block.length <= 220) return firstLine.replace(/[:：]+$/, "").trim();
+  if (firstLine.length <= 80 && firstLine === firstLine.toUpperCase() && /[A-Z]{4}/.test(firstLine)) return firstLine;
+
+  return null;
+}
+
+function isPrenoteHardBoundary(block: string): boolean {
+  const firstLine = block.split(/\n/).find(Boolean)?.trim() ?? "";
+  return /^\[File:\s*.{1,180}\]$/i.test(firstLine);
+}
+
+function buildPrenoteChunksFromText(text: string): BuiltPrenoteChunk[] {
+  const normalized = String(text || "")
+    .replace(/\u0000/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim();
+  if (!normalized) return [];
+
+  const maxChars = Math.max(1200, PRENOTE_CHUNK_MAX_CHARS);
+  const minChars = Math.max(300, Math.min(PRENOTE_CHUNK_MIN_CHARS, maxChars));
+  const overlapChars = Math.max(0, Math.min(PRENOTE_CHUNK_OVERLAP_CHARS, Math.floor(maxChars / 3)));
+  const rawBlocks = normalized.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+  const chunks: BuiltPrenoteChunk[] = [];
+  let chunkText = "";
+  let chunkStart = 0;
+  let chunkEnd = 0;
+  let cursor = 0;
+  let headingPath = "";
+  let chunkHeading = "";
+
+  const pushChunk = () => {
+    const textValue = chunkText.trim();
+    if (!textValue) return;
+    const keywords = extractChunkKeywords(textValue, chunkHeading);
+    chunks.push({
+      chunkIndex: chunks.length,
+      headingPath: chunkHeading,
+      text: textValue,
+      charStart: Math.max(0, chunkStart),
+      charEnd: Math.max(chunkEnd, chunkStart + textValue.length),
+      tokenEstimate: estimateChunkTokens(textValue),
+      keywords,
+      contentHash: hashMemoryContent(`${chunkHeading}\n${textValue}`),
+    });
+  };
+
+  const startNewChunkWithOverlap = () => {
+    const overlap = overlapChars > 0 && chunkText.length > overlapChars
+      ? chunkText.slice(-overlapChars).replace(/^[^\n.?!。！？]*[\n.?!。！？]\s*/, "").trim()
+      : "";
+    pushChunk();
+    chunkText = overlap ? `${overlap}\n\n` : "";
+    chunkStart = overlap ? Math.max(0, chunkEnd - overlap.length) : chunkEnd;
+    chunkHeading = headingPath;
+  };
+
+  const startNewChunkWithoutOverlap = () => {
+    pushChunk();
+    chunkText = "";
+    chunkStart = chunkEnd;
+    chunkHeading = headingPath;
+  };
+
+  for (const block of rawBlocks) {
+    const foundAt = normalized.indexOf(block, cursor);
+    const blockStart = foundAt >= 0 ? foundAt : cursor;
+    const blockEnd = blockStart + block.length;
+    cursor = blockEnd;
+
+    const hardBoundary = isPrenoteHardBoundary(block);
+    if (hardBoundary && chunkText.trim()) {
+      startNewChunkWithoutOverlap();
+    }
+
+    const heading = detectPrenoteHeading(block);
+    if (heading) headingPath = heading;
+
+    if (block.length > maxChars) {
+      if (chunkText.trim()) {
+        if (hardBoundary) startNewChunkWithoutOverlap();
+        else startNewChunkWithOverlap();
+      }
+      for (let start = 0; start < block.length; start += Math.max(1, maxChars - overlapChars)) {
+        const slice = block.slice(start, start + maxChars);
+        chunkText = slice;
+        chunkStart = blockStart + start;
+        chunkEnd = Math.min(blockEnd, blockStart + start + slice.length);
+        chunkHeading = headingPath;
+        pushChunk();
+      }
+      chunkText = "";
+      chunkStart = blockEnd;
+      chunkEnd = blockEnd;
+      chunkHeading = headingPath;
+      continue;
+    }
+
+    const nextText = chunkText ? `${chunkText}\n\n${block}` : block;
+    if (chunkText && nextText.length > maxChars && chunkText.length >= minChars) {
+      startNewChunkWithOverlap();
+    }
+
+    if (!chunkText.trim()) {
+      chunkStart = blockStart;
+      chunkHeading = headingPath;
+    }
+    chunkText = chunkText ? `${chunkText}\n\n${block}` : block;
+    chunkEnd = blockEnd;
+  }
+
+  pushChunk();
+  return chunks;
 }
 
 function parseJsonArray(value: string, fallback: any[] = []): any[] {
@@ -953,6 +1267,14 @@ function isPersonalOrProjectMemoryQuery(query: string): boolean {
 
   if (!normalized) return false;
   if (isExplicitGeneralTechnicalQuestion(normalized)) return false;
+  if (!/\b(xiang|you|your|yours|yourself|my|me|i)\b/.test(normalized)
+    && /^(who developed|who created|who invented|who released|when was|where was)\b/.test(normalized)) {
+    return false;
+  }
+  if (!/\b(xiang|you|your|yours|yourself|my|me|i)\b/.test(normalized)
+    && /^(what is|what was|what are|what does|explain|define|give me a general definition)\b/.test(normalized)) {
+    return false;
+  }
   if (hasAnonymousSpeakerLabel && !includesAny(normalized, [
     "xiang", "saynext", "say next", "elderalbum", "elder album", "joblens", "job lens",
     "dalparkaid", "dal park", "interview question", "candidate",
@@ -967,23 +1289,76 @@ function isPersonalOrProjectMemoryQuery(query: string): boolean {
     "saynext", "say next", "elderalbum", "elder album", "joblens", "job lens",
     "dalparkaid", "dal park", "my project", "your project", "my app", "your app",
     "my application", "your application", "my experience", "your experience",
+    "what project you did", "project you did", "project did you do",
+    "project you made", "project you built", "project for next",
     "my background", "your background", "about yourself", "tell me about yourself",
     "introduce yourself", "resume", "cv", "portfolio", "scene profile",
     "scene profiles", "prenote", "personal memory", "memory retrieval",
     "automatic context detection", "context detection",
+    "hybrid search memory assistant", "hybrid search", "context aware ai assistance",
+    "context-aware ai assistance", "realtime ai assistant", "real-time ai assistant",
+    "ai assistant idea", "ai assistant origin", "blood donation management system",
+    "ai meeting monitor",
+    "food allergy", "food allergies", "dietary restriction", "dietary restrictions",
+    "non-refundable deposit", "deposit now", "send the deposit", "lease addendum",
+    "payment terms", "landlord says", "formal speaking", "formal event",
+    "ceremony", "wedding toast", "graduation intro", "self introduction",
+    "classroom question", "ask in class", "questions do you ask in class",
+    "professor asks if there are any questions", "any questions after explaining",
+    "what kind of question should i ask", "question should i ask after",
+    "after a lecture", "lecture about",
+    "family property", "family money", "property rent", "mother communication",
+    "target role", "full-stack developer", "full stack developer",
+    "remote-friendly", "workplace preference", "team style fits you",
+    "technical areas are you more and less experienced", "more and less experienced",
+    "more experienced", "less experienced", "skill confidence", "experienced in",
+    "motivation pattern", "work rhythm", "interest-triggered", "interest triggered",
+    "stable grinder", "project mode", "hyperfocus", "all-nighter", "all nighter",
+    "manager check-ins", "manager check ins", "monitored while working",
+    "forced online responsiveness", "social confidence", "simulate conversations",
+    "conversation preparation", "envy socially", "envy in conversation",
+    "envy in english speaking", "self-esteem", "self image", "self-image",
+    "feel dumb", "technical genius", "star engineer", "reliable contributor",
+    "practical developer", "want people to think", "about your ability",
+    "observer of the world", "future preference", "work culture do you fear",
+    "what kind of future", "lifestyle and work environment",
+    "high-pressure work culture", "competitive grind culture", "private space",
+    "english social embarrassment", "english social failure", "constant awkwardness",
+    "high school adaptation", "english adaptation", "insecurity from high school",
+    "driving learning", "learned driving", "summer 2024", "naturally talented",
+    "surprisingly naturally talented", "talented at driving", "local canadian", "canadian identity", "culturally integrated",
+    "halifax home", "home feeling", "feel like home", "ai not a toy", "not a toy",
+    "not just a toy", "ai was not just a toy", "when did you first feel ai",
+    "gpt-3", "gpt3", "fixed programmed responses", "hardcoded replies",
+    "observation ability", "hidden problems", "right questions", "mr. jiang",
+    "mr jiang", "jiang xiansheng", "蒋先生", "mentor", "study abroad",
+    "recommendation letter", "hidden insecurities", "afraid people discover",
+    "afraid people will discover", "worry others may discover",
+    "not smart enough", "not social", "not independent", "emotional comfort",
+    "instrumental music", "orchestral music", "genshin bgm", "genshin music",
+    "first presentation panic", "presentation panic", "history class presentation",
+    "phone translator", "read from translator", "first snow walk home",
+    "walking home alone in snow", "home alone in snow", "snow memory",
+    "solo travel", "travel alone", "traveling alone", "tourism preference",
+    "traveled much", "travelled much", "not traveled much", "not travelled much",
+    "ideal type", "relationship preference", "separate finances", "no kids",
+    "relationship style",
+    "developer identity", "frontend developer", "ui finally looks good",
+    "user experience", "frontend less", "true happiness", "real happiness", "really happy",
   ])) {
     return true;
   }
 
   if (isBehavioralStoryQuestion(normalized)) return true;
 
-  if (/\b(where|what|which|when|why|how)\s+(did|do|are|were|was|is)\s+(you|your)\b/.test(normalized)) {
+  if (/\b(where|what|which|when|why|how|who)\s+(did|do|are|were|was|is|influenced)\s+(you|your)\b/.test(normalized)) {
     return true;
   }
 
   if (/\b(do|did|are|were|would|will|can|could)\s+you\b/.test(normalized) && includesAny(normalized, [
-    "like", "prefer", "play", "watch", "read", "study", "work", "drive", "cook",
+    "like", "prefer", "play", "watch", "read", "study", "student", "work", "drive", "cook",
     "eat", "sleep", "live", "go out", "travel", "learn", "use", "listen",
+    "ask", "envy", "want", "fear",
   ])) {
     return true;
   }
@@ -1000,6 +1375,11 @@ function isPersonalOrProjectMemoryQuery(query: string): boolean {
     "my school", "my high school", "my university", "my major", "my course",
     "my class", "my family", "my hometown", "my childhood", "my room",
     "my car", "my english", "my job", "my career",
+    "what were you like as a kid", "as a kid", "when you were a kid",
+    "your friend", "your friends", "your best friend", "your host family",
+    "your homestay", "your roommate", "your roommates", "your restaurant",
+    "your restaurants", "your drink", "your drinks", "what language",
+    "which language",
   ])) {
     return true;
   }
@@ -1008,6 +1388,8 @@ function isPersonalOrProjectMemoryQuery(query: string): boolean {
     "what games", "what game", "which game", "what food", "what music",
     "what anime", "what tv", "what movie", "what website", "what app",
     "what kind of games", "what kind of game", "what kind of job", "what kind of work",
+    "what kind of clothes", "clothes do you usually wear", "what do you usually wear",
+    "clothes do you wear", "clothes do you like wearing",
     "what kind of role", "role are you looking for", "what role are you looking for",
     "what do you usually",
     "what do you often", "what do you normally", "how often do you",
@@ -1015,13 +1397,70 @@ function isPersonalOrProjectMemoryQuery(query: string): boolean {
     "why computer science", "when did you move to canada", "after moving to canada",
     "before canada", "high school in china", "high school after moving",
     "where did you study", "where are you studying", "what are you studying",
+    "what is your major", "what major", "which major", "what program",
+    "which program", "program are you in", "major are you in",
+    "what degree", "which degree", "what subject do you study",
     "what school you studying", "high school you studying in china",
     "do you work or study", "work or study", "free time", "weekend",
     "spend your free time", "spending free time", "indoors or outdoors",
     "most expensive item", "ever bought", "favourite room", "favorite room",
     "favourite subject", "favorite subject", "play any musical instrument",
     "good at any sport", "any sport", "what sport", "which sport",
+    "what restaurants", "which restaurants", "where do you eat",
+    "what do you cook", "what do you drink", "what language",
+    "which language", "learn another language",
+    "good student", "who influenced you", "influenced you during undergrad",
+    "get around during undergrad", "how did you get around",
+    "proudest achievement", "most proud", "lowest period", "difficult period",
+    "technical strength", "technical strengths", "technical weakness", "technical weaknesses",
+    "leetcode", "procrastinate", "procrastination", "ai assisted development",
+    "ai-assisted development", "preferred ai workflow", "disliked ai response",
+    "communication style", "communication styles", "prefer being alone",
+    "prefer solitude", "ideal day", "first real software project",
+    "first software project", "first english confidence", "confidence speaking english",
+    "feel confident speaking english", "translation software", "childhood period",
+    "remember most warmly", "warmest period",
+    "food allergy", "food allergies", "dietary restriction", "allergic to",
+    "send the deposit", "pay the deposit", "non-refundable deposit", "lease addendum",
+    "payment terms", "formal speaking", "formal event", "ceremony", "wedding toast",
+    "graduation intro", "self introduction", "classroom question", "ask in class",
+    "questions do you ask in class", "professor asks if there are any questions",
+    "any questions after explaining", "what kind of question should i ask",
+    "question should i ask after", "after a lecture", "lecture about",
+    "family property", "family money", "property rent",
+    "mother communication", "target role", "full-stack developer",
+    "full stack developer", "remote-friendly", "workplace preference",
+    "team style fits you", "technical areas are you more and less experienced",
+    "more and less experienced", "more experienced", "less experienced",
+    "skill confidence", "experienced in",
+    "motivation pattern", "work rhythm", "interest-triggered", "interest triggered",
+    "stable grinder", "project mode", "hyperfocus", "all-nighter", "all nighter",
+    "manager check-ins", "manager check ins", "monitored while working",
+    "forced online responsiveness", "social confidence", "simulate conversations",
+    "conversation preparation", "envy socially", "envy in conversation",
+    "envy in english speaking", "self-esteem", "self image", "self-image",
+    "feel dumb", "technical genius", "star engineer", "reliable contributor",
+    "practical developer", "want people to think", "about your ability",
+    "observer of the world", "future preference", "work culture do you fear",
+    "what kind of future", "lifestyle and work environment",
+    "high-pressure work culture", "competitive grind culture", "private space",
+    "english social embarrassment", "english social failure", "constant awkwardness",
+    "high school adaptation", "english adaptation", "insecurity from high school",
+    "driving learning", "learned driving", "summer 2024", "naturally talented",
+    "surprisingly naturally talented", "talented at driving", "local canadian", "canadian identity", "culturally integrated",
+    "halifax home", "home feeling", "feel like home", "ai not a toy", "not a toy",
+    "not just a toy", "ai was not just a toy", "when did you first feel ai",
+    "gpt-3", "gpt3", "fixed programmed responses", "hardcoded replies",
+    "observation ability", "hidden problems", "right questions", "mr. jiang",
+    "mr jiang", "jiang xiansheng", "蒋先生", "mentor", "study abroad",
+    "recommendation letter", "hidden insecurities", "afraid people discover",
+    "afraid people will discover", "worry others may discover",
+    "not smart enough", "not social", "not independent", "emotional comfort",
+    "instrumental music", "orchestral music", "genshin bgm", "genshin music",
     "project you did for next", "project did for next", "small project you made",
+    "小时候", "幼儿园", "初中", "高中", "本科", "学习", "语言", "德语",
+    "日语", "足球", "游泳", "餐厅", "肯德基", "炸鸡", "咖喱", "麻辣烫",
+    "饮料", "代可", "朋友", "住家", "室友", "电动自行车",
   ])) {
     return true;
   }
@@ -1058,6 +1497,16 @@ function isPersonalOrProjectMemoryQuery(query: string): boolean {
 
 function shouldSkipPersonalMemorySearch(query: string): boolean {
   const normalized = query.toLowerCase();
+
+  if (includesAny(normalized, [
+    "what restaurant", "which restaurant", "your restaurant", "restaurants do you",
+    "what food", "what do you cook", "what do you drink", "your drink",
+    "host family", "homestay", "your roommate", "your friend", "your friends",
+    "what language", "which language", "languages have you learned",
+    "小时候", "语言", "餐厅", "饮料", "住家", "室友",
+  ])) {
+    return false;
+  }
 
   if (includesAny(normalized, [
     "orange the telecom",
@@ -1165,6 +1614,9 @@ function shouldSkipPersonalMemorySearch(query: string): boolean {
     "favourite toy",
     "favorite toy",
     "birthday you remember",
+    "public lecture",
+    "summarize this lecture",
+    "summarize this public lecture",
   ])) {
     return true;
   }
@@ -1244,6 +1696,17 @@ function isLikelyCompleteDialogueExcerpt(query: string): boolean {
   const quotedSpeakerLabels = (query.match(/\b[A-Z]:\s/g) ?? []).length;
   if (quotedSpeakerLabels >= 2) return true;
 
+  const spacedPunctuationCount = (query.match(/\s[.,!?]\s/g) ?? []).length;
+  if (spacedPunctuationCount >= 3 && includesAny(normalized, [
+    "same problem here",
+    "brothers and sisters",
+    "hand-me-downs",
+    "oldest and youngest child",
+    "oldest was going to college",
+  ])) {
+    return true;
+  }
+
   if (includesAny(normalized, [
     "my name is",
     "what can i do for you today",
@@ -1259,6 +1722,10 @@ function isLikelyCompleteDialogueExcerpt(query: string): boolean {
     "how have you been",
     "i have bothered him several times",
     "he's the kind of guy",
+    "lack of personal property",
+    "three quarters of my wardrobe",
+    "age gap is also annoying",
+    "last child was born",
   ])) {
     return true;
   }
@@ -1308,6 +1775,11 @@ function isLikelyExternalLearningTranscript(query: string): boolean {
 
 function isBehavioralStoryQuestion(query: string): boolean {
   const normalized = query.toLowerCase();
+  if (/\b(proudest achievement|most proud|what are you proud of|what is your proudest achievement|what accomplishment are you proud)\b/i.test(normalized)
+    && !/\b(time|example|project|work|interview|behavioral|tell me about)\b/i.test(normalized)) {
+    return false;
+  }
+
   return includesAny(normalized, [
     "tell me about a time",
     "describe a time",
@@ -1323,12 +1795,18 @@ function isBehavioralStoryQuestion(query: string): boolean {
     "mistake",
     "what did you learn",
     "what you learned",
+    "prompt design",
+    "design that did not work",
+    "first design was too rigid",
     "constructive feedback",
     "feedback have you received",
     "feedback that changed",
     "sounded too ai-like",
+    "answer sounded too ai-like",
     "leadership",
     "ownership",
+    "taking ownership",
+    "take ownership",
     "initiative",
     "hard bug",
     "hardest bug",
@@ -1340,13 +1818,24 @@ function isBehavioralStoryQuestion(query: string): boolean {
     "wrong because of context",
     "prioritize tasks",
     "prioritise tasks",
+    "prioritize",
+    "prioritise",
     "several deadlines",
     "paused one feature",
+    "pause one feature",
+    "finish something more important",
     "trade-off you made",
     "tradeoff you made",
+    "cost and reliability",
+    "local mode",
+    "travel mode",
     "vague requirements",
     "requirements are vague",
     "unclear idea",
+    "why did you add prenote",
+    "why did you add scene",
+    "prenote and scene profile",
+    "prenote and scene profiles",
     "product design decision",
     "different ideas in a group project",
     "technical disagreement",
@@ -1393,6 +1882,80 @@ function isBehavioralStoryQuestion(query: string): boolean {
     "project best shows",
     "best shows your product thinking",
     "difficult but meaningful",
+  ]);
+}
+
+function isResponsePlaybookQuestion(query: string): boolean {
+  const normalized = query.toLowerCase();
+  const hasActionOrPressurePrompt = includesAny(normalized, [
+    "what should i say",
+    "how should i answer",
+    "what should we do",
+    "what do we do",
+    "what would you do",
+    "how would you handle",
+    "how do you handle",
+    "how should i handle",
+    "how should we handle",
+    "how would you approach",
+    "how should i approach",
+    "how should we approach",
+    "what is the best next step",
+    "what should be the next step",
+    "right now",
+  ]);
+
+  if (!hasActionOrPressurePrompt && (isGeneralTechnicalConceptQuestion(query) || isLikelyGeneralTechnicalLecture(query))) {
+    return false;
+  }
+
+  return includesAny(normalized, [
+    "what should i say",
+    "how should i answer",
+    "what should we do",
+    "what do we do",
+    "what would you do",
+    "how would you handle",
+    "how do you handle",
+    "how should i handle",
+    "how should we handle",
+    "how would you approach",
+    "how should i approach",
+    "how should we approach",
+    "what is the best next step",
+    "what should be the next step",
+    "right now",
+    "blocker",
+    "blocked",
+    "stuck",
+    "pressure",
+    "deadline",
+    "scope",
+    "cut scope",
+    "demo",
+    "presentation tomorrow",
+    "before the demo",
+    "before presentation",
+    "requirements are unclear",
+    "unclear requirement",
+    "vague requirement",
+    "api contract",
+    "contract keeps changing",
+    "integration issue",
+    "integration problem",
+    "team conflict",
+    "teammate conflict",
+    "disagreement",
+    "different ideas",
+    "feedback",
+    "code review",
+    "harsh feedback",
+    "hard bug",
+    "debug this",
+    "debugging approach",
+    "not responsive",
+    "unresponsive teammate",
+    "waiting for information",
   ]);
 }
 
@@ -2186,9 +2749,36 @@ function highSensitivityAllowed(query: string, memory: Pick<PersonalMemoryRecord
   const category = memory.category.toLowerCase();
   const directTriggers = [
     "family", "mother", "mom", "father", "dad", "sister", "brother", "brothers", "sibling", "siblings", "parent", "parents", "child", "childhood", "young", "bullying",
+    "kid", "kids", "friend", "friends", "best friend", "host family", "homestay", "roommate", "roommates",
+    "influenced", "peer influence", "undergrad", "undergraduate",
     "health", "liver", "weight", "relationship", "girlfriend", "romantic", "dating", "date", "immigration",
     "pr", "residency", "money", "financial", "scam", "private", "stress", "weakness",
     "confidence", "nervous", "anxiety", "future", "long term", "canada", "freedom",
+    "solitude", "alone", "communication style", "communication styles", "ideal day",
+    "lowest period", "difficult period", "nostalgic", "neighborhood", "neighbourhood",
+    "weak english", "english confidence", "translation software",
+    "self-esteem", "self image", "self-image", "insecurity", "insecurities", "insecure", "inferiority", "feel dumb",
+    "technical genius", "star engineer", "reliable contributor", "practical developer",
+    "recognition", "ability", "capable", "capability", "observer of the world",
+    "simulate conversations", "conversation preparation", "envy", "social confidence",
+    "fluent english", "react quickly",
+    "motivation pattern", "work rhythm", "hyperfocus", "all-nighter", "all nighter",
+    "manager check-ins", "manager check ins", "monitored", "forced online responsiveness",
+    "high-pressure work culture", "competitive grind", "private space", "life direction",
+    "english social embarrassment", "english social failure", "constant awkwardness",
+    "high school adaptation", "english adaptation", "insecurity from high school",
+    "canadian identity", "local canadian", "culturally integrated",
+    "study abroad", "mentor", "mr. jiang", "mr jiang", "jiang", "jiang xiansheng",
+    "蒋先生", "recommendation letter", "hidden insecurities", "afraid people discover",
+    "afraid people will discover", "worry others may discover",
+    "not smart enough", "not social", "not independent",
+    "presentation panic", "first presentation", "phone translator", "read from translator",
+    "dating preference", "relationship preference", "relationship style", "girlfriend", "ideal type",
+    "separate finances", "children", "kids", "political values",
+    "china political system", "authoritarianism", "dictatorship", "censorship",
+    "propaganda", "tiananmen", "great famine", "mao zedong", "xi jinping",
+    "return to china", "go back to china",
+    "家庭", "父亲", "母亲", "姐姐", "童年", "小时候", "幼儿园", "朋友", "好友", "住家", "寄宿家庭", "室友",
     "家庭", "父亲", "母亲", "姐姐", "童年", "霸凌", "健康", "恋爱", "移民", "永居", "财务",
   ];
 
@@ -2212,6 +2802,69 @@ function highSensitivityAllowed(query: string, memory: Pick<PersonalMemoryRecord
       "stress", "weakness", "confidence", "insecure", "insecurity", "nervous", "anxiety",
       "girlfriend", "relationship", "romantic", "dating", "date", "girl", "girls", "social", "bullying",
       "humiliation", "conflict", "mother", "fear", "interview",
+    ]);
+  }
+
+  if (category.includes("presentation_anxiety")) {
+    return includesAny(normalizedQuery, [
+      "presentation", "public speaking", "panic", "nervous", "history class",
+      "phone translator", "translator", "read from", "early canada", "language barrier",
+      "embarrassed", "awkward",
+    ]);
+  }
+
+  if (category.includes("relationship_preference")) {
+    return includesAny(normalizedQuery, [
+      "relationship", "girlfriend", "dating", "date", "romantic", "ideal type",
+      "relationship style", "partner", "marriage", "children", "kids", "finance", "finances",
+      "financially separate", "separate finances", "single", "no pressure",
+      "autonomy", "freedom",
+    ]);
+  }
+
+  if (category.includes("political_values_china")) {
+    return includesAny(normalizedQuery, [
+      "political", "politics", "china political", "chinese political",
+      "authoritarian", "authoritarianism", "dictatorship", "censorship",
+      "propaganda", "freedom of speech", "tiananmen", "great famine",
+      "mao", "mao zedong", "xi jinping", "return to china", "go back to china",
+      "don't want to return", "do not want to return", "why not return",
+    ]);
+  }
+
+  if (category.includes("self_image") || category.includes("social_confidence")) {
+    return includesAny(normalizedQuery, [
+      "self-esteem", "self image", "self-image", "insecurity", "insecurities", "insecure", "inferiority", "feel dumb",
+      "too dumb", "technical genius", "star engineer", "reliable contributor",
+      "practical developer", "recognition", "ability", "capable", "capability", "confidence",
+      "social confidence", "simulate conversations", "conversation preparation",
+      "envy", "speak naturally", "fluent english", "english speaking", "react quickly",
+      "knowledgeable", "observer of the world", "social style",
+      "interview", "strength", "weakness", "building projects", "built projects",
+      "afraid people", "discover", "not smart enough", "not social", "not independent",
+    ]);
+  }
+
+  if (category.includes("language_identity")) {
+    return includesAny(normalizedQuery, [
+      "english", "social embarrassment", "social failure", "constant awkwardness",
+      "high school adaptation", "english adaptation", "early canada", "weak english",
+      "social participation", "insecurity", "ever fully disappear",
+    ]);
+  }
+
+  if (category.includes("identity_belonging")) {
+    return includesAny(normalizedQuery, [
+      "canadian identity", "local canadian", "culturally integrated", "native culture",
+      "local social culture", "belonging", "isolation", "loneliness", "canada",
+    ]);
+  }
+
+  if (category.includes("mentor_life_anchor")) {
+    return includesAny(normalizedQuery, [
+      "mentor", "mr. jiang", "mr jiang", "jiang", "jiang xiansheng", "蒋先生",
+      "study abroad", "recommendation", "support materials", "life advice",
+      "important person", "turning point", "helped you", "helped xiang",
     ]);
   }
 
@@ -2284,6 +2937,14 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
   const category = memory.category.toLowerCase();
   const title = memory.title.toLowerCase();
   const sourceRef = memory.sourceRef.toLowerCase();
+  const sayNextPublicProjectIntent = includesAny(normalizedQuery, [
+    "saynext", "say next", "hybrid search memory assistant", "hybrid search",
+    "what project you did for next", "project you did for next", "project did for next",
+    "what project did you do for next", "project you made for next", "conversation assistant",
+    "real-time ai assistant", "realtime ai assistant", "real time ai assistant",
+    "context-aware ai assistance", "context aware ai assistance", "input token", "input tokens",
+    "token cost", "memory retrieval", "personal memory", "prenote", "transcript understanding",
+  ]);
   let boost = 0;
   boost += knowledgeInterviewIntentBoost(normalizedQuery, sourceRef, tokens);
   boost += knowledgeLectureIntentBoost(normalizedQuery, sourceRef, tokens);
@@ -2294,7 +2955,9 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     if (includesAny(normalizedQuery, [
       "studying now", "study now", "what are you studying", "work or study",
       "program", "at dal", "in dal", "current school", "currently studying",
-      "choose your major", "what do you study",
+      "choose your major", "what do you study", "what is your major",
+      "what major", "which major", "what program", "which program",
+      "program are you in", "major are you in", "what degree",
     ])) boost += 0.07;
   }
 
@@ -2636,22 +3299,262 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     if (sourceRef.includes("hard-bug-context") && includesAny(normalizedQuery, ["hard bug", "hardest bug", "recent bug", "debug", "debugging", "wrong output", "output was wrong", "wrong because of context", "stale context", "context bug"])) boost += 0.28;
     if (sourceRef.includes("hard-bug-context") && includesAny(normalizedQuery, ["ollama", "qwen", "json parse", "malformed json"])) boost -= 0.1;
     if (sourceRef.includes("local-llm-json-latency") && includesAny(normalizedQuery, ["json", "parse", "malformed", "ollama", "qwen", "latency", "loading", "stuck", "local llm", "model issue"])) boost += 0.33;
-    if (sourceRef.includes("prompt-failure") && includesAny(normalizedQuery, ["failure", "failed", "mistake", "lesson", "too rigid", "prompt", "repeat", "repetitive", "ai-like"])) boost += 0.16;
-    if (sourceRef.includes("constructive-feedback") && includesAny(normalizedQuery, ["constructive feedback", "feedback", "too formal", "ai-like", "natural", "communication feedback"])) boost += 0.18;
-    if (sourceRef.includes("leadership-ownership") && includesAny(normalizedQuery, ["leadership", "ownership", "initiative", "led", "lead", "take ownership", "end to end"])) boost += 0.18;
-    if (sourceRef.includes("above-and-beyond") && includesAny(normalizedQuery, ["above and beyond", "extra effort", "more than required", "beyond the requirement", "went beyond"])) boost += 0.2;
+    if (sourceRef.includes("prompt-failure") && includesAny(normalizedQuery, ["failure", "failed", "mistake", "mistake you made", "lesson", "what did you learn", "too rigid", "prompt", "prompt design", "design that did not work", "first design", "repeat", "repetitive", "ai-like"])) boost += 0.32;
+    if (sourceRef.includes("prompt-failure") && includesAny(normalizedQuery, ["long project", "kept improving", "multiple months", "repeated failures"])) boost -= 0.22;
+    if (sourceRef.includes("constructive-feedback") && includesAny(normalizedQuery, ["constructive feedback", "feedback", "too formal", "ai-like", "answer sounded too ai-like", "said your answer sounded", "natural", "communication feedback"])) boost += 0.32;
+    if (sourceRef.includes("constructive-feedback") && includesAny(normalizedQuery, ["code review", "harsh code review", "senior engineer", "pull request feedback"])) boost -= 0.25;
+    if (sourceRef.includes("leadership-ownership") && includesAny(normalizedQuery, ["leadership", "ownership", "taking ownership", "initiative", "led", "lead", "take ownership", "end to end"])) boost += 0.3;
+    if (sourceRef.includes("above-and-beyond") && includesAny(normalizedQuery, ["above and beyond", "extra effort", "more than required", "beyond the requirement", "above and beyond the requirements", "went beyond"])) boost += 0.45;
     if (sourceRef.includes("pushed-user-control") && includesAny(normalizedQuery, ["push for", "pushed for", "had to push", "influence", "convince", "manual scene", "scene profile", "user control", "user-controlled", "not fully automatic"])) boost += 0.3;
-    if (sourceRef.includes("long-iteration") && includesAny(normalizedQuery, ["persevere", "persevered", "multiple months", "long project", "kept working", "kept improving", "difficult for a long time", "stuck with"])) boost += 0.28;
-    if (sourceRef.includes("overwhelmed-scope-control") && includesAny(normalizedQuery, ["overwhelming", "overwhelmed", "tight deadline", "failed deadline", "deadline", "time management", "too much work", "several deadlines", "scope control", "cut scope"])) boost += 0.28;
+    if (sourceRef.includes("long-iteration") && includesAny(normalizedQuery, ["persevere", "persevered", "multiple months", "long project", "kept working", "kept improving", "repeated failures", "difficult for a long time", "stuck with"])) boost += 0.45;
+    if (sourceRef.includes("overwhelmed-scope-control") && includesAny(normalizedQuery, ["overwhelming", "overwhelmed", "tight deadline", "failed deadline", "deadline", "time management", "too much work", "several deadlines", "several deadlines happen together", "scope control", "cut scope"])) boost += 0.34;
     if (sourceRef.includes("independent-work") && includesAny(normalizedQuery, ["working independently", "work independently", "independent work", "self-directed", "without much guidance", "learn on your own"])) boost += 0.2;
     if (sourceRef.includes("user-impact-reliability") && includesAny(normalizedQuery, ["user impact", "customer impact", "reliability", "privacy", "trust", "customer focus", "user trust", "reliability and user trust", "think about reliability"])) boost += 0.34;
     if (sourceRef.includes("user-impact-reliability") && includesAny(normalizedQuery, ["trade-off", "tradeoff", "between cost and reliability", "cost and reliability"])) boost -= 0.08;
-    if (sourceRef.includes("prioritization") && includesAny(normalizedQuery, ["prioritize", "prioritise", "priority", "deadline", "tradeoff", "trade-off", "trade-off you made", "tradeoff you made", "cost", "cost and reliability", "between cost and reliability", "local mode", "travel mode", "paused one feature", "pause one feature", "more important", "finish something more important"])) boost += 0.3;
-    if (sourceRef.includes("vague-requirements") && includesAny(normalizedQuery, ["requirements", "vague", "ambiguity", "unclear", "prenote", "scene profile", "product design"])) boost += 0.17;
+    if (sourceRef.includes("prioritization") && includesAny(normalizedQuery, ["prioritize", "prioritise", "priority", "deadline", "tradeoff", "trade-off", "trade-off you made", "tradeoff you made", "cost", "cost and reliability", "between cost and reliability", "local mode", "travel mode", "split local mode", "split local", "paused one feature", "pause one feature", "more important", "finish something more important"])) boost += 0.42;
+    if (sourceRef.includes("vague-requirements") && includesAny(normalizedQuery, ["requirements", "vague", "ambiguity", "unclear", "prenote", "scene profile", "scene profiles", "why did you add prenote", "why did you add scene", "product design"])) boost += 0.34;
+    if (sourceRef.includes("vague-requirements") && includesAny(normalizedQuery, ["above and beyond", "above and beyond the requirements", "extra effort"])) boost -= 0.2;
     if (sourceRef.includes("team-disagreement") && includesAny(normalizedQuery, ["conflict", "teammate", "team project", "group project", "disagree", "disagreed", "disagreement", "different ideas", "technical disagreement"])) boost += 0.18;
     if (sourceRef.includes("team-disagreement") && includesAny(normalizedQuery, ["never had a dramatic conflict", "no dramatic conflict", "never had a conflict", "no conflict"])) boost -= 0.25;
     if (sourceRef.includes("team-disagreement") && !includesAny(normalizedQuery, ["conflict", "teammate", "team project", "group project", "disagree", "disagreed", "disagreement", "different ideas", "technical disagreement"])) boost -= 0.12;
     if (sourceRef.includes("achievement") && includesAny(normalizedQuery, ["achievement", "satisfied", "proud", "most proud", "accomplishment", "best shows your product thinking", "project best shows", "product thinking", "difficult but meaningful"])) boost += 0.34;
+  }
+
+  if (sourceRef === "knowledge:behavioral-interview:code-review-feedback" && includesAny(normalizedQuery, [
+    "code review", "harsh code review", "senior engineer", "pull request feedback",
+  ])) {
+    boost += 0.45;
+  }
+
+  if (sourceRef.startsWith("xiang-update:2026-05-18:")) {
+    if (sourceRef.includes("hybrid-search-memory-assistant")
+      && includesAny(normalizedQuery, [
+        "hybrid search memory assistant", "hybrid search", "real-time ai assistant",
+        "realtime ai assistant", "ai assistant idea", "ai assistant origin",
+        "translation software", "conversation assistant", "input token", "input tokens",
+        "token cost", "memory retrieval", "personal memory", "prenote", "transcript",
+        "production users", "revenue",
+      ])) {
+      boost += 0.32;
+    }
+    if (sourceRef.includes("hybrid-search-memory-assistant") && sayNextPublicProjectIntent) {
+      boost += 0.48;
+      if (sourceRef.includes("origin") && includesAny(normalizedQuery, ["why", "origin", "motivation", "decide", "built", "build"])) boost += 0.08;
+      if (sourceRef.includes("goal-architecture") && includesAny(normalizedQuery, ["architecture", "how", "technical", "system", "retrieval", "token", "context"])) boost += 0.08;
+    }
+    if (sourceRef.includes("personal-growth-achievement") && includesAny(normalizedQuery, [
+      "proudest achievement", "most proud", "achievement", "accomplishment",
+      "lowest period", "difficult period", "struggling international student",
+      "turning ideas into real working systems", "working systems",
+    ])) boost += 0.28;
+    if (sourceRef.includes("technical-strengths-weaknesses") && includesAny(normalizedQuery, [
+      "technical strength", "technical strengths", "technical weakness", "technical weaknesses",
+      "leetcode", "algorithm", "algorithms", "advanced mathematics", "competitive programming",
+      "api integration", "architecture", "practical systems",
+    ])) boost += 0.26;
+    if (sourceRef.includes("procrastination-project-blockers") && includesAny(normalizedQuery, [
+      "procrastinate", "procrastination", "avoid starting", "deadline", "project problems",
+      "project blockers", "git conflicts", "unclear requirements", "large codebase",
+      "integration confusion",
+    ])) boost += 0.26;
+    if (sourceRef.includes("ai-assisted-development-workflow") && includesAny(normalizedQuery, [
+      "ai assisted development", "ai-assisted development", "preferred ai workflow",
+      "disliked ai response", "uncertainty", "pretending to understand", "fake confidence",
+      "ai response style", "do you dislike", "useless filler", "inspect files",
+      "diff-based", "tdd", "checklists", "human verifies",
+    ])) boost += 0.28;
+    if (sourceRef.includes("english-confidence-turning-point") && includesAny(normalizedQuery, [
+      "english confidence", "confidence speaking english", "first english confidence",
+      "feel confident speaking english", "speaking english", "high school", "host family", "weak english", "mentally translating",
+      "participate in conversations",
+    ])) boost += 0.24;
+    if (sourceRef.includes("blood-donation-first-software-project") && includesAny(normalizedQuery, [
+      "blood donation", "first real software", "first software project", "asp.net",
+      "c#", "database-backed", "backend logic", "form submission", "login session",
+    ])) boost += 0.34;
+    if (sourceRef.includes("ai-meeting-monitor") && includesAny(normalizedQuery, [
+      "ai meeting monitor", "meeting monitor", "meeting summary", "action item",
+      "transcript navigation", "react", "typescript", "vite", "integration",
+      "stabilized", "stabilised", "a grade", "api coordination",
+    ])) boost += 0.34;
+    if (sourceRef.includes("solitude-communication-preferences") && includesAny(normalizedQuery, [
+      "prefer being alone", "prefer solitude", "solitude", "communication style",
+      "communication styles", "preaching", "moral pressure", "forced socialization",
+      "fake authority", "low-pressure",
+    ])) boost += 0.28;
+    if (sourceRef.includes("nostalgic-childhood-neighborhood") && includesAny(normalizedQuery, [
+      "nostalgic", "childhood neighborhood", "childhood neighbourhood", "before smartphones",
+      "role-playing", "outdoor play", "childhood period", "warmest period",
+      "remember most warmly",
+    ])) boost += 0.24;
+    if (sourceRef.includes("ideal-day-low-pressure") && includesAny(normalizedQuery, [
+      "ideal day", "perfect day", "no deadlines", "no work pressure",
+      "forced social interaction", "wake up naturally", "low pressure",
+    ])) boost += 0.24;
+    if (sourceRef.includes("no-food-allergies") && includesAny(normalizedQuery, [
+      "food allergy", "food allergies", "allergy", "allergies", "allergic to",
+      "dietary restriction", "dietary restrictions", "ingredient check", "restaurant allergy",
+    ])) boost += 0.32;
+    if (sourceRef.includes("deposit-contract-pressure-risk") && includesAny(normalizedQuery, [
+      "deposit", "non-refundable", "non refundable", "lease", "lease addendum",
+      "contract", "payment terms", "pay now", "pay quickly", "send the deposit",
+      "landlord", "opportunity will disappear", "lose the apartment", "signing",
+    ])) boost += 0.32;
+    if (sourceRef.includes("family-communication-money-profile") && includesAny(normalizedQuery, [
+      "mother", "mom", "late reply", "replied late", "read and not reply",
+      "family property", "family money", "property rent", "market rent", "rent",
+      "sister", "father", "admire", "family role", "observer", "quiet in family",
+      "video call", "play games every day",
+    ])) boost += 0.3;
+    if (sourceRef.includes("formal-speaking-style") && includesAny(normalizedQuery, [
+      "formal speaking", "formal event", "ceremony", "wedding", "toast",
+      "graduation", "presentation", "self introduction", "introduce yourself",
+      "too official", "corporate", "hr style", "natural speech",
+    ])) boost += 0.28;
+    if (sourceRef.includes("classroom-question-style") && includesAny(normalizedQuery, [
+      "classroom question", "ask in class", "questions do you ask", "any questions",
+      "professor asks", "edge case", "architecture question", "clarification",
+      "practical implementation", "show off", "would it be", "so basically",
+      "what kind of question should i ask", "question should i ask after",
+      "after a lecture", "lecture about",
+    ])) boost += 0.3;
+    if (sourceRef.includes("career-target-workplace-preferences") && includesAny(normalizedQuery, [
+      "target role", "career", "job do you want", "kind of job", "what kind of job",
+      "full-stack", "full stack", "workplace", "remote-friendly", "remote friendly",
+      "company style", "team style", "backend", "database", "cloud deployment",
+      "devops", "security", "machine learning", "ml", "technical areas",
+      "more and less experienced", "more experienced", "less experienced",
+      "which technical areas", "skill confidence", "experienced in",
+    ])) boost += 0.28;
+    if (sourceRef.includes("motivation-energy-work-rhythm") && includesAny(normalizedQuery, [
+      "motivation pattern", "work rhythm", "interest-triggered", "interest triggered",
+      "stable grinder", "long-term grinder", "cool", "futuristic", "technically interesting",
+      "mental exhaustion", "project mode", "hyperfocus", "all-nighter", "all nighter",
+      "manager check-ins", "manager check ins", "monitored while working",
+      "forced online responsiveness", "constant check-ins", "why some technical topics excite",
+    ])) boost += 0.34;
+    if (sourceRef.includes("social-confidence-conversation-prep") && includesAny(normalizedQuery, [
+      "social confidence", "conversation preparation", "simulate conversations",
+      "mentally simulate", "envy socially", "envy in conversation", "envy in english speaking",
+      "speak naturally", "fluent english", "react quickly",
+      "appear intelligent", "knowledgeable", "observer of the world",
+      "transactional social relationships", "forced socializing",
+    ])) boost += 0.34;
+    if (sourceRef.includes("recognition-self-image-capability") && includesAny(normalizedQuery, [
+      "self-esteem", "self image", "self-image", "recognition", "want people to think",
+      "about your ability", "ability", "feel insecure", "feel dumb", "too dumb",
+      "technical genius", "star engineer",
+      "technical leader", "reliable contributor", "practical developer",
+      "make systems work", "capable", "capability", "inferiority",
+      "mathematically strong", "algorithmically strong", "fast-thinking", "building projects",
+    ])) boost += 0.36;
+    if (sourceRef.includes("future-work-lifestyle-boundary") && includesAny(normalizedQuery, [
+      "future preference", "future do you fear", "high-pressure work culture",
+      "competitive grind culture", "no freedom", "constant socializing",
+      "private space", "stable income", "low-pressure life", "life direction",
+      "others deciding", "work-life balance", "work culture do you fear",
+      "what kind of future", "lifestyle and work environment", "work environment",
+      "long term", "996", "hustle culture",
+    ])) boost += 0.32;
+    if (sourceRef.includes("english-social-awkwardness-anchor") && includesAny(normalizedQuery, [
+      "english social embarrassment", "english social failure", "dramatic english",
+      "constant awkwardness", "early canada", "high school adaptation",
+      "english adaptation", "insecurity from high school", "ever fully disappear",
+      "weak english", "socially during early canada", "english insecurity",
+      "participate socially",
+    ])) boost += 0.34;
+    if (sourceRef.includes("driving-learning-confidence-anchor") && includesAny(normalizedQuery, [
+      "driving learning", "learn driving", "learned driving", "learn to drive",
+      "first learn driving", "first learned driving", "when did you first learn",
+      "how did it feel", "driving feel", "summer 2024", "学车", "第一次学车", "开车",
+      "china driving", "first attempt", "passed all tests", "talented at driving",
+      "naturally understand driving", "quick adaptation", "unexpectedly talented",
+      "surprisingly naturally talented", "naturally talented",
+    ])) boost += 0.34;
+    if (sourceRef.includes("xiang-update:2026-05:driving-car") && includesAny(normalizedQuery, [
+      "driving learning", "learn driving", "learned driving", "learn to drive",
+      "first learn driving", "first learned driving", "when did you first learn",
+      "how did it feel", "driving feel", "summer 2024", "学车", "第一次学车",
+    ])) boost -= 0.12;
+    if (sourceRef.includes("canadian-identity-distance-anchor") && includesAny(normalizedQuery, [
+      "canadian identity", "local canadian", "culturally integrated",
+      "fully integrated", "native culture", "local social culture",
+      "sense of distance", "adapted to isolation", "extreme loneliness",
+      "feel like a canadian", "feel canadian",
+    ])) boost += 0.34;
+    if (sourceRef.includes("halifax-home-feeling-anchor") && includesAny(normalizedQuery, [
+      "halifax home", "feel like home", "home feeling", "this is home",
+      "halifax feel like home", "frequent moving", "deeply rooted", "emotionally home",
+      "old neighborhood", "cozy spaces",
+    ])) boost += 0.34;
+    if (sourceRef.includes("ai-realization-not-toy-anchor") && includesAny(normalizedQuery, [
+      "ai not a toy", "not a toy", "not just a toy", "ai was not just a toy",
+      "when did you first feel ai", "gpt-3", "gpt3", "ai realization",
+      "first time", "genuinely converse", "dynamic", "non-scripted",
+      "fixed programmed responses", "hardcoded replies", "future value",
+      "memorizing knowledge", "observation ability", "hidden problems",
+      "logical thinking", "empathy", "right questions", "ai-native",
+      "ai assisted thinking", "conversational ai",
+    ])) boost += 0.36;
+    if (sourceRef.includes("mr-jiang-mentor-anchor") && includesAny(normalizedQuery, [
+      "mr. jiang", "mr jiang", "jiang xiansheng", "蒋先生", "mentor",
+      "important person", "turning point", "study abroad", "recommendation",
+      "support materials", "life advice", "dalhousie professor", "knew your mother",
+      "helped you study abroad",
+    ])) boost += 0.36;
+    if (sourceRef.includes("hidden-insecurities-anchor") && includesAny(normalizedQuery, [
+      "hidden insecurities", "afraid people discover", "worry others may discover",
+      "afraid people will discover",
+      "fear others notice", "not smart enough", "english not", "lazy",
+      "not social", "not independent", "low self-confidence",
+    ])) boost += 0.36;
+    if (sourceRef.includes("emotional-comfort-music-anchor") && includesAny(normalizedQuery, [
+      "emotional comfort", "comfort sources", "what would you miss",
+      "freedom", "internet access", "private space", "ai tools",
+      "phone", "computer", "quiet digital", "instrumental music",
+      "orchestral music", "soundtrack", "genshin bgm", "genshin music",
+      "emotional regulation", "private mental space",
+    ])) boost += 0.34;
+    if (sourceRef.includes("first-presentation-panic-history-class") && includesAny(normalizedQuery, [
+      "first presentation panic", "presentation panic", "first presentation",
+      "history class", "phone translator", "read from translator", "language barrier",
+      "public speaking", "nervous presentation", "embarrassing presentation",
+    ])) boost += 0.36;
+    if (sourceRef.includes("snow-walk-home-boundary") && includesAny(normalizedQuery, [
+      "first snow walk home", "first time in snow", "walked home in snow",
+      "walking home alone in snow", "home alone in snow", "snow day",
+      "canada snow", "snow memory", "winter memory",
+    ])) boost += 0.34;
+    if (sourceRef.includes("travel-not-alone-preference") && includesAny(normalizedQuery, [
+      "solo travel", "travel alone", "traveling alone", "travelling alone",
+      "travel preference", "tourism preference", "travel style", "travel in canada",
+      "why don't you travel", "why do you not travel", "not traveled much",
+      "not travelled much", "traveled much in canada", "travelled much in canada",
+      "has a car but", "after getting a car",
+    ])) boost += 0.34;
+    if (sourceRef.includes("relationship-autonomy-no-pressure") && includesAny(normalizedQuery, [
+      "relationship preference", "relationship style", "ideal type", "girlfriend", "dating",
+      "black straight hair", "quiet and cute", "separate finances",
+      "financially separate", "no kids", "children", "autonomy", "single is okay",
+      "not forcing relationship", "relationship pressure",
+    ])) boost += 0.36;
+    if (sourceRef.includes("developer-identity-frontend-to-ux") && includesAny(normalizedQuery, [
+      "developer identity", "frontend developer", "ui finally looks good",
+      "user experience", "actual user experience", "frontend less",
+      "ai changes frontend", "product feel", "ux matters",
+    ])) boost += 0.34;
+    if (sourceRef.includes("china-political-values-return-boundary") && includesAny(normalizedQuery, [
+      "china political system", "chinese political system", "authoritarianism",
+      "dictatorship", "censorship", "propaganda", "freedom of speech",
+      "tiananmen", "great famine", "mao zedong", "xi jinping",
+      "return to china", "go back to china", "why not return to china",
+      "why don't you want to return", "political values",
+    ])) boost += 0.38;
+    if (sourceRef.includes("true-happiness-no-pressure") && includesAny(normalizedQuery, [
+      "true happiness", "real happiness", "really happy", "genuinely happy", "happy every day",
+      "not pressure myself", "no pressure", "external pressure", "daily happiness",
+      "what makes you happy",
+    ])) boost += 0.34;
   }
 
   if (sourceRef === "knowledge:behavioral-interview:code-review-feedback" && includesAny(normalizedQuery, ["code review", "harsh feedback", "harsh code review", "senior engineer", "criticism", "pull request feedback", "code review feedback"])) boost += 0.38;
@@ -2659,6 +3562,19 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
   if (sourceRef === "knowledge:behavioral-interview:why-company-role" && includesAny(normalizedQuery, ["why this company", "why this role", "why do you want to work", "role interest", "why are you interested"])) boost += 0.22;
   if (sourceRef === "knowledge:behavioral-interview:manager-influence" && includesAny(normalizedQuery, ["disagreement with your manager", "conflict with your manager", "influence somebody", "without getting approval", "manager disagreement", "push for", "pushed for"])) boost += 0.34;
   if (sourceRef === "knowledge:behavioral-interview:unresponsive-info" && includesAny(normalizedQuery, ["unresponsive", "wasn't responsive", "needed information", "blocked by someone", "waiting for information", "not responsive"])) boost += 0.34;
+
+  if (sourceRef.startsWith("knowledge:xiang-playbook:")) {
+    if (sourceRef.includes("team-conflict") && includesAny(normalizedQuery, ["conflict", "teammate", "disagreement", "different ideas", "technical disagreement", "group project"])) boost += 0.42;
+    if (sourceRef.includes("feedback") && includesAny(normalizedQuery, ["feedback", "code review", "criticism", "harsh feedback", "senior engineer", "review comment"])) boost += 0.42;
+    if (sourceRef.includes("deadline-scope") && includesAny(normalizedQuery, ["deadline", "scope", "cut scope", "too many features", "ship", "must have", "nice to have"])) boost += 0.42;
+    if (sourceRef.includes("hard-bug") && includesAny(normalizedQuery, ["hard bug", "debug", "debugging", "reproduce", "root cause", "broken", "flaky"])) boost += 0.42;
+    if (sourceRef.includes("demo-pressure") && includesAny(normalizedQuery, ["demo", "presentation", "tomorrow", "smoke test", "fallback", "last minute"])) boost += 0.42;
+    if (sourceRef.includes("unclear-requirements") && includesAny(normalizedQuery, ["unclear", "vague", "requirements", "api contract", "contract keeps changing", "schema", "assumption"])) boost += 0.42;
+    if (sourceRef.includes("unknown-question") && includesAny(normalizedQuery, ["not sure", "don't know", "unknown", "uncertain", "how should i answer if i don't know", "what if i don't know"])) boost += 0.38;
+    if (sourceRef.includes("interview-no-fake-story") && includesAny(normalizedQuery, ["real example", "tell me about a time", "describe a time", "give me an example", "never had", "no dramatic"])) boost += 0.38;
+    if (sourceRef.includes("high-stakes-transaction") && includesAny(normalizedQuery, ["deposit", "lease", "contract", "non-refundable", "pay now", "sign now", "receipt", "pressure"])) boost += 0.38;
+    if (includesAny(normalizedQuery, ["what should i say", "how should i answer", "how should i handle", "what should we do", "what is the best next step"])) boost += 0.12;
+  }
 
   if (sourceRef.includes("xiang-update:2026-05:english-learning") && includesAny(normalizedQuery, [
     "area you are still trying to improve", "still trying to improve", "weak point",
@@ -2723,6 +3639,20 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     boost += 0.12;
   }
 
+  if (sourceRef === "redacted-project:ai-context-engine-hybrid-search" && sayNextPublicProjectIntent) {
+    boost += 0.36;
+  }
+
+  if (category === "technical_projects"
+    && sayNextPublicProjectIntent
+    && !sourceRef.includes("hybrid-search-memory-assistant")
+    && sourceRef !== "redacted-project:ai-context-engine-hybrid-search"
+    && !sourceRef.startsWith("doc:saynext")
+    && !sourceRef.includes("project-saynext")
+    && !sourceRef.startsWith("xiang-behavioral:")) {
+    boost -= 0.1;
+  }
+
   if (sourceRef.startsWith("doc:saynext") && includesAny(normalizedQuery, [
     "saynext", "this app", "conversation assistant", "mobile app", "mobile assistant",
     "conversation support", "real time", "realtime", "real-time",
@@ -2763,6 +3693,13 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     boost += 0.18;
   }
 
+  if ((sourceRef.includes("xiang-profile:project-elder-album") || sourceRef.startsWith("doc:elderalbum"))
+    && includesAny(normalizedQuery, ["your aws project", "my aws project", "tell me about your aws project", "aws project"])
+    && !includesAny(normalizedQuery, ["joblens", "job lens", "resume", "job matching", "job aggregation", "application tracking"])) {
+    boost += 0.36;
+    if (sourceRef.includes("aws-architecture-deployment")) boost += 0.12;
+  }
+
   if (sourceRef.startsWith("doc:joblens") && includesAny(normalizedQuery, [
     "aws cloud project", "cloud project", "aws project", "cloud architecture",
     "aws architecture", "serverless", "lambda", "api gateway", "dynamodb",
@@ -2771,6 +3708,10 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     boost += 0.08;
     if (sourceRef.includes("architecture")) boost += 0.08;
     if (sourceRef.includes("data-storage-security") && includesAny(normalizedQuery, ["dynamodb", "s3", "security", "jwt"])) boost += 0.04;
+    if (includesAny(normalizedQuery, ["your aws project", "my aws project", "tell me about your aws project"])
+      && !includesAny(normalizedQuery, ["joblens", "job lens", "resume", "job matching", "job aggregation", "application tracking"])) {
+      boost -= 0.12;
+    }
   }
 
   if (category === "technical_projects" && title.includes("dalparkaid") && includesAny(normalizedQuery, ["dalparkaid", "dal park", "parking", "prediction", "crowd", "crowdsourced", "campus", "react native project parking", "parking mobile app", "react native experience"])) {
@@ -2788,7 +3729,9 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
   if (sourceRef.startsWith("doc:joblens") && includesAny(normalizedQuery, ["joblens", "job lens"])) {
     boost += 0.045;
     if (sourceRef.includes("overview") && hasAnyToken(tokens, ["what", "overview", "about", "summary"])) boost += 0.025;
+    if (sourceRef.includes("overview-scope") && includesAny(normalizedQuery, ["what was joblens", "what is joblens", "what was job lens", "what is job lens"])) boost += 0.05;
     if (sourceRef.includes("workflow") && includesAny(normalizedQuery, ["workflow", "feature", "features", "dashboard", "tracker", "save jobs", "application"])) boost += 0.035;
+    if (sourceRef.includes("workflow") && includesAny(normalizedQuery, ["what was joblens", "what is joblens", "what was job lens", "what is job lens"])) boost += 0.045;
     if (sourceRef.includes("architecture") && includesAny(normalizedQuery, ["architecture", "cloud", "aws", "lambda", "eventbridge", "sqs", "fargate", "api gateway"])) boost += 0.035;
     if (sourceRef.includes("data-storage-security") && includesAny(normalizedQuery, ["dynamodb", "table", "tables", "storage", "s3", "security", "jwt", "cors", "privacy"])) boost += 0.04;
     if (sourceRef.includes("reliability-cost-limitations") && includesAny(normalizedQuery, ["reliability", "cost", "limitation", "limitations", "future", "improvement", "improvements"])) boost += 0.04;
@@ -2832,6 +3775,90 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     "mobile computing course", "take in winter", "took in winter", "fall 2025", "winter 2026",
   ])) {
     boost += 0.16;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:childhood-personality-change") && includesAny(normalizedQuery, [
+    "childhood", "as a kid", "when you were a kid", "when you were young", "personality",
+    "quiet", "mischievous", "小时候", "幼儿园", "调皮", "沉默寡言",
+  ])) {
+    boost += 0.18;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:study-avoidance-turnaround") && includesAny(normalizedQuery, [
+    "study", "studying", "student", "high school", "middle school", "novel", "novels",
+    "english was weak", "gpa", "macs", "学习", "小说", "英文差", "加拿大高中", "本科",
+  ])) {
+    boost += 0.15;
+    if (includesAny(normalizedQuery, ["friend", "friends", "who influenced", "influenced you", "roommate", "roommates"])) boost -= 0.12;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:languages-german-japanese") && includesAny(normalizedQuery, [
+    "language", "languages", "english", "german", "japanese", "learn another language",
+    "语言", "英语", "德语", "日语",
+  ])) {
+    boost += 0.2;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:soccer-history") && includesAny(normalizedQuery, [
+    "soccer", "football", "sport", "sports", "swimming", "club", "足球", "游泳", "运动",
+  ])) {
+    boost += 0.16;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:food-restaurants-cooking") && includesAny(normalizedQuery, [
+    "food", "restaurant", "restaurants", "kfc", "mary brown", "fried chicken", "cook", "cooking",
+    "curry", "malatang", "superstore", "食物", "餐厅", "肯德基", "炸鸡", "咖喱", "麻辣烫",
+  ])) {
+    boost += 0.18;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:drinks-diet-coke") && includesAny(normalizedQuery, [
+    "drink", "drinks", "water", "diet coke", "coke", "soda", "sugar", "饮料", "喝水", "代可", "可乐",
+  ])) {
+    boost += 0.17;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:canada-high-school-friends") && includesAny(normalizedQuery, [
+    "high school friend", "high school friends", "friend in canada", "friends in canada",
+    "halifax", "dartmouth", "mall", "bus", "高中朋友", "哈利法克斯", "达特茅斯",
+  ])) {
+    boost += 0.26;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:childhood-friend-xu-ziyang") && includesAny(normalizedQuery, [
+    "childhood friend", "best friend", "kindergarten friend", "friend in china",
+    "童年朋友", "最好的朋友", "徐子洋", "幼儿园",
+  ])) {
+    boost += 0.18;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:host-family-grace-michael") && includesAny(normalizedQuery, [
+    "host family", "homestay", "host parent", "early canada life", "living situation",
+    "住家", "寄宿家庭", "加拿大住家",
+  ])) {
+    boost += 0.2;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:undergrad-covid-life") && includesAny(normalizedQuery, [
+    "undergraduate", "undergrad", "covid", "dorm", "online class", "online classes",
+    "university life", "本科", "疫情", "宿舍", "网课",
+  ])) {
+    boost += 0.16;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:undergrad-roommates") && includesAny(normalizedQuery, [
+    "roommate", "roommates", "peer influence", "influenced you", "chinese student",
+    "池后语", "韦基泽", "室友", "中国室友",
+  ])) {
+    boost += 0.24;
+  }
+
+  if (sourceRef.includes("xiang-update:2026-05-18:undergrad-ebike-hill") && includesAny(normalizedQuery, [
+    "electric bike", "e-bike", "ebike", "transportation", "commute", "winter biking", "hill",
+    "get around", "got around", "around during undergrad",
+    "电动自行车", "交通工具", "陡坡", "冬天",
+  ])) {
+    boost += 0.22;
   }
 
   return boost;
@@ -3029,6 +4056,25 @@ function mapPrenoteFileRecord(row: any): PrenoteFileRecord {
   };
 }
 
+function mapPrenoteChunkRecord(row: any): PrenoteChunkRecord {
+  return {
+    id: Number(row.id),
+    prenoteId: Number(row.prenote_id),
+    userId: row.user_id,
+    chunkIndex: Number(row.chunk_index || 0),
+    headingPath: row.heading_path || "",
+    text: row.text || "",
+    charStart: Number(row.char_start || 0),
+    charEnd: Number(row.char_end || 0),
+    tokenEstimate: Number(row.token_estimate || 0),
+    keywords: parseJsonArray(row.keywords_json).map(String),
+    embedding: parseJsonArray(row.embedding_json).map(Number).filter((value) => Number.isFinite(value)),
+    embeddingModel: row.embedding_model || "",
+    contentHash: row.content_hash || "",
+    createdAt: row.created_at,
+  };
+}
+
 function mapSceneProfileRecord(row: any): SceneProfileRecord {
   return {
     id: row.id,
@@ -3046,6 +4092,7 @@ function mapSceneProfileRecord(row: any): SceneProfileRecord {
 class ConversationLogger {
   private db: Database | null = null;
   private initialized = false;
+  private syncedDefaultSceneProfileUsers = new Set<string>();
 
   isEnabled(): boolean {
     return process.env.DATA_LOGGING_ENABLED !== "false";
@@ -3060,6 +4107,7 @@ class ConversationLogger {
       const dbPath = process.env.SAYNEXT_DB_PATH || DEFAULT_DB_PATH;
       mkdirSync(dirname(dbPath), { recursive: true });
       this.db = new Database(dbPath);
+      this.db.run("PRAGMA busy_timeout = 5000");
       this.db.run("PRAGMA journal_mode = WAL");
       this.db.run("PRAGMA foreign_keys = ON");
     }
@@ -3295,6 +4343,39 @@ class ConversationLogger {
     `);
 
     db.run("CREATE INDEX IF NOT EXISTS idx_prenote_files_prenote ON prenote_files(prenote_id)");
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS prenote_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prenote_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        heading_path TEXT NOT NULL DEFAULT '',
+        text TEXT NOT NULL,
+        char_start INTEGER NOT NULL DEFAULT 0,
+        char_end INTEGER NOT NULL DEFAULT 0,
+        token_estimate INTEGER NOT NULL DEFAULT 0,
+        keywords_json TEXT NOT NULL DEFAULT '[]',
+        embedding_json TEXT NOT NULL DEFAULT '[]',
+        embedding_model TEXT NOT NULL DEFAULT '',
+        content_hash TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(prenote_id) REFERENCES prenotes(id) ON DELETE CASCADE,
+        UNIQUE(prenote_id, chunk_index)
+      )
+    `);
+
+    db.run("CREATE INDEX IF NOT EXISTS idx_prenote_chunks_prenote ON prenote_chunks(prenote_id, chunk_index)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_prenote_chunks_user ON prenote_chunks(user_id, prenote_id)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_prenote_chunks_hash ON prenote_chunks(prenote_id, content_hash)");
+
+    db.run(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS prenote_chunks_fts USING fts5(
+        heading_path,
+        keywords,
+        text
+      )
+    `);
 
     db.run(`
       CREATE TABLE IF NOT EXISTS scene_profiles (
@@ -3967,15 +5048,21 @@ class ConversationLogger {
     const rawQuery = query.trim();
     if (!rawQuery) return [];
     const cleanedQuery = expandAsrSearchQuery(rawQuery);
-    if (shouldSkipPersonalMemorySearch(rawQuery) || shouldSkipPersonalMemorySearch(cleanedQuery)) return [];
-    const generalTechnicalConceptQuestion = isGeneralTechnicalConceptQuestion(cleanedQuery)
-      || isLikelyGeneralTechnicalLecture(cleanedQuery);
-    const explicitGeneralTechnicalQuestion = isExplicitGeneralTechnicalQuestion(cleanedQuery);
-    const likelyThirdPartyTranscript = isLikelyThirdPartyTranscript(cleanedQuery);
-    const likelyPassivePublicTranscript = isLikelyPublicMonologue(cleanedQuery) || isLikelyCompleteDialogueExcerpt(cleanedQuery);
-    const likelyExternalLearningContext = isLikelyExternalLearningTranscript(cleanedQuery);
     const behavioralStoryQuestion = isBehavioralStoryQuestion(cleanedQuery);
-    if (likelyPassivePublicTranscript && !generalTechnicalConceptQuestion) return [];
+    const responsePlaybookQuestion = isResponsePlaybookQuestion(cleanedQuery);
+    if (!behavioralStoryQuestion && !responsePlaybookQuestion && (shouldSkipPersonalMemorySearch(rawQuery) || shouldSkipPersonalMemorySearch(cleanedQuery))) return [];
+    const generalTechnicalConceptQuestion = isGeneralTechnicalConceptQuestion(cleanedQuery)
+      || isLikelyGeneralTechnicalLecture(cleanedQuery)
+      || isGeneralTechnicalConceptQuestion(rawQuery)
+      || isLikelyGeneralTechnicalLecture(rawQuery);
+    const explicitGeneralTechnicalQuestion = isExplicitGeneralTechnicalQuestion(cleanedQuery);
+    const likelyThirdPartyTranscript = isLikelyThirdPartyTranscript(cleanedQuery) || isLikelyThirdPartyTranscript(rawQuery);
+    const likelyPassivePublicTranscript = isLikelyPublicMonologue(cleanedQuery)
+      || isLikelyCompleteDialogueExcerpt(cleanedQuery)
+      || isLikelyPublicMonologue(rawQuery)
+      || isLikelyCompleteDialogueExcerpt(rawQuery);
+    const likelyExternalLearningContext = isLikelyExternalLearningTranscript(cleanedQuery) || isLikelyExternalLearningTranscript(rawQuery);
+    if (likelyPassivePublicTranscript && !likelyExternalLearningContext) return [];
 
     const db = this.getDb();
     const memories = this.listPersonalMemories(userId, { status: "active", limit: 1000 });
@@ -4023,20 +5110,27 @@ class ConversationLogger {
         const normalizedQuery = cleanedQuery.toLowerCase();
         const queryWordCount = normalizedQuery.split(/\s+/).filter(Boolean).length;
         const sourceRef = memory.sourceRef.toLowerCase();
+        const isResponsePlaybook = sourceRef.startsWith("knowledge:xiang-playbook:");
         const projectQuestion = hasAnyToken(queryTokens, ["project", "projects", "built", "build", "made", "experience", "architecture", "app"]);
         const explicitProjectQuestion = hasAnyToken(queryTokens, ["project", "projects", "built", "build", "made"])
           || includesAny(normalizedQuery, ["my app", "your app", "my application", "your application"]);
+        const genericDefinitionQuestion = !/\b(xiang|you|your|yours|yourself|my|me|i)\b/.test(normalizedQuery)
+          && /^(what is|what was|what are|what does|explain|define|give me a general definition|who developed|who created|who invented|who released|when was|where was)\b/.test(normalizedQuery);
         const projectSpecificQuestion = !explicitGeneralTechnicalQuestion && (includesAny(normalizedQuery, [
           "saynext", "say next", "elderalbum", "elder album", "joblens", "job lens",
           "dalparkaid", "dal park", "my project", "your project", "my app", "your app",
           "which project should", "what project should", "project should i talk", "project should xiang talk",
           "project should i use", "album sharing app", "parking app", "parking mobile app",
+          "what project you did", "project you did", "project did you do",
+          "project you made", "project you built", "project for next",
           "parking project", "react native project parking", "react native experience",
           "my aws project", "my aws cloud project", "aws cloud project", "cloud project",
           "project album", "job matching app", "connecting aws services",
           "what project did i use", "what project did you use",
           "conversation assistant", "conversation support", "real time conversation",
           "realtime conversation", "real-time conversation", "live transcript", "live transcripts",
+          "hybrid search memory assistant", "hybrid search", "real-time ai assistant",
+          "realtime ai assistant", "blood donation management system", "ai meeting monitor",
         ]) || (
           explicitProjectQuestion && includesAny(normalizedQuery, [
             "aws", "cloud", "serverless", "lambda", "dynamodb", "s3", "api gateway",
@@ -4047,7 +5141,7 @@ class ConversationLogger {
         const shortPersonalCoursePreferenceQuestion = queryWordCount <= 14 && includesAny(normalizedQuery, [
           "cloud architecture why", "deep learning like why", "why you like deep learning",
         ]);
-        const personalExperienceQuestion = includesAny(normalizedQuery, [
+        const personalExperienceQuestion = !explicitGeneralTechnicalQuestion && !genericDefinitionQuestion && includesAny(normalizedQuery, [
           "your programming interest", "my programming interest", "games related to",
           "why do you dislike", "do you dislike bullying", "what happened to your",
           "what happened to my", "why do you care", "why is freedom important",
@@ -4055,6 +5149,71 @@ class ConversationLogger {
           "what motivates you", "what did your family", "your family", "my family",
           "why do you like", "as a course", "what time is your", "personal data",
           "privacy-sensitive", "not be overshared",
+          "host family", "homestay", "roommate", "roommates", "friend", "friends",
+          "restaurant", "restaurants", "what do you cook", "what do you drink",
+          "what language", "which language", "languages have you learned",
+          "good student", "who influenced you", "get around during undergrad",
+          "how did you get around",
+          "proudest achievement", "most proud", "lowest period", "difficult period",
+          "technical strength", "technical strengths", "technical weakness", "technical weaknesses",
+          "leetcode", "procrastinate", "procrastination", "project problems",
+          "project blockers", "ai assisted development", "ai-assisted development",
+          "preferred ai workflow", "disliked ai response", "communication style",
+          "communication styles", "prefer being alone", "prefer solitude", "ideal day",
+          "first real software project", "first software project", "first english confidence",
+          "confidence speaking english", "feel confident speaking english", "speaking english",
+          "ai response style", "do you dislike", "translation software",
+          "childhood period", "remember most warmly", "warmest period",
+          "food allergy", "food allergies", "dietary restriction", "allergic to",
+          "deposit now", "send the deposit", "pay the deposit", "non-refundable deposit",
+          "lease addendum", "payment terms", "landlord says", "formal speaking",
+          "formal event", "ceremony", "wedding toast", "graduation intro",
+          "self introduction", "classroom question", "ask in class",
+          "questions do you ask in class", "target role", "full-stack developer",
+          "professor asks if there are any questions", "any questions after explaining",
+          "what kind of question should i ask", "question should i ask after",
+          "after a lecture", "lecture about",
+          "family property", "family money", "property rent", "mother communication",
+          "full stack developer", "remote-friendly", "workplace preference",
+          "team style fits you", "technical areas are you more and less experienced",
+          "more and less experienced", "more experienced", "less experienced",
+          "skill confidence", "experienced in",
+          "motivation pattern", "work rhythm", "interest-triggered", "interest triggered",
+          "stable grinder", "project mode", "hyperfocus", "all-nighter", "all nighter",
+          "manager check-ins", "manager check ins", "monitored while working",
+          "forced online responsiveness", "social confidence", "simulate conversations",
+          "conversation preparation", "envy socially", "envy in conversation",
+          "envy in english speaking", "self-esteem", "self image", "self-image",
+          "feel insecure", "insecure after building projects", "feel dumb",
+          "technical genius", "star engineer", "reliable contributor",
+          "practical developer", "want people to think", "about your ability",
+          "observer of the world", "future preference", "work culture do you fear",
+          "what kind of future", "lifestyle and work environment",
+          "high-pressure work culture", "competitive grind culture", "private space",
+          "english social embarrassment", "english social failure", "constant awkwardness",
+          "high school adaptation", "english adaptation", "insecurity from high school",
+          "driving learning", "learned driving", "summer 2024", "naturally talented",
+          "surprisingly naturally talented", "talented at driving", "local canadian", "canadian identity", "culturally integrated",
+          "halifax home", "home feeling", "feel like home", "ai not a toy", "not a toy",
+          "not just a toy", "ai was not just a toy", "when did you first feel ai",
+          "gpt-3", "gpt3", "fixed programmed responses", "hardcoded replies",
+          "observation ability", "hidden problems", "right questions", "mr. jiang",
+          "mr jiang", "jiang xiansheng", "蒋先生", "mentor", "study abroad",
+          "recommendation letter", "hidden insecurities", "afraid people discover",
+          "afraid people will discover", "worry others may discover",
+          "not smart enough", "not social", "not independent", "emotional comfort",
+          "instrumental music", "orchestral music", "genshin bgm", "genshin music",
+          "first presentation panic", "presentation panic", "history class presentation",
+          "phone translator", "read from translator", "first snow walk home",
+          "walking home alone in snow", "home alone in snow", "snow memory",
+          "solo travel", "travel alone", "traveling alone", "tourism preference",
+          "traveled much", "travelled much", "not traveled much", "not travelled much",
+          "ideal type", "relationship preference", "relationship style", "separate finances", "no kids",
+          "developer identity", "frontend developer", "ui finally looks good",
+          "user experience", "frontend less", "your political values",
+          "your view on china", "why don't you want to return to china",
+          "why do you not want to return to china", "why not go back to china",
+          "true happiness", "real happiness", "really happy",
         ]) || shortPersonalCoursePreferenceQuestion;
         const technicalKnowledgeQuestion = includesAny(normalizedQuery, [
           "serverless", "cold start", "lambda", "api gateway", "dynamodb", "s3",
@@ -4081,11 +5240,24 @@ class ConversationLogger {
           return acc;
         }
 
+        if (isResponsePlaybook && !responsePlaybookQuestion && !behavioralStoryQuestion) {
+          return acc;
+        }
+
         if (sourceRef.startsWith("knowledge:behavioral-interview:") && !behavioralStoryQuestion) {
           return acc;
         }
 
+        if (behavioralStoryQuestion
+          && memory.category !== "behavioral_story"
+          && !sourceRef.startsWith("knowledge:behavioral-interview:")
+          && !isResponsePlaybook
+          && sourceRef !== "xiang-profile:work-motivation") {
+          return acc;
+        }
+
         if ((generalTechnicalConceptQuestion || likelyThirdPartyTranscript || likelyPassivePublicTranscript || likelyExternalLearningContext)
+          && !behavioralStoryQuestion
           && !projectSpecificQuestion
           && !personalExperienceQuestion
           && memory.source !== "knowledge"
@@ -4094,20 +5266,26 @@ class ConversationLogger {
         }
 
         if ((generalTechnicalConceptQuestion || likelyExternalLearningContext)
+          && !behavioralStoryQuestion
           && (sourceRef.startsWith("xiang-") || sourceRef.startsWith("doc:"))
           && !projectSpecificQuestion
           && !personalExperienceQuestion) {
           return acc;
         }
 
-        if (memory.source === "knowledge") {
-          if (personalExperienceQuestion && !technicalKnowledgeQuestion) return acc;
-          if (projectSpecificQuestion) return acc;
-          if (sourceRef.startsWith("knowledge:cs-interview:")
-            && includesAny(normalizedQuery, ["which project", "what project", "project are you", "project best shows", "project did you"])) {
-            return acc;
+        if (memory.source === "knowledge" || memory.category.startsWith("knowledge") || sourceRef.startsWith("knowledge:")) {
+          if (isResponsePlaybook) {
+            if (!responsePlaybookQuestion && !behavioralStoryQuestion) return acc;
+          } else {
+            if (behavioralStoryQuestion && !sourceRef.startsWith("knowledge:behavioral-interview:")) return acc;
+            if (personalExperienceQuestion && !technicalKnowledgeQuestion) return acc;
+            if (projectSpecificQuestion) return acc;
+            if (sourceRef.startsWith("knowledge:cs-interview:")
+              && includesAny(normalizedQuery, ["which project", "what project", "project are you", "project best shows", "project did you"])) {
+              return acc;
+            }
+            if (!generalTechnicalConceptQuestion && intentBoost < 0.1) return acc;
           }
-          if (!generalTechnicalConceptQuestion && intentBoost < 0.1) return acc;
         }
 
         if (memory.sensitivity === "high" && !highSensitivityAllowed(cleanedQuery, memory)) {
@@ -4141,6 +5319,13 @@ class ConversationLogger {
         if (sourceRef.startsWith("doc:saynext") && includesAny(normalizedQuery, [
           "parking", "dalparkaid", "dal park", "react native experience",
         ]) && !includesAny(normalizedQuery, ["saynext", "say next"])) {
+          return acc;
+        }
+
+        if (sourceRef.includes("travel-not-alone-preference") && includesAny(normalizedQuery, [
+          "local mode", "travel mode", "split local mode", "split local and travel",
+          "openai api", "ollama", "vps", "frp",
+        ])) {
           return acc;
         }
 
@@ -4448,7 +5633,8 @@ class ConversationLogger {
     return memories
       .map((memory, index) => {
         const usage = memory.usageRule ? `\nUsage rule: ${memory.usageRule}` : "";
-        return `Memory ${index + 1}: ${memory.title} [${memory.category}, ${memory.sensitivity}]\n${memory.content}${usage}`;
+        const sourceRef = memory.sourceRef ? `\nSource ref: ${memory.sourceRef}` : "";
+        return `Memory ${index + 1}: ${memory.title} [${memory.category}, ${memory.sensitivity}]${sourceRef}\n${memory.content}${usage}`;
       })
       .join("\n\n---\n\n");
   }
@@ -4844,17 +6030,299 @@ class ConversationLogger {
     return rows.map(mapPrenoteRecord);
   }
 
+  getPrenoteChunkCount(prenoteId: number): number {
+    if (!this.isEnabled()) return 0;
+    const row = this.getDb()
+      .query("SELECT COUNT(*) AS count FROM prenote_chunks WHERE prenote_id = ?")
+      .get(prenoteId) as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  listPrenoteChunks(prenoteId: number): PrenoteChunkRecord[] {
+    if (!this.isEnabled()) return [];
+    const rows = this.getDb()
+      .query("SELECT * FROM prenote_chunks WHERE prenote_id = ? ORDER BY chunk_index ASC")
+      .all(prenoteId);
+    return rows.map(mapPrenoteChunkRecord);
+  }
+
+  private deletePrenoteChunks(prenoteId: number): void {
+    const db = this.getDb();
+    const rows = db.query("SELECT id FROM prenote_chunks WHERE prenote_id = ?").all(prenoteId) as { id: number }[];
+    for (const row of rows) {
+      db.query("DELETE FROM prenote_chunks_fts WHERE rowid = ?").run(Number(row.id));
+    }
+    db.query("DELETE FROM prenote_chunks WHERE prenote_id = ?").run(prenoteId);
+  }
+
+  private upsertPrenoteChunkFts(chunk: PrenoteChunkRecord): void {
+    const db = this.getDb();
+    db.query("DELETE FROM prenote_chunks_fts WHERE rowid = ?").run(chunk.id);
+    db.query(`
+      INSERT INTO prenote_chunks_fts(rowid, heading_path, keywords, text)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      chunk.id,
+      chunk.headingPath,
+      chunk.keywords.join(" "),
+      chunk.text,
+    );
+  }
+
+  async rebuildPrenoteChunks(prenoteId: number): Promise<PrenoteChunkRecord[]> {
+    if (!this.isEnabled()) return [];
+
+    const prenote = this.getPrenote(prenoteId);
+    if (!prenote) return [];
+
+    const sourceText = prenote.extractedText.trim() || prenote.sourceText.trim();
+    this.deletePrenoteChunks(prenoteId);
+    if (!sourceText) return [];
+
+    const builtChunks = buildPrenoteChunksFromText(sourceText);
+    if (builtChunks.length === 0) return [];
+
+    const embeddingInput = builtChunks.map((chunk) => [
+      `Prenote: ${prenote.title}`,
+      chunk.headingPath ? `Section: ${chunk.headingPath}` : "",
+      `Keywords: ${chunk.keywords.join(", ")}`,
+      chunk.text,
+    ].filter(Boolean).join("\n"));
+    const embeddingResult = await createPrenoteEmbeddings(embeddingInput);
+
+    const db = this.getDb();
+    const inserted: PrenoteChunkRecord[] = [];
+    for (const chunk of builtChunks) {
+      const embedding = embeddingResult.embeddings[chunk.chunkIndex] ?? [];
+      const result = db.query(`
+        INSERT INTO prenote_chunks (
+          prenote_id, user_id, chunk_index, heading_path, text, char_start, char_end,
+          token_estimate, keywords_json, embedding_json, embedding_model, content_hash
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        prenote.id,
+        prenote.userId,
+        chunk.chunkIndex,
+        chunk.headingPath,
+        chunk.text,
+        chunk.charStart,
+        chunk.charEnd,
+        chunk.tokenEstimate,
+        JSON.stringify(chunk.keywords),
+        JSON.stringify(embedding),
+        embeddingResult.model,
+        chunk.contentHash,
+      );
+
+      const row = db.query("SELECT * FROM prenote_chunks WHERE id = ?").get(Number(result.lastInsertRowid));
+      if (row) {
+        const record = mapPrenoteChunkRecord(row);
+        inserted.push(record);
+        this.upsertPrenoteChunkFts(record);
+      }
+    }
+
+    return inserted;
+  }
+
+  private async ensureActivePrenoteChunks(userId: string, desiredEmbeddingModel: string): Promise<void> {
+    const activePrenotes = this.listActivePrenotes(userId);
+    for (const prenote of activePrenotes) {
+      const chunks = this.listPrenoteChunks(prenote.id);
+      const needsInitialIndex = chunks.length === 0 && Boolean(prenote.extractedText.trim() || prenote.sourceText.trim());
+      const needsRealEmbeddingUpgrade = desiredEmbeddingModel !== "local-hybrid"
+        && chunks.some((chunk) => chunk.embeddingModel !== desiredEmbeddingModel || chunk.embedding.length < 1000);
+
+      if (needsInitialIndex || needsRealEmbeddingUpgrade) {
+        await this.rebuildPrenoteChunks(prenote.id);
+      }
+    }
+  }
+
+  async searchActivePrenoteChunksHybrid(userId: string, query: string, limit = PRENOTE_RETRIEVAL_TOP_K, mode: PrenoteRetrievalMode = "semantic"): Promise<PrenoteChunkSearchResult[]> {
+    if (!this.isEnabled()) return [];
+
+    const rawQuery = query.trim();
+    if (!rawQuery) return [];
+    const cleanedQuery = expandAsrSearchQuery(rawQuery);
+    const queryEmbedding = mode === "semantic"
+      ? await createPrenoteQueryEmbedding(cleanedQuery)
+      : { embedding: [] as number[], model: "fast-local" };
+
+    if (mode === "semantic") {
+      await this.ensureActivePrenoteChunks(userId, queryEmbedding.model);
+    }
+
+    const db = this.getDb();
+    const rows = db.query(`
+      SELECT c.*, p.title AS prenote_title
+      FROM prenote_chunks c
+      JOIN prenotes p ON p.id = c.prenote_id
+      WHERE c.user_id = ?
+        AND p.user_id = ?
+        AND p.is_active = 1
+        AND p.status = 'ready'
+      ORDER BY p.updated_at DESC, c.chunk_index ASC
+    `).all(userId, userId) as any[];
+    if (rows.length === 0) return [];
+
+    const chunks = rows.map((row) => ({
+      ...mapPrenoteChunkRecord(row),
+      prenoteTitle: row.prenote_title || "Prenote",
+    }));
+    const queryTokens = new Set(tokenizeSearchText(cleanedQuery));
+    const ftsQuery = buildFtsQuery(cleanedQuery);
+    const lexicalRanks = new Map<number, number>();
+
+    if (ftsQuery) {
+      try {
+        const ftsRows = db.query(`
+          SELECT rowid, bm25(prenote_chunks_fts) AS bm25_score
+          FROM prenote_chunks_fts
+          WHERE prenote_chunks_fts MATCH ?
+          ORDER BY bm25_score ASC
+          LIMIT 80
+        `).all(ftsQuery);
+        ftsRows.forEach((row: any, index) => lexicalRanks.set(Number(row.rowid), index + 1));
+      } catch {
+        // Keep vector/keyword scoring when FTS syntax dislikes noisy ASR text.
+      }
+    }
+
+    const vectorScores = chunks
+      .map((chunk) => ({
+        id: chunk.id,
+        score: mode === "semantic" && chunk.embedding.length === queryEmbedding.embedding.length
+          ? cosineSimilarity(queryEmbedding.embedding, chunk.embedding)
+          : 0,
+      }))
+      .sort((a, b) => b.score - a.score);
+    const vectorRanks = new Map<number, number>();
+    vectorScores.slice(0, 80).forEach((item, index) => vectorRanks.set(item.id, index + 1));
+    const vectorScoreById = new Map(vectorScores.map((item) => [item.id, item.score]));
+    const vectorThreshold = mode === "fast"
+      ? Number.POSITIVE_INFINITY
+      : queryEmbedding.model === "local-hybrid" ? 0.08 : 0.28;
+
+    const results = chunks
+      .reduce<PrenoteChunkSearchResult[]>((acc, chunk) => {
+        const lexicalRank = lexicalRanks.get(chunk.id);
+        const vectorRank = vectorRanks.get(chunk.id);
+        const vectorScore = vectorScoreById.get(chunk.id) ?? 0;
+        const chunkTextTokens = new Set(tokenizeSearchText(chunk.text));
+        const chunkHeadingTokens = new Set(tokenizeSearchText(chunk.headingPath));
+        const tokenOverlapCount = [...queryTokens].filter((token) => chunkTextTokens.has(token)).length;
+        const headingOverlapCount = [...queryTokens].filter((token) => chunkHeadingTokens.has(token)).length;
+        const tokenOverlapScore = tokenOverlapCount / Math.max(3, queryTokens.size);
+        const headingOverlapScore = headingOverlapCount / Math.max(3, queryTokens.size);
+        const keywordScore = keywordOverlapScore(queryTokens, {
+          title: chunk.prenoteTitle,
+          category: "prenote",
+          content: chunk.text,
+          keywords: chunk.keywords,
+        });
+        const lexicalSignal = Boolean(lexicalRank) && (tokenOverlapScore >= 0.08 || keywordScore >= 0.14);
+        const keywordSignal = keywordScore > 0.08 && tokenOverlapScore >= 0.08;
+        const headingSignal = headingOverlapScore >= 0.22 && tokenOverlapScore >= 0.12;
+        const semanticSignal = mode === "semantic" && vectorScore >= vectorThreshold;
+        const hasSignal = lexicalSignal || keywordSignal || headingSignal || tokenOverlapScore >= 0.22 || semanticSignal;
+        if (!hasSignal) return acc;
+
+        const lexicalComponent = lexicalRank ? 1 / (40 + lexicalRank) : 0;
+        const vectorComponent = vectorRank && vectorScore >= vectorThreshold
+          ? (Math.max(0, vectorScore) * 0.08) + (1 / (80 + vectorRank))
+          : 0;
+        const keywordComponent = keywordScore * 0.08;
+        const tokenOverlapComponent = tokenOverlapScore * 0.05;
+        const headingBoost = chunk.headingPath && tokenizeSearchText(chunk.headingPath).some((token) => queryTokens.has(token)) ? 0.025 : 0;
+        const score = lexicalComponent * 0.75 + vectorComponent + keywordComponent + tokenOverlapComponent + headingBoost;
+        if (score <= 0.01) return acc;
+
+        acc.push({
+          ...chunk,
+          score,
+          lexicalRank,
+          vectorRank,
+          keywordScore,
+          tokenOverlapScore,
+        });
+        return acc;
+      }, [])
+      .sort((a, b) => b.score - a.score);
+
+    const top = results[0];
+    if (!top) return [];
+
+    const topScore = top.score;
+    const topHeading = top.headingPath;
+    return results
+      .filter((chunk) => {
+        if (chunk.id === top.id) return true;
+        if (chunk.score < topScore * 0.72) return false;
+        if (chunk.headingPath && topHeading && chunk.headingPath === topHeading) return true;
+        if (chunk.tokenOverlapScore >= 0.34) return true;
+        if (chunk.lexicalRank && chunk.lexicalRank <= 6 && chunk.tokenOverlapScore >= 0.22) return true;
+        if (chunk.keywordScore >= 0.18 && chunk.tokenOverlapScore >= 0.22) return true;
+        return false;
+      })
+      .slice(0, Math.max(1, Math.min(limit, 8)));
+  }
+
+  getEffectivePrenoteRuntimeContext(prenote: PrenoteRecord): string {
+    const runtimeContext = prenote.runtimeContext.trim();
+    const extractedText = prenote.extractedText.trim();
+    const legacyRuntimeLooksLossy = Boolean(extractedText)
+      && Boolean(runtimeContext)
+      && !isLosslessPrenoteRuntimeContext(runtimeContext)
+      && extractedText.length > runtimeContext.length * 1.2;
+
+    if (legacyRuntimeLooksLossy || (!runtimeContext && extractedText)) {
+      return buildLosslessRuntimeContext(prenote.title, extractedText);
+    }
+
+    return runtimeContext || prenote.processedJson || "";
+  }
+
   getActivePrenoteRuntimeContext(userId: string): string {
     const prenotes = this.listActivePrenotes(userId);
     if (prenotes.length === 0) return "";
 
     return prenotes
       .map((prenote, index) => {
-        const context = prenote.runtimeContext || prenote.processedJson || "";
+        const context = this.getEffectivePrenoteRuntimeContext(prenote);
         return context.trim() ? `Active prenote ${index + 1}: ${prenote.title}\n${context.trim()}` : "";
       })
       .filter(Boolean)
       .join("\n\n---\n\n");
+  }
+
+  async getActivePrenoteRuntimeContextForQuery(userId: string, query: string, mode: PrenoteRetrievalMode = "semantic"): Promise<string> {
+    const chunks = await this.searchActivePrenoteChunksHybrid(userId, query, PRENOTE_RETRIEVAL_TOP_K, mode);
+    if (chunks.length === 0) return "";
+
+    const lines: string[] = [];
+    let usedChars = 0;
+    chunks.forEach((chunk, index) => {
+      const header = [
+        `Active prenote excerpt ${index + 1}: ${chunk.prenoteTitle}`,
+        chunk.headingPath ? `Section: ${chunk.headingPath}` : "",
+        `Chunk: ${chunk.chunkIndex + 1}, score=${chunk.score.toFixed(4)}, embedding=${chunk.embeddingModel}`,
+        "Exact excerpt:",
+      ].filter(Boolean).join("\n");
+      const remaining = PRENOTE_RETRIEVAL_MAX_CHARS - usedChars - header.length - 16;
+      if (remaining <= 200) return;
+      const text = chunk.text.length > remaining ? `${chunk.text.slice(0, remaining - 3).trim()}...` : chunk.text;
+      usedChars += header.length + text.length + 16;
+      lines.push(`${header}\n${text}`);
+    });
+
+    if (lines.length === 0) return "";
+
+    return [
+      "Only these exact prenote excerpts were retrieved for the current transcript. Full prenote text remains stored but is not injected.",
+      ...lines,
+    ].join("\n\n---\n\n");
   }
 
   deletePrenote(userId: string, id: number): boolean {
@@ -4864,6 +6332,7 @@ class ConversationLogger {
     if (!prenote || prenote.userId !== userId) return false;
 
     const files = this.listPrenoteFiles(id);
+    this.deletePrenoteChunks(id);
     this.getDb().query("DELETE FROM prenotes WHERE id = ? AND user_id = ?").run(id, userId);
 
     for (const file of files) {
@@ -4924,6 +6393,7 @@ class ConversationLogger {
 
   private ensureDefaultSceneProfiles(userId: string): void {
     if (!this.isEnabled()) return;
+    if (this.syncedDefaultSceneProfileUsers.has(userId)) return;
 
     const db = this.getDb();
     for (const profile of DEFAULT_SCENE_PROFILES) {
@@ -4939,6 +6409,21 @@ class ConversationLogger {
         profile.prompt,
         profile.builtinKey === "daily_chat" ? 1 : 0,
       );
+      db.query(`
+        UPDATE scene_profiles
+        SET name = ?, prompt = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ?
+          AND builtin_key = ?
+          AND is_builtin = 1
+          AND (name <> ? OR prompt <> ?)
+      `).run(
+        profile.name,
+        profile.prompt,
+        userId,
+        profile.builtinKey,
+        profile.name,
+        profile.prompt,
+      );
     }
 
     const active = db
@@ -4952,6 +6437,7 @@ class ConversationLogger {
         WHERE user_id = ? AND builtin_key = 'daily_chat'
       `).run(userId);
     }
+    this.syncedDefaultSceneProfileUsers.add(userId);
   }
 
   listSceneProfiles(userId: string): SceneProfileRecord[] {
@@ -4979,6 +6465,22 @@ class ConversationLogger {
       .get(userId, id);
 
     return row ? mapSceneProfileRecord(row) : null;
+  }
+
+  getSceneProfileByBuiltinKey(userId: string, builtinKey: string): SceneProfileRecord | null {
+    if (!this.isEnabled()) return null;
+
+    this.ensureDefaultSceneProfiles(userId);
+    const row = this.getDb()
+      .query("SELECT * FROM scene_profiles WHERE user_id = ? AND builtin_key = ?")
+      .get(userId, builtinKey);
+
+    return row ? mapSceneProfileRecord(row) : null;
+  }
+
+  formatSceneProfilePrompt(profile: SceneProfileRecord | null): string {
+    if (!profile?.prompt.trim()) return "";
+    return `Active scene profile: ${profile.name}\n${profile.prompt.trim()}`;
   }
 
   createSceneProfile(input: CreateSceneProfileInput): SceneProfileRecord | null {
@@ -5097,9 +6599,7 @@ class ConversationLogger {
 
   getActiveSceneProfilePrompt(userId: string): string {
     const profile = this.getActiveSceneProfile(userId);
-    if (!profile?.prompt.trim()) return "";
-
-    return `Active scene profile: ${profile.name}\n${profile.prompt.trim()}`;
+    return this.formatSceneProfilePrompt(profile);
   }
 }
 

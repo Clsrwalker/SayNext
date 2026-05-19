@@ -87,6 +87,10 @@ saynext: active
 caddy -> 127.0.0.1:3000
 SAYNEXT_RUNTIME_MODE=travel
 LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-5.4-nano
+OPENAI_LONG_MODEL=gpt-5.4-mini
+OPENAI_CONVERSATION_STATE_ENABLED=true
+OPENAI_CONVERSATION_KEEP_ASSISTANT_OUTPUTS=false
 session memory extraction -> synchronous OpenAI
 batch -> disabled
 ```
@@ -165,6 +169,8 @@ Edit `.env`:
 PACKAGE_NAME=com.xiangli.saynext.dev
 MENTRAOS_API_KEY=...
 COOKIE_SECRET=...
+OPENAI_MODEL=gpt-5.4-nano
+OPENAI_LONG_MODEL=gpt-5.4-mini
 OLLAMA_MODEL=qwen2.5:14b-instruct
 PIPELINE_OLLAMA_MODEL=qwen2.5:14b-instruct
 PERSONALIZATION_PIPELINE_ENABLED=false

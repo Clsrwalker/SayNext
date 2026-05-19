@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, FileText, Plus, Save, Trash2, Upload } from "lucide-react";
+import { ChevronRight, FileText, Plus, RefreshCw, Save, Trash2, Upload } from "lucide-react";
 import Header from "../components/Header";
 import {
   createPrenote,
   deletePrenote,
   fetchPrenote,
+  fetchPrenoteChunks,
   fetchPrenotes,
+  queuePrenoteKnowledgeReview,
+  reindexPrenoteChunks,
   setActivePrenote,
   updatePrenoteMemory,
   type Prenote,
+  type PrenoteChunkSummary,
 } from "../api/prenotes.api";
-import { createPersonalMemory } from "../api/personal-memories.api";
 
 interface PrenoteManagerProps {
   userId: string;
@@ -52,9 +55,12 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
   const [isCreating, setIsCreating] = useState(false);
   const [isSavingMemory, setIsSavingMemory] = useState(false);
   const [isAddingKnowledge, setIsAddingKnowledge] = useState(false);
-  const [knowledgeStatus, setKnowledgeStatus] = useState<'idle' | 'done' | 'error'>('idle');
+  const [isLoadingChunks, setIsLoadingChunks] = useState(false);
+  const [isReindexingChunks, setIsReindexingChunks] = useState(false);
+  const [knowledgeStatus, setKnowledgeStatus] = useState<'idle' | 'queued' | 'error'>('idle');
   const [error, setError] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [chunks, setChunks] = useState<PrenoteChunkSummary[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedCount = prenotes.filter((prenote) => prenote.isActive).length;
@@ -86,6 +92,12 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
       setDetailPrenote(prenote);
       setDetailTitle(prenote.title);
       setMemoryDraft(prenote.runtimeContext || "");
+      setIsLoadingChunks(true);
+      try {
+        setChunks(await fetchPrenoteChunks(userId, id));
+      } finally {
+        setIsLoadingChunks(false);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load prenote");
     } finally {
@@ -107,6 +119,7 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
     setPage("list");
     setSelectedPrenoteId(null);
     setDetailPrenote(null);
+    setChunks([]);
     setError("");
     await loadPrenotes();
   };
@@ -220,25 +233,38 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
         .filter((item) => item.length > 2)
         .slice(0, 12);
 
-      await createPersonalMemory({
+      await queuePrenoteKnowledgeReview({
         userId,
+        id: detailPrenote.id,
         title: detailTitle || detailPrenote.title,
-        category: "knowledge",
-        sensitivity: "medium",
         content,
         usageRule: "Use when the current conversation is related to this uploaded prenote material.",
         keywords: Array.from(new Set(keywordSeeds)),
-        status: "active",
-        source: "knowledge",
-        sourceRef: `prenote:${detailPrenote.id}`,
-        upsertBySource: true,
       });
-      setKnowledgeStatus('done');
+      setKnowledgeStatus('queued');
     } catch (err) {
       setKnowledgeStatus('error');
-      setError(err instanceof Error ? err.message : "Failed to add to knowledge memory");
+      setError(err instanceof Error ? err.message : "Failed to send prenote to Memory Review");
     } finally {
       setIsAddingKnowledge(false);
+    }
+  };
+
+  const handleReindexChunks = async () => {
+    if (!detailPrenote) return;
+
+    setIsReindexingChunks(true);
+    setError("");
+    try {
+      await reindexPrenoteChunks(userId, detailPrenote.id);
+      setChunks(await fetchPrenoteChunks(userId, detailPrenote.id));
+      const refreshed = await fetchPrenote(userId, detailPrenote.id);
+      setDetailPrenote(refreshed);
+      setMemoryDraft(refreshed.runtimeContext || "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reindex chunks");
+    } finally {
+      setIsReindexingChunks(false);
     }
   };
 
@@ -336,6 +362,7 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
                             <p className="text-[12px] mt-1 text-muted-foreground">
                               {prenote.status}
                               {prenote.runtimeContextLength > 0 ? ` - ${prenote.runtimeContextLength} chars memory` : ""}
+                              {prenote.chunkCount > 0 ? ` - ${prenote.chunkCount} chunks` : ""}
                               {prenote.files.length > 0 ? ` - ${prenote.files.length} files` : ""}
                             </p>
                             {prenote.error && (
@@ -467,7 +494,7 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
                         Edit Prenote
                       </h1>
                       <p className="text-[13px] mt-1 text-muted-foreground">
-                        {detailPrenote.status} - {memoryDraft.length} chars memory
+                        {detailPrenote.status} - {memoryDraft.length} chars memory - {detailPrenote.chunkCount || chunks.length} chunks
                       </p>
                     </div>
                     <input
@@ -539,13 +566,60 @@ function PrenoteManager({ userId, onBack }: PrenoteManagerProps) {
                   >
                     <FileText size={16} />
                     {isAddingKnowledge
-                      ? "Adding..."
-                      : knowledgeStatus === 'done'
-                        ? "Saved to Knowledge"
+                      ? "Sending..."
+                      : knowledgeStatus === 'queued'
+                        ? "Queued in Memory Review"
                         : knowledgeStatus === 'error'
-                          ? "Retry Add to Knowledge"
-                          : "Add to Knowledge Memory"}
+                          ? "Retry Send to Review"
+                          : "Send to Memory Review"}
                   </button>
+
+                  <FieldShell>
+                    <div className="p-3 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-[13px] font-semibold" style={{ color: "var(--secondary-foreground)" }}>
+                            Chunk index
+                          </p>
+                          <p className="text-[12px] text-muted-foreground">
+                            Runtime uses relevant original chunks, not the LLM summary.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleReindexChunks}
+                          disabled={isReindexingChunks || detailPrenote.status !== "ready"}
+                          className="w-[34px] h-[34px] rounded-[6px] border flex items-center justify-center disabled:opacity-60"
+                          style={{ borderColor: "var(--border)", color: "var(--secondary-foreground)" }}
+                          aria-label="Reindex chunks"
+                        >
+                          <RefreshCw size={16} className={isReindexingChunks ? "animate-spin" : ""} />
+                        </button>
+                      </div>
+
+                      {isLoadingChunks ? (
+                        <p className="text-[12px] text-muted-foreground">Loading chunks...</p>
+                      ) : chunks.length === 0 ? (
+                        <p className="text-[12px] text-muted-foreground">No chunks indexed yet.</p>
+                      ) : (
+                        <div className="space-y-2 max-h-[320px] overflow-auto pr-1">
+                          {chunks.slice(0, 80).map((chunk) => (
+                            <details key={chunk.id} className="rounded-[6px] border p-2" style={{ borderColor: "var(--border)" }}>
+                              <summary className="text-[12px] cursor-pointer" style={{ color: "var(--secondary-foreground)" }}>
+                                #{chunk.chunkIndex + 1} {chunk.headingPath || "No section"} - {chunk.tokenEstimate} tokens - {chunk.embeddingModel}
+                              </summary>
+                              <p className="text-[11px] text-muted-foreground mt-2">
+                                {chunk.keywords.slice(0, 12).join(", ")}
+                              </p>
+                              <pre className="text-[11px] whitespace-pre-wrap mt-2 text-muted-foreground">
+                                {chunk.textPreview}
+                              </pre>
+                            </details>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </FieldShell>
 
                   {detailPrenote.files.length > 0 && (
                     <FieldShell>

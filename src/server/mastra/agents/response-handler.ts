@@ -1,16 +1,31 @@
 import { AppSession } from '@mentra/sdk';
 import { Action, AgentType, type AgentResponse, type AgentInsight, type Conversation, type AgentRoute } from "../types";
-import { generateTelepromptScript, processConversation, type OutputLanguage } from "./initial-agent";
+import { generateOptionalContinuation, generateTelepromptScript, processConversation, type OutputLanguage } from "./initial-agent";
 import { routeToSpecialist } from "./specialist-agents";
 import { INSIGHTS_HISTORY_LENGTH, TRANSCRIPT_HISTORY_LENGTH, INSIGHT_CACHE_SIZE, SIMILARITY_THRESHOLD, INSIGHT_DISPLAY_DURATION_MS, MANUAL_PAUSE_DISPLAY_DURATION_MS, TELEPROMPT_DISPLAY_DURATION_MS } from '../../config';
 import { findBestMatch } from 'string-similarity';
 import { LocationManager } from '../../manager/LocationManager';
 import { conversationLogger } from '../../data/conversation-logger';
 import { EventMemoryManager, type EventMemorySnapshot } from '../../memory/event-memory';
+import { routeFastScene, type SceneBuiltinKey } from '../../scene/fast-scene-router';
 import { makeTelepromptOpeningLine, shouldStartTeleprompt, TelepromptRuntime, type TelepromptDisplay } from '../../teleprompt/teleprompt-runtime';
+import { OpenAiConversationSession, isOpenAiConversationStateEnabled } from './openai-conversation-state';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 const SUGGESTION_ECHO_WINDOW_MS = 45 * 1000;
+const SUGGESTION_ECHO_REFRESH_MS = 45 * 1000;
+const SUGGESTION_ECHO_REDRAW_THRESHOLD_MS = 5 * 1000;
+const READBACK_CONTINUATION_SILENCE_MS = Number(process.env.READBACK_CONTINUATION_SILENCE_MS || 1600);
+const READBACK_CONTINUATION_MIN_COVERAGE = Number(process.env.READBACK_CONTINUATION_MIN_COVERAGE || 0.78);
+const READBACK_CONTINUATION_COOLDOWN_MS = Number(process.env.READBACK_CONTINUATION_COOLDOWN_MS || 20_000);
+const RESPONSE_STALE_GRACE_MS = Number(process.env.RESPONSE_STALE_GRACE_MS || 120);
+const TELEPROMPT_REFRESH_REDRAW_THRESHOLD_MS = Number(process.env.TELEPROMPT_REFRESH_REDRAW_THRESHOLD_MS || 8_000);
+const TELEPROMPT_READY_MIN_DISPLAY_MS = Number(process.env.TELEPROMPT_READY_MIN_DISPLAY_MS || 90_000);
+const TELEPROMPT_READY_MAX_DISPLAY_MS = Number(process.env.TELEPROMPT_READY_MAX_DISPLAY_MS || 180_000);
+const AUTO_SCENE_SWITCH_CONFIDENCE = Number(process.env.AUTO_SCENE_SWITCH_CONFIDENCE || 0.75);
+const AUTO_SCENE_REPEAT_CONFIDENCE = Number(process.env.AUTO_SCENE_REPEAT_CONFIDENCE || 0.65);
+const AUTO_SCENE_FORCE_CONFIDENCE = Number(process.env.AUTO_SCENE_FORCE_CONFIDENCE || 0.9);
+const AUTO_SCENE_SWITCH_COOLDOWN_MS = Number(process.env.AUTO_SCENE_SWITCH_COOLDOWN_MS || 20_000);
 const MAX_DISPLAYED_SUGGESTIONS = 12;
 const MIN_ECHO_WORDS = 3;
 const STRONG_ECHO_SIMILARITY = 0.82;
@@ -75,6 +90,22 @@ type DisplayedSuggestion = {
   candidates: string[];
   shownAt: number;
   expiresAt: number;
+};
+
+type DisplayedSuggestionEcho = {
+  displayText: string;
+  match: SuggestionEchoMatch;
+};
+
+type LastDisplayedAnswerContext = {
+  displayText: string;
+  sourceTranscript: string;
+  context: Conversation;
+  eventSnapshot: EventMemorySnapshot;
+  activePrenoteContext: string;
+  activeSceneProfilePrompt: string;
+  relevantPersonalMemoryContext: string;
+  timestamp: number;
 };
 
 export type SuggestionEchoMatch = {
@@ -146,6 +177,10 @@ function wordCountForEcho(text: string): number {
   return normalizeSuggestionEchoText(text).split(/\s+/).filter(Boolean).length;
 }
 
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function tokenCoverage(source: string, target: string): number {
   const sourceTokens = new Set(echoTokens(source));
   const targetTokens = echoTokens(target);
@@ -201,6 +236,42 @@ function isLikelyFreshQuestionOrInterruption(text: string): boolean {
     || /\bwhy\s+(?:not|did|do|does|is|are|would|should)\b/.test(normalized)
     || /\bhow\s+(?:long|did|do|does|would|can|could|is|are)\b/.test(normalized)
     || /\bhow\s+(?:much|many)\s+(?:does|did|do|is|are|was|were|would|can|could)\b/.test(normalized)
+  );
+}
+
+function isQuestionLikeDisplayedCandidate(text: string): boolean {
+  const normalized = normalizeSuggestionEchoText(text);
+  if (!normalized) return false;
+  return /\?\s*$/.test(text.trim())
+    || /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|should)\b/.test(normalized);
+}
+
+function computeTelepromptDisplayDuration(display: TelepromptDisplay): number {
+  if (display.status !== "ready") {
+    return TELEPROMPT_DISPLAY_DURATION_MS;
+  }
+
+  const readableWords = wordCountForEcho(display.text);
+  const estimatedMs = Math.ceil((readableWords / 105) * 60_000) + 25_000;
+  return Math.min(
+    TELEPROMPT_READY_MAX_DISPLAY_MS,
+    Math.max(TELEPROMPT_READY_MIN_DISPLAY_MS, TELEPROMPT_DISPLAY_DURATION_MS, estimatedMs),
+  );
+}
+
+function isLikelyQuestionSuggestionPartialEcho(transcript: string, candidate: string, transcriptCoverage: number, candidateCoverage: number): boolean {
+  if (!isQuestionLikeDisplayedCandidate(candidate)) return false;
+
+  const normalizedTranscript = normalizeSuggestionEchoText(transcript);
+  const normalizedCandidate = normalizeSuggestionEchoText(candidate);
+  if (!normalizedTranscript || !normalizedCandidate) return false;
+
+  const transcriptWordCount = wordCountForEcho(normalizedTranscript);
+  const prefixLike = normalizedCandidate.startsWith(normalizedTranscript) && transcriptWordCount >= 5;
+  return prefixLike || (
+    transcriptWordCount >= 4
+    && transcriptCoverage >= 0.72
+    && candidateCoverage >= 0.2
   );
 }
 
@@ -269,10 +340,18 @@ export function detectSuggestionEcho(transcript: string, displayedCandidates: st
     const strongWholeEcho = similarity >= 0.84
       || (transcriptCoverage >= 0.84 && candidateCoverage >= 0.55)
       || (transcriptCoverage >= 0.92 && candidateCoverage >= 0.5);
-    const matched = freshQuestionOrInterruption ? strongWholeEcho : normalEchoMatch;
+    const questionSuggestionPartialEcho = freshQuestionOrInterruption
+      && isLikelyQuestionSuggestionPartialEcho(transcript, candidate, transcriptCoverage, candidateCoverage);
+    const matched = freshQuestionOrInterruption ? (strongWholeEcho || questionSuggestionPartialEcho) : normalEchoMatch;
 
-    if (similarity + transcriptCoverage + candidateCoverage > best.similarity + best.transcriptCoverage + best.suggestionCoverage) {
-      best = { matched, similarity, transcriptCoverage, suggestionCoverage: candidateCoverage, candidate };
+    const candidateResult = { matched, similarity, transcriptCoverage, suggestionCoverage: candidateCoverage, candidate };
+    const candidateScore = similarity + transcriptCoverage + candidateCoverage;
+    const bestScore = best.similarity + best.transcriptCoverage + best.suggestionCoverage;
+    if (
+      (candidateResult.matched && !best.matched)
+      || (candidateResult.matched === best.matched && candidateScore > bestScore)
+    ) {
+      best = candidateResult;
     }
   }
 
@@ -285,18 +364,29 @@ export class MergeResponseHandler {
   private sessionId: string;
   private locationManager: LocationManager;
   private conversation: Conversation;
+  private openAiConversationSession: OpenAiConversationSession;
   private eventMemory: EventMemoryManager;
   private eventIdleTimer: NodeJS.Timeout | null = null;
   private isDisplaying: boolean = false;
   private displayTimer: NodeJS.Timeout | null = null;
   private pausedDisplayRefreshTimer: NodeJS.Timeout | null = null;
   private currentDisplayText: string | null = null;
+  private currentDisplayExpiresAt: number = 0;
   private lastInsightText: string | null = null;
   private isPausedForReading: boolean = false;
   private processingSeq: number = 0;
   private recentInsightCache: string[] = [];
   private recentDisplayedSuggestions: DisplayedSuggestion[] = [];
   private teleprompt: TelepromptRuntime = new TelepromptRuntime();
+  private lastDisplayedAnswerContext: LastDisplayedAnswerContext | null = null;
+  private readbackContinuationTimer: NodeJS.Timeout | null = null;
+  private readbackContinuationSeq: number = 0;
+  private lastContinuationAt: number = 0;
+  private readbackTokenCoverageByDisplay: Map<string, Set<string>> = new Map();
+  private autoSceneKey: SceneBuiltinKey = "daily_chat";
+  private autoScenePendingKey: SceneBuiltinKey | null = null;
+  private autoScenePendingCount: number = 0;
+  private autoSceneLastSwitchAt: number = 0;
   public frequency: 'low' | 'medium' | 'high';
   public outputLanguage: OutputLanguage;
 
@@ -316,6 +406,12 @@ export class MergeResponseHandler {
     this.sessionId = `${userId}-${Date.now()}`;
     this.locationManager = locationManager;
     this.conversation = [];
+    this.openAiConversationSession = new OpenAiConversationSession({ userId, sessionId: this.sessionId });
+    if (isOpenAiConversationStateEnabled(process.env.LLM_PROVIDER || "openai")) {
+      this.openAiConversationSession.warmup(Number(process.env.OPENAI_CONVERSATION_WARMUP_TIMEOUT_MS || 8000))
+        .then((conversationId) => this.session.logger.info(`OpenAI conversation state warmed up: ${conversationId}`))
+        .catch((error) => this.session.logger.warn(`OpenAI conversation warmup skipped: ${error instanceof Error ? error.message : String(error)}`));
+    }
     this.eventMemory = new EventMemoryManager(userId, this.sessionId);
     this.frequency = initialFrequency;
     this.outputLanguage = initialOutputLanguage;
@@ -324,19 +420,25 @@ export class MergeResponseHandler {
   /**
    * Process a new transcript and update the conversation
    */
-  async processTranscript(text: string, timestamp: number): Promise<void> {
+  async processTranscript(text: string, timestamp: number, reason: "isFinal" | "timeout" = "isFinal"): Promise<void> {
     if (this.isPausedForReading) {
       this.session.logger.info(`Manual pause active, ignoring transcript: "${text}"`);
       this.onStatus?.({ type: "processing_done", reason: "paused" });
       return;
     }
 
-    if (!this.teleprompt.isActive() && this.isRecentDisplayedSuggestionEcho(text, timestamp)) {
+    const suggestionEcho = !this.teleprompt.isActive()
+      ? this.getRecentDisplayedSuggestionEcho(text, timestamp)
+      : null;
+    if (suggestionEcho) {
       this.session.logger.info(`Ignoring self-read suggestion echo: "${text}"`);
+      this.refreshDisplayedSuggestionEcho(suggestionEcho.displayText);
+      this.trackReadbackEchoAndMaybeScheduleContinuation(suggestionEcho, text, timestamp);
       this.onStatus?.({ type: "processing_done", reason: "suggestion_echo" });
       return;
     }
 
+    this.cancelReadbackContinuation("new_transcript");
     const requestSeq = ++this.processingSeq;
     const eventSnapshot = this.eventMemory.addTranscript(text, timestamp);
     this.resetEventIdleTimer();
@@ -349,7 +451,7 @@ export class MergeResponseHandler {
     });
 
     const telepromptResult = this.teleprompt.isActive()
-      ? this.teleprompt.handleTranscript(text, timestamp)
+      ? this.teleprompt.handleTranscript(text, timestamp, reason === "timeout" ? "timeout" : "final")
       : null;
 
     if (telepromptResult) {
@@ -361,6 +463,10 @@ export class MergeResponseHandler {
       }
 
       if (telepromptResult.action === "hold" && telepromptResult.consumed) {
+        const display = this.teleprompt.getDisplay();
+        if (display) {
+          this.showTelepromptDisplay(display, undefined, "refresh");
+        }
         this.onStatus?.({ type: "processing_done", reason: "teleprompt_hold" });
         this.trimConversationHistory();
         return;
@@ -385,12 +491,35 @@ export class MergeResponseHandler {
     const context: Conversation = [...recentTranscripts, ...recentInsights]
       .sort((a, b) => a.timestamp - b.timestamp);
 
-    const activePrenoteContext = conversationLogger.getActivePrenoteRuntimeContext(this.userId);
-    const activeSceneProfilePrompt = conversationLogger.getActiveSceneProfilePrompt(this.userId);
+    const activeSceneProfilePrompt = this.resolveActiveSceneProfilePrompt(
+      text,
+      timestamp,
+      recentTranscripts
+        .filter((item) => item.type === "transcript")
+        .map((item) => item.text),
+    );
     const memoryQuery = eventSnapshot.recentTranscripts.slice(-4).join("\n") || text;
+    const telepromptNeed = shouldStartTeleprompt(text, `${eventSnapshot.scene} ${activeSceneProfilePrompt}`);
+    const prenoteRetrievalMode = telepromptNeed === "none" ? "fast" : "semantic";
+    const prenoteQuery = prenoteRetrievalMode === "fast"
+      ? [
+        text,
+        eventSnapshot.recentTranscripts.slice(-2).join("\n"),
+      ].filter(Boolean).join("\n")
+      : [
+        text,
+        eventSnapshot.title,
+        eventSnapshot.summary,
+        eventSnapshot.recentTranscripts.slice(-4).join("\n"),
+        activeSceneProfilePrompt,
+      ].filter(Boolean).join("\n");
+    const activePrenoteContext = await conversationLogger.getActivePrenoteRuntimeContextForQuery(
+      this.userId,
+      prenoteQuery,
+      prenoteRetrievalMode,
+    );
     const relevantPersonalMemoryContext = conversationLogger.getRelevantPersonalMemoryContext(this.userId, memoryQuery, 3);
 
-    const telepromptNeed = shouldStartTeleprompt(text, `${eventSnapshot.scene} ${activeSceneProfilePrompt}`);
     if (telepromptNeed !== "none") {
       this.startTelepromptAnswer({
         text,
@@ -416,6 +545,10 @@ export class MergeResponseHandler {
       activePrenoteContext,
       activeSceneProfilePrompt,
       relevantPersonalMemoryContext,
+      {
+        openAiConversationSession: this.openAiConversationSession,
+        transcriptCommitReason: reason === "timeout" ? "timeout" : "final",
+      },
     );
 
     if (requestSeq !== this.processingSeq) {
@@ -424,10 +557,31 @@ export class MergeResponseHandler {
       return;
     }
 
+    if (RESPONSE_STALE_GRACE_MS > 0 && response.type === Action.INSIGHT) {
+      await sleepMs(RESPONSE_STALE_GRACE_MS);
+      if (requestSeq !== this.processingSeq) {
+        this.session.logger.info(`Dropping stale AI response during display grace window for older transcript: "${text}"`);
+        this.onStatus?.({ type: "processing_done", reason: "stale_response" });
+        return;
+      }
+    }
+
     // Add the response to conversation history
     this.conversation.push(response);
     this.eventMemory.addResponse(response);
     this.logConversationSample(text, timestamp, response);
+    if (response.type === Action.INSIGHT) {
+      this.lastDisplayedAnswerContext = {
+        displayText: response.output,
+        sourceTranscript: text,
+        context,
+        eventSnapshot,
+        activePrenoteContext,
+        activeSceneProfilePrompt,
+        relevantPersonalMemoryContext,
+        timestamp,
+      };
+    }
 
     // Handle the response based on action type
     await this.handleAgentResponse(response);
@@ -436,6 +590,61 @@ export class MergeResponseHandler {
 
     // Trim conversation history if it gets too long
     this.trimConversationHistory();
+  }
+
+  private resolveActiveSceneProfilePrompt(latestTranscript: string, timestamp: number, recentTranscripts: string[]): string {
+    const activeProfile = conversationLogger.getActiveSceneProfile(this.userId);
+    if (activeProfile?.builtinKey !== "auto") {
+      return conversationLogger.formatSceneProfilePrompt(activeProfile);
+    }
+
+    const route = routeFastScene({
+      latestTranscript,
+      recentTranscripts,
+      previousSceneKey: this.autoSceneKey,
+    });
+    const previousSceneKey = this.autoSceneKey;
+    let switched = false;
+
+    if (route.sceneKey === this.autoSceneKey) {
+      this.autoScenePendingKey = null;
+      this.autoScenePendingCount = 0;
+    } else {
+      if (this.autoScenePendingKey === route.sceneKey) {
+        this.autoScenePendingCount += 1;
+      } else {
+        this.autoScenePendingKey = route.sceneKey;
+        this.autoScenePendingCount = 1;
+      }
+
+      const inCooldown = timestamp - this.autoSceneLastSwitchAt < AUTO_SCENE_SWITCH_COOLDOWN_MS;
+      const forceSwitch = route.confidence >= AUTO_SCENE_FORCE_CONFIDENCE;
+      const confidentSwitch = route.confidence >= AUTO_SCENE_SWITCH_CONFIDENCE && !inCooldown;
+      const repeatedSwitch = route.confidence >= AUTO_SCENE_REPEAT_CONFIDENCE && this.autoScenePendingCount >= 2 && !inCooldown;
+      if (forceSwitch || confidentSwitch || repeatedSwitch) {
+        this.autoSceneKey = route.sceneKey;
+        this.autoSceneLastSwitchAt = timestamp;
+        this.autoScenePendingKey = null;
+        this.autoScenePendingCount = 0;
+        switched = true;
+      }
+    }
+
+    const selectedProfile = conversationLogger.getSceneProfileByBuiltinKey(this.userId, this.autoSceneKey)
+      || conversationLogger.getSceneProfileByBuiltinKey(this.userId, "daily_chat");
+    this.onStatus?.({
+      type: "auto_scene",
+      sceneKey: this.autoSceneKey,
+      candidateSceneKey: route.sceneKey,
+      previousSceneKey,
+      confidence: route.confidence,
+      reason: route.reason,
+      switched,
+    });
+
+    return selectedProfile
+      ? `Active scene profile: Auto -> ${selectedProfile.name}\n${selectedProfile.prompt.trim()}`
+      : "";
   }
 
   private logConversationSample(text: string, timestamp: number, response: AgentResponse): void {
@@ -471,6 +680,24 @@ export class MergeResponseHandler {
         agentInput: {
           model: "teleprompt",
           profileVersion: "teleprompt-v1",
+          retrievedSampleIds: [],
+        },
+      },
+    };
+  }
+
+  private createReadbackContinuationInsight(output: string, timestamp: number): AgentInsight {
+    return {
+      type: Action.INSIGHT,
+      reasoning: "Optional continuation after Xiang finished reading the previous answer and the room stayed silent",
+      timestamp,
+      output,
+      confidence: 0.72,
+      metadata: {
+        agentType: AgentType.Initial,
+        agentInput: {
+          model: "readback-continuation",
+          profileVersion: "readback-continuation-v1",
           retrievedSampleIds: [],
         },
       },
@@ -523,8 +750,17 @@ export class MergeResponseHandler {
     });
   }
 
-  private showTelepromptDisplay(display: TelepromptDisplay, agentResponse?: AgentInsight): void {
-    this.tryShowInsight(display.text, TELEPROMPT_DISPLAY_DURATION_MS, { skipCache: true }, agentResponse);
+  private showTelepromptDisplay(display: TelepromptDisplay, agentResponse?: AgentInsight, mode: "replace" | "refresh" = "replace"): void {
+    this.tryShowInsight(
+      display.text,
+      computeTelepromptDisplayDuration(display),
+      {
+        skipCache: true,
+        keepSameDisplayThresholdMs: mode === "refresh" ? TELEPROMPT_REFRESH_REDRAW_THRESHOLD_MS : undefined,
+        keepSameDisplayReason: mode === "refresh" ? "teleprompt_refresh" : undefined,
+      },
+      agentResponse,
+    );
     this.onStatus?.({
       type: "teleprompt",
       text: display.text,
@@ -667,9 +903,34 @@ export class MergeResponseHandler {
   private tryShowInsight(
     output: string,
     durationMs: number,
-    options: { skipCache?: boolean } = {},
+    options: {
+      skipCache?: boolean;
+      keepSameDisplayThresholdMs?: number;
+      keepSameDisplayReason?: string;
+    } = {},
     agentResponse?: AgentInsight
   ): void {
+    this.cancelReadbackContinuation("new_display");
+    this.readbackTokenCoverageByDisplay.delete(this.readbackDisplayKey(output));
+
+    const sameActiveDisplay = this.isDisplaying && this.currentDisplayText === output;
+    const keepSameDisplayThresholdMs = options.keepSameDisplayThresholdMs;
+    if (sameActiveDisplay && keepSameDisplayThresholdMs !== undefined) {
+      const remainingMs = this.currentDisplayExpiresAt - Date.now();
+      if (remainingMs > keepSameDisplayThresholdMs) {
+        this.startDisplayReleaseTimer(remainingMs);
+        this.onStatus?.({
+          type: "display_kept",
+          reason: options.keepSameDisplayReason || "same_display",
+          remainingMs,
+        });
+        this.session.logger.info(
+          `Kept displayed text without redraw; reason=${options.keepSameDisplayReason || "same_display"} remaining=${Math.round(remainingMs)}ms`,
+        );
+        return;
+      }
+    }
+
     if (this.isDisplaying) {
       this.session.logger.info(`Replacing displayed suggestion with: "${output}"`);
       if (this.displayTimer) {
@@ -678,6 +939,7 @@ export class MergeResponseHandler {
       }
       this.isDisplaying = false;
       this.currentDisplayText = null;
+      this.currentDisplayExpiresAt = 0;
     }
 
     // --- DUPLICATION CHECK ---
@@ -693,6 +955,7 @@ export class MergeResponseHandler {
 
     this.isDisplaying = true;
     this.currentDisplayText = output;
+    this.currentDisplayExpiresAt = Date.now() + durationMs;
     this.rememberDisplayedSuggestion(output, durationMs);
     if (!options.skipCache) {
       this.lastInsightText = output;
@@ -724,6 +987,7 @@ export class MergeResponseHandler {
 
   pauseForReading(): void {
     this.isPausedForReading = true;
+    this.cancelReadbackContinuation("manual_pause");
 
     if (this.displayTimer) {
       clearTimeout(this.displayTimer);
@@ -756,6 +1020,7 @@ export class MergeResponseHandler {
 
     this.isDisplaying = true;
     this.currentDisplayText = text;
+    this.currentDisplayExpiresAt = Date.now() + MANUAL_PAUSE_DISPLAY_DURATION_MS;
     this.lastInsightText = text;
     this.rememberDisplayedSuggestion(text, MANUAL_PAUSE_DISPLAY_DURATION_MS);
     this.session.layouts.showTextWall(text, { durationMs: MANUAL_PAUSE_DISPLAY_DURATION_MS });
@@ -771,6 +1036,7 @@ export class MergeResponseHandler {
 
   resumeAutomatic(): void {
     this.isPausedForReading = false;
+    this.cancelReadbackContinuation("manual_resume");
 
     if (this.displayTimer) {
       clearTimeout(this.displayTimer);
@@ -783,12 +1049,17 @@ export class MergeResponseHandler {
 
     this.isDisplaying = false;
     this.currentDisplayText = null;
+    this.currentDisplayExpiresAt = 0;
     this.session.layouts.showTextWall("SayNext is listening.", { durationMs: 1500 });
     this.session.logger.info("Automatic response mode enabled");
   }
 
   getManualPauseState(): boolean {
     return this.isPausedForReading;
+  }
+
+  isTelepromptActive(): boolean {
+    return this.teleprompt.isActive();
   }
 
   private startDisplayReleaseTimer(durationMs: number): void {
@@ -803,6 +1074,7 @@ export class MergeResponseHandler {
       this.isDisplaying = false;
       this.displayTimer = null;
       this.currentDisplayText = null;
+      this.currentDisplayExpiresAt = 0;
       this.session.logger.info(`Display is now free.`);
     }, durationMs);
   }
@@ -824,22 +1096,28 @@ export class MergeResponseHandler {
    * Clear the conversation history
    */
   clearConversation(): void {
+    this.cancelReadbackContinuation("clear_conversation");
     this.eventMemory.closeActiveEvent();
     if (this.eventIdleTimer) {
       clearTimeout(this.eventIdleTimer);
       this.eventIdleTimer = null;
     }
     this.conversation = [];
+    this.openAiConversationSession.reset();
   }
 
   resetRuntimeState(): void {
     this.processingSeq++;
     this.teleprompt.cancel();
     this.conversation = [];
+    this.openAiConversationSession.reset();
     this.recentInsightCache = [];
     this.recentDisplayedSuggestions = [];
+    this.readbackTokenCoverageByDisplay.clear();
+    this.lastDisplayedAnswerContext = null;
     this.lastInsightText = null;
     this.currentDisplayText = null;
+    this.currentDisplayExpiresAt = 0;
     this.isDisplaying = false;
     this.isPausedForReading = false;
 
@@ -856,6 +1134,7 @@ export class MergeResponseHandler {
       clearTimeout(this.pausedDisplayRefreshTimer);
       this.pausedDisplayRefreshTimer = null;
     }
+    this.cancelReadbackContinuation("runtime_reset");
 
     this.onStatus?.({ type: "processing_done", reason: "manual_reset" });
     this.session.layouts.showTextWall("SayNext is listening.", { durationMs: 1500 });
@@ -863,7 +1142,9 @@ export class MergeResponseHandler {
   }
 
   close(): void {
+    this.cancelReadbackContinuation("close");
     this.teleprompt.cancel();
+    this.openAiConversationSession.reset();
     this.eventMemory.closeActiveEvent();
     if (this.eventIdleTimer) {
       clearTimeout(this.eventIdleTimer);
@@ -897,6 +1178,7 @@ export class MergeResponseHandler {
 
     const now = Date.now();
     const windowMs = Math.max(durationMs, SUGGESTION_ECHO_WINDOW_MS);
+    this.recentDisplayedSuggestions = this.recentDisplayedSuggestions.filter((item) => item.text !== text);
     this.recentDisplayedSuggestions.push({
       text,
       candidates,
@@ -913,17 +1195,225 @@ export class MergeResponseHandler {
       .slice(-MAX_DISPLAYED_SUGGESTIONS);
   }
 
-  private isRecentDisplayedSuggestionEcho(text: string, timestamp: number): boolean {
-    this.pruneDisplayedSuggestions(timestamp);
-    if (!this.recentDisplayedSuggestions.length) return false;
+  private readbackDisplayKey(text: string): string {
+    return normalizeSuggestionEchoText(text).slice(0, 500);
+  }
 
-    const candidates = this.recentDisplayedSuggestions.flatMap((item) => item.candidates);
-    const match = detectSuggestionEcho(text, candidates);
-    if (!match.matched) return false;
+  private isReadbackContinuationEligible(displayText: string, sourceTranscript: string): boolean {
+    const display = displayText.trim();
+    if (!display || this.teleprompt.isActive()) return false;
+    if (wordCountForEcho(display) < 6) return false;
+    if (/[?？]\s*$/.test(display)) return false;
+
+    const normalizedDisplay = normalizeSuggestionEchoText(display);
+    const normalizedSource = normalizeSuggestionEchoText(sourceTranscript);
+    if (!normalizedDisplay || !normalizedSource) return false;
+
+    if (/^(sorry|could you repeat|what do you mean|nice to meet you|thank you|thanks|sure could you repeat|i am not sure|i'm not sure)/i.test(normalizedDisplay)) {
+      return false;
+    }
+
+    const highRisk = /\b(id|passport|permit|sin|bank|insurance|lease|contract|payment|credit card|doctor|medicine|medication|legal|lawyer|police|border|immigration|non refundable|deposit|sign|signature|advisor|front desk|maintenance)\b/;
+    if (highRisk.test(normalizedDisplay) || highRisk.test(normalizedSource)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private trackReadbackEchoAndMaybeScheduleContinuation(echo: DisplayedSuggestionEcho, transcript: string, timestamp: number): void {
+    const context = this.lastDisplayedAnswerContext;
+    if (!context || context.displayText !== echo.displayText) return;
+    if (!this.isReadbackContinuationEligible(echo.displayText, context.sourceTranscript)) {
+      this.cancelReadbackContinuation("readback_not_eligible");
+      return;
+    }
+    if (Date.now() - this.lastContinuationAt < READBACK_CONTINUATION_COOLDOWN_MS) {
+      this.onStatus?.({ type: "readback_continuation_skipped", reason: "cooldown" });
+      return;
+    }
+
+    const sourceTokens = new Set(echoTokens(echo.displayText));
+    if (sourceTokens.size < 4) return;
+
+    const key = this.readbackDisplayKey(echo.displayText);
+    const seen = this.readbackTokenCoverageByDisplay.get(key) ?? new Set<string>();
+    for (const token of echoTokens(transcript)) {
+      if (sourceTokens.has(token)) {
+        seen.add(token);
+      }
+    }
+    this.readbackTokenCoverageByDisplay.set(key, seen);
+
+    const aggregateCoverage = seen.size / sourceTokens.size;
+    const completionCoverage = Math.max(
+      aggregateCoverage,
+      echo.match.suggestionCoverage,
+      echo.match.similarity >= 0.9 ? 1 : 0,
+    );
+    const sourceTokenList = Array.from(sourceTokens);
+    const tailTokenCount = Math.max(3, Math.ceil(sourceTokenList.length * 0.35));
+    const tailTokens = sourceTokenList.slice(-tailTokenCount);
+    const tailCoverage = tailTokens.length
+      ? tailTokens.filter((token) => seen.has(token)).length / tailTokens.length
+      : 0;
+    const needsTailEvidence = wordCountForEcho(echo.displayText) >= 14;
+
+    this.onStatus?.({
+      type: "readback_progress",
+      coverage: Number(completionCoverage.toFixed(3)),
+      aggregateCoverage: Number(aggregateCoverage.toFixed(3)),
+      tailCoverage: Number(tailCoverage.toFixed(3)),
+      suggestionCoverage: Number(echo.match.suggestionCoverage.toFixed(3)),
+      similarity: Number(echo.match.similarity.toFixed(3)),
+    });
+
+    if (
+      completionCoverage < READBACK_CONTINUATION_MIN_COVERAGE
+      || (needsTailEvidence && tailCoverage < 0.5)
+    ) {
+      this.cancelReadbackContinuation("readback_incomplete");
+      return;
+    }
+
+    this.scheduleReadbackContinuation(echo.displayText, timestamp);
+  }
+
+  private scheduleReadbackContinuation(displayText: string, timestamp: number): void {
+    if (this.readbackContinuationTimer) {
+      clearTimeout(this.readbackContinuationTimer);
+      this.readbackContinuationTimer = null;
+    }
+
+    const seq = ++this.readbackContinuationSeq;
+    this.readbackContinuationTimer = setTimeout(() => {
+      this.readbackContinuationTimer = null;
+      void this.runReadbackContinuation(seq, displayText, timestamp);
+    }, READBACK_CONTINUATION_SILENCE_MS);
+
+    this.onStatus?.({
+      type: "readback_continuation_scheduled",
+      delayMs: READBACK_CONTINUATION_SILENCE_MS,
+    });
+  }
+
+  private cancelReadbackContinuation(reason: string): void {
+    this.readbackContinuationSeq++;
+    if (this.readbackContinuationTimer) {
+      clearTimeout(this.readbackContinuationTimer);
+      this.readbackContinuationTimer = null;
+      this.onStatus?.({ type: "readback_continuation_cancelled", reason });
+    }
+  }
+
+  private async runReadbackContinuation(seq: number, displayText: string, timestamp: number): Promise<void> {
+    if (seq !== this.readbackContinuationSeq) return;
+    if (this.isPausedForReading || this.teleprompt.isActive()) return;
+    if (Date.now() - this.lastContinuationAt < READBACK_CONTINUATION_COOLDOWN_MS) return;
+    if (!this.isDisplaying || this.currentDisplayText !== displayText) {
+      this.onStatus?.({ type: "readback_continuation_skipped", reason: "display_changed" });
+      return;
+    }
+
+    const context = this.lastDisplayedAnswerContext;
+    if (!context || context.displayText !== displayText) {
+      this.onStatus?.({ type: "readback_continuation_skipped", reason: "missing_context" });
+      return;
+    }
+
+    this.onStatus?.({ type: "readback_continuation_generating" });
+    const continuation = await generateOptionalContinuation({
+      conversation: context.context,
+      eventMemory: context.eventSnapshot,
+      outputLanguage: this.outputLanguage,
+      activePrenoteContext: context.activePrenoteContext,
+      activeSceneProfilePrompt: context.activeSceneProfilePrompt,
+      relevantPersonalMemoryContext: context.relevantPersonalMemoryContext,
+      displayedAnswer: context.displayText,
+      sourceTranscript: context.sourceTranscript,
+    });
+
+    if (seq !== this.readbackContinuationSeq) return;
+    if (!continuation) {
+      this.onStatus?.({ type: "readback_continuation_skipped", reason: "model_declined" });
+      return;
+    }
+
+    if (this.recentInsightCache.length > 0) {
+      const { bestMatch } = findBestMatch(continuation, this.recentInsightCache);
+      if (bestMatch.rating > SIMILARITY_THRESHOLD) {
+        this.onStatus?.({ type: "readback_continuation_skipped", reason: "duplicate" });
+        return;
+      }
+    }
+
+    if (!this.isDisplaying || this.currentDisplayText !== displayText) {
+      this.onStatus?.({ type: "readback_continuation_skipped", reason: "display_changed_after_model" });
+      return;
+    }
+
+    const response = this.createReadbackContinuationInsight(continuation, Date.now());
+    this.conversation.push(response);
+    this.eventMemory.addResponse(response);
+    this.lastContinuationAt = Date.now();
+    this.tryShowInsight(response.output, INSIGHT_DISPLAY_DURATION_MS, {}, response);
+    this.onStatus?.({ type: "readback_continuation_shown", sourceTimestamp: timestamp });
+    this.trimConversationHistory();
+  }
+
+  private getRecentDisplayedSuggestionEcho(text: string, timestamp: number): DisplayedSuggestionEcho | null {
+    this.pruneDisplayedSuggestions(timestamp);
+    if (!this.recentDisplayedSuggestions.length) return null;
+
+    let best: DisplayedSuggestionEcho | null = null;
+    for (const item of this.recentDisplayedSuggestions) {
+      const match = detectSuggestionEcho(text, item.candidates);
+      if (!match.matched) continue;
+
+      const score = match.similarity + match.transcriptCoverage + match.suggestionCoverage;
+      const bestScore = best
+        ? best.match.similarity + best.match.transcriptCoverage + best.match.suggestionCoverage
+        : -1;
+      if (score > bestScore) {
+        best = { displayText: item.text, match };
+      }
+    }
+
+    if (!best) return null;
 
     this.session.logger.info(
-      `Suggestion echo detected similarity=${match.similarity.toFixed(2)} transcriptCoverage=${match.transcriptCoverage.toFixed(2)} suggestionCoverage=${match.suggestionCoverage.toFixed(2)} candidate="${match.candidate}"`,
+      `Suggestion echo detected similarity=${best.match.similarity.toFixed(2)} transcriptCoverage=${best.match.transcriptCoverage.toFixed(2)} suggestionCoverage=${best.match.suggestionCoverage.toFixed(2)} candidate="${best.match.candidate}"`,
     );
-    return true;
+    return best;
+  }
+
+  private refreshDisplayedSuggestionEcho(displayText: string): void {
+    const text = displayText.trim();
+    if (!text) return;
+
+    const sameActiveDisplay = this.isDisplaying && this.currentDisplayText === text;
+    const remainingMs = this.currentDisplayExpiresAt - Date.now();
+
+    if (this.displayTimer) {
+      clearTimeout(this.displayTimer);
+      this.displayTimer = null;
+    }
+
+    this.isDisplaying = true;
+    this.currentDisplayText = text;
+    this.lastInsightText = text;
+    this.rememberDisplayedSuggestion(text, SUGGESTION_ECHO_REFRESH_MS);
+    if (sameActiveDisplay && remainingMs > SUGGESTION_ECHO_REDRAW_THRESHOLD_MS) {
+      this.startDisplayReleaseTimer(remainingMs);
+      this.onStatus?.({ type: "display_extended", reason: "suggestion_echo", remainingMs });
+      this.session.logger.info(`Kept displayed suggestion without redraw after self-read echo; remaining=${Math.round(remainingMs)}ms`);
+      return;
+    }
+
+    this.currentDisplayExpiresAt = Date.now() + SUGGESTION_ECHO_REFRESH_MS;
+    this.session.layouts.showTextWall(text, { durationMs: SUGGESTION_ECHO_REFRESH_MS });
+    this.startDisplayReleaseTimer(SUGGESTION_ECHO_REFRESH_MS);
+    this.onStatus?.({ type: "display_refreshed", reason: "suggestion_echo" });
+    this.session.logger.info(`Refreshed displayed suggestion after self-read echo for ${SUGGESTION_ECHO_REFRESH_MS}ms`);
   }
 }

@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 import { extname } from "node:path";
 import type { PrenoteFileRecord } from "../data/conversation-logger";
 
-const PRENOTE_PROVIDER = (process.env.PRENOTE_PROVIDER || "auto").toLowerCase();
 const OPENAI_PRENOTE_MODEL = process.env.PRENOTE_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const OLLAMA_PRENOTE_MODEL = process.env.PRENOTE_OLLAMA_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:14b-instruct";
 const PRENOTE_VISION_MODEL = process.env.PRENOTE_VISION_MODEL || "";
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 30000);
-const PRENOTE_MAX_PROCESS_CHARS = Number(process.env.PRENOTE_MAX_PROCESS_CHARS || 180000);
+const PRENOTE_RUNTIME_CONTEXT_MAX_CHARS = Number(process.env.PRENOTE_RUNTIME_CONTEXT_MAX_CHARS || 0);
+const LOSSLESS_RUNTIME_MARKER = "Complete prenote material follows. This is not a summary.";
 
 export interface ExtractedFileContent {
   text: string;
@@ -172,24 +172,6 @@ async function callOllamaGenerate(prompt: string, options: { model?: string; ima
   return String(data.response ?? "").trim();
 }
 
-async function callPrenoteTextModel(prompt: string): Promise<{ text: string; model: string }> {
-  const shouldUseOpenAI =
-    PRENOTE_PROVIDER === "openai" ||
-    (PRENOTE_PROVIDER === "auto" && Boolean(process.env.OPENAI_API_KEY));
-
-  if (shouldUseOpenAI) {
-    return {
-      text: await callOpenAIResponses([{ type: "input_text", text: prompt }]),
-      model: OPENAI_PRENOTE_MODEL,
-    };
-  }
-
-  return {
-    text: await callOllamaGenerate(prompt),
-    model: `ollama:${OLLAMA_PRENOTE_MODEL}`,
-  };
-}
-
 async function extractImageWithOpenAI(buffer: Buffer, mimeType: string, fileName: string): Promise<string> {
   const imageUrl = `data:${mimeType || "image/png"};base64,${buffer.toString("base64")}`;
   return callOpenAIResponses([
@@ -267,32 +249,37 @@ function buildFullPrenoteText(input: ProcessPrenoteInput): string {
   return normalizeWhitespace(parts.join("\n\n"));
 }
 
-function truncateForProcessing(text: string): { text: string; wasTruncated: boolean } {
-  if (text.length <= PRENOTE_MAX_PROCESS_CHARS) {
-    return { text, wasTruncated: false };
-  }
-
-  return {
-    text: text.slice(0, PRENOTE_MAX_PROCESS_CHARS),
-    wasTruncated: true,
-  };
-}
-
-function extractJsonObject(text: string): string | null {
-  const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-  const first = cleaned.indexOf("{");
-  const last = cleaned.lastIndexOf("}");
-  if (first < 0 || last <= first) return null;
-  return cleaned.slice(first, last + 1);
-}
-
 function buildFallbackRuntimeContext(title: string, text: string): string {
-  const compact = normalizeWhitespace(text).slice(0, 5000);
+  return buildLosslessRuntimeContext(title, text);
+}
+
+function compactPrenoteMaterial(text: string): string {
+  return normalizeWhitespace(
+    String(text || "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/[ \t]{2,}/g, " ").trimEnd())
+      .join("\n"),
+  );
+}
+
+export function buildLosslessRuntimeContext(title: string, text: string): string {
+  const compact = compactPrenoteMaterial(text);
+  const maxChars = PRENOTE_RUNTIME_CONTEXT_MAX_CHARS > 0 ? PRENOTE_RUNTIME_CONTEXT_MAX_CHARS : Infinity;
+  const wasLimited = compact.length > maxChars;
+  const material = wasLimited ? compact.slice(0, maxChars) : compact;
+
   return [
     `Prenote: ${title}`,
-    "Use this as prepared scene context.",
-    compact,
+    LOSSLESS_RUNTIME_MARKER,
+    wasLimited
+      ? `Runtime context was limited by PRENOTE_RUNTIME_CONTEXT_MAX_CHARS=${PRENOTE_RUNTIME_CONTEXT_MAX_CHARS}. Full extracted text is still stored in the prenote detail.`
+      : "Whitespace was normalized, but details were not summarized away by the LLM.",
+    material,
   ].filter(Boolean).join("\n");
+}
+
+export function isLosslessPrenoteRuntimeContext(context: string): boolean {
+  return context.includes(LOSSLESS_RUNTIME_MARKER);
 }
 
 export async function processPrenote(input: ProcessPrenoteInput): Promise<ProcessedPrenote> {
@@ -302,73 +289,35 @@ export async function processPrenote(input: ProcessPrenoteInput): Promise<Proces
   if (!fullText) {
     return {
       extractedText: "",
-      processedJson: JSON.stringify({ title: input.title, error: "No readable text extracted" }),
+      processedJson: JSON.stringify({
+        title: input.title,
+        processor: "deterministic-no-llm",
+        error: "No readable text extracted",
+      }),
       runtimeContext: `Prenote: ${input.title}\nNo readable text was extracted. Use only the title as weak context.`,
       model: null,
       contentHash,
     };
   }
 
-  const prepared = truncateForProcessing(fullText);
-  const prompt = `You are preparing a PreNote memory for SayNext, a real-time mobile conversation assistant.
+  const runtimeContext = buildFallbackRuntimeContext(input.title, fullText);
+  const fileNames = input.files.map((file) => file.fileName).filter(Boolean);
 
-Read the material carefully. Clean noisy text, understand the scene, and produce a runtime memory that can be inserted into future prompts.
-
-Requirements:
-- Preserve the important meaning from the material.
-- Be specific and useful for answering questions or adding knowledge supplements.
-- Include key terms, definitions, mechanisms, examples, formulas, requirements, names, dates, rubrics, and likely questions when present.
-- Do not invent facts outside the material.
-- Runtime context should be concise but rich enough for real-time use.
-- If the material was truncated, say that in processed_json.
-
-Return only JSON:
-{
-  "title": "short title",
-  "scene": "classroom | interview | meeting | service | casual | other",
-  "cleaned_outline": ["..."],
-  "key_terms": [{"term":"...","meaning":"...","example":"..."}],
-  "important_points": ["..."],
-  "likely_questions": ["..."],
-  "useful_examples": ["..."],
-  "answer_strategy": "how SayNext should use this prenote",
-  "runtime_context": "direct prompt-ready memory, dense and useful",
-  "was_truncated": ${prepared.wasTruncated}
-}
-
-Title: ${input.title}
-Description: ${input.description ?? ""}
-
-Material:
-${prepared.text}`;
-
-  try {
-    const modelResponse = await callPrenoteTextModel(prompt);
-    const responseText = modelResponse.text;
-    const jsonText = extractJsonObject(responseText);
-    const parsed = jsonText ? JSON.parse(jsonText) : null;
-    const runtimeContext = typeof parsed?.runtime_context === "string"
-      ? parsed.runtime_context
-      : buildFallbackRuntimeContext(input.title, responseText || fullText);
-
-    return {
-      extractedText: fullText,
-      processedJson: jsonText ?? JSON.stringify({ title: input.title, responseText }),
-      runtimeContext,
-      model: modelResponse.model,
+  return {
+    extractedText: fullText,
+    processedJson: JSON.stringify({
+      title: input.title,
+      description: input.description ?? "",
+      processor: "deterministic-no-llm",
+      sourceTextLength: input.sourceText.trim().length,
+      extractedTextLength: fullText.length,
+      fileCount: input.files.length,
+      fileNames,
       contentHash,
-    };
-  } catch (error) {
-    const fallback = buildFallbackRuntimeContext(input.title, fullText);
-    return {
-      extractedText: fullText,
-      processedJson: JSON.stringify({
-        title: input.title,
-        error: error instanceof Error ? error.message : "Unknown prenote processing error",
-      }),
-      runtimeContext: fallback,
-      model: null,
-      contentHash,
-    };
-  }
+      sourceOfTruth: "Full extracted prenote text is stored losslessly. Runtime uses retrieved exact chunks, not an LLM summary.",
+    }),
+    runtimeContext,
+    model: "deterministic:no-llm",
+    contentHash,
+  };
 }

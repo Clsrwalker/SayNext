@@ -33,9 +33,30 @@ export interface Prenote {
   processedJson?: string;
   contentHash?: string;
   error: string;
+  chunkCount: number;
   createdAt: string;
   updatedAt: string;
   files: PrenoteFileSummary[];
+}
+
+export interface PrenoteChunkSummary {
+  id: number;
+  chunkIndex: number;
+  headingPath: string;
+  charStart: number;
+  charEnd: number;
+  tokenEstimate: number;
+  keywords: string[];
+  embeddingModel: string;
+  textPreview: string;
+  textLength: number;
+}
+
+export interface PrenoteReviewCandidateSummary {
+  id: number;
+  sessionId: string;
+  title: string;
+  status: string;
 }
 
 export async function fetchPrenotes(userId: string): Promise<Prenote[]> {
@@ -123,6 +144,48 @@ export async function updatePrenoteMemory(input: {
 
   const data = await response.json();
   return data.prenote;
+}
+
+export async function fetchPrenoteChunks(userId: string, id: number): Promise<PrenoteChunkSummary[]> {
+  const response = await fetch(`${getApiUrl()}/api/prenotes/${id}/chunks?userId=${encodeURIComponent(userId)}`);
+  if (!response.ok) throw new Error(await readError(response, "Failed to fetch prenote chunks"));
+  const data = await response.json();
+  return data.chunks || [];
+}
+
+export async function reindexPrenoteChunks(userId: string, id: number): Promise<{ chunkCount: number }> {
+  const response = await fetch(`${getApiUrl()}/api/prenotes/${id}/reindex`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId }),
+  });
+  if (!response.ok) throw new Error(await readError(response, "Failed to reindex prenote chunks"));
+  const data = await response.json();
+  return { chunkCount: Number(data.chunkCount || 0) };
+}
+
+export async function queuePrenoteKnowledgeReview(input: {
+  userId: string;
+  id: number;
+  title?: string;
+  content?: string;
+  usageRule?: string;
+  keywords?: string[];
+}): Promise<PrenoteReviewCandidateSummary> {
+  const response = await fetch(`${getApiUrl()}/api/prenotes/${input.id}/review-candidate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userId: input.userId,
+      title: input.title,
+      content: input.content,
+      usageRule: input.usageRule,
+      keywords: input.keywords,
+    }),
+  });
+  if (!response.ok) throw new Error(await readError(response, "Failed to send prenote to Memory Review"));
+  const data = await response.json();
+  return data.candidate;
 }
 
 export async function deletePrenote(userId: string, id: number): Promise<void> {
