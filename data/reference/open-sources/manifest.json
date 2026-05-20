@@ -1,0 +1,255 @@
+{
+  "version": 1,
+  "updatedAt": "2026-05-18",
+  "policy": {
+    "purpose": "Open/public transcript references for SayNext evaluation only.",
+    "memoryRule": "Never promote imported third-party transcript content to Xiang personal memory.",
+    "storageRule": "Store only normalized evaluation snippets unless a source explicitly allows raw transcript storage.",
+    "attributionRule": "Keep source id, source URL, license note, and local import timestamp with every generated case."
+  },
+  "sources": [
+    {
+      "id": "sbcsae-ucsb",
+      "name": "Santa Barbara Corpus of Spoken American English",
+      "homepageUrl": "https://www.linguistics.ucsb.edu/research/santa-barbara-corpus-spoken-american-english",
+      "sourceType": "linked_trn_files",
+      "status": "enabled",
+      "license": "Creative Commons Attribution-NoDerivatives 3.0 United States",
+      "licenseUrl": "https://creativecommons.org/licenses/by-nd/3.0/us/",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": true,
+      "canUseForPersonalMemory": false,
+      "allowedUse": [
+        "local evaluation",
+        "third-party transcript leakage tests",
+        "ASR-style rhythm tests",
+        "scene behavior regression"
+      ],
+      "notAllowedUse": [
+        "personal memory import",
+        "training data redistribution without source/license review"
+      ],
+      "fetch": {
+        "kind": "ucsb_sbc_trn",
+        "baseTranscriptUrl": "https://www.linguistics.ucsb.edu/sites/default/files/sitefiles/research/SBC",
+        "maxCasesPerTranscript": 4,
+        "defaultMaxTranscripts": 12
+      },
+      "selection": [
+        {
+          "code": "SBC002",
+          "title": "Lambada",
+          "scene": "Daily Chat",
+          "kind": "casual_conversation",
+          "stressTags": ["multi_speaker", "casual", "topic_drift"]
+        },
+        {
+          "code": "SBC003",
+          "title": "Conceptual Pesticides",
+          "scene": "Daily Chat",
+          "kind": "casual_conversation",
+          "stressTags": ["food_prep", "overlap", "casual"]
+        },
+        {
+          "code": "SBC006",
+          "title": "Cuz",
+          "scene": "Daily Chat",
+          "kind": "lively_conversation",
+          "stressTags": ["lively", "overlap", "slang_like"]
+        },
+        {
+          "code": "SBC008",
+          "title": "Tell the Jury That",
+          "scene": "Meeting / Group Discussion",
+          "kind": "legal_task_discussion",
+          "stressTags": ["task", "clarification", "formal"]
+        },
+        {
+          "code": "SBC009",
+          "title": "Zero Equals Zero",
+          "scene": "Classroom",
+          "kind": "math_help",
+          "stressTags": ["teaching", "learner_confusion", "partial_understanding"]
+        },
+        {
+          "code": "SBC010",
+          "title": "Letter of Concerns",
+          "scene": "Meeting / Group Discussion",
+          "kind": "business_conversation",
+          "stressTags": ["business", "agenda", "decision"]
+        },
+        {
+          "code": "SBC012",
+          "title": "American Democracy is Dying",
+          "scene": "Classroom",
+          "kind": "university_lecture",
+          "stressTags": ["lecture", "student_interaction", "public_topic"]
+        },
+        {
+          "code": "SBC014",
+          "title": "Bank Products",
+          "scene": "Meeting / Group Discussion",
+          "kind": "bank_meeting",
+          "stressTags": ["meeting", "financial_service", "multi_speaker"]
+        },
+        {
+          "code": "SBC016",
+          "title": "Tape Deck",
+          "scene": "Daily Chat",
+          "kind": "sales_encounter",
+          "stressTags": ["service", "clarification", "product_question"]
+        },
+        {
+          "code": "SBC018",
+          "title": "Vet Morning",
+          "scene": "Meeting / Group Discussion",
+          "kind": "workplace_task_discussion",
+          "stressTags": ["workplace", "task", "multi_speaker"]
+        },
+        {
+          "code": "SBC022",
+          "title": "Runway Heading",
+          "scene": "Meeting / Group Discussion",
+          "kind": "training_feedback",
+          "stressTags": ["feedback", "training", "high_precision"]
+        },
+        {
+          "code": "SBC027",
+          "title": "Atoms Hanging Out",
+          "scene": "Classroom",
+          "kind": "science_lecture",
+          "stressTags": ["science", "lecture", "public_demo"]
+        },
+        {
+          "code": "SBC031",
+          "title": "Tastes Very Special",
+          "scene": "Daily Chat",
+          "kind": "restaurant_conversation",
+          "stressTags": ["daily", "service", "family"]
+        },
+        {
+          "code": "SBC034",
+          "title": "What Time is it Now?",
+          "scene": "Daily Chat",
+          "kind": "late_night_conversation",
+          "stressTags": ["daily", "tired", "casual"]
+        }
+      ]
+    },
+    {
+      "id": "micase",
+      "name": "Michigan Corpus of Academic Spoken English",
+      "homepageUrl": "https://varieng.helsinki.fi/CoRD/corpora/MICASE/index.html",
+      "sourceType": "academic_spoken_corpus",
+      "status": "access_check",
+      "license": "University of Michigan corpus terms; review before local import",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": false,
+      "canUseForPersonalMemory": false,
+      "intendedCoverage": ["classroom", "seminar", "lab", "advising"]
+    },
+    {
+      "id": "icsi-meeting",
+      "name": "ICSI Meeting Corpus",
+      "homepageUrl": "https://groups.inf.ed.ac.uk/ami/icsi/",
+      "sourceType": "meeting_corpus",
+      "status": "access_check",
+      "license": "Creative Commons Attribution 4.0 International",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": false,
+      "canUseForPersonalMemory": false,
+      "intendedCoverage": ["meeting", "multi_speaker", "dialog_acts"]
+    },
+    {
+      "id": "classbank-talkbank",
+      "name": "TalkBank ClassBank",
+      "homepageUrl": "https://talkbank.org/class/index.html",
+      "sourceType": "classroom_interaction_corpus",
+      "status": "access_check",
+      "license": "TalkBank terms; review before local import",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": false,
+      "canUseForPersonalMemory": false,
+      "intendedCoverage": ["classroom", "teacher_student", "question_quality"]
+    },
+    {
+      "id": "speak-improve-2025",
+      "name": "Speak & Improve Corpus 2025",
+      "homepageUrl": "https://researchdatasets.cambridge.org/datasets/speak-and-improve-corpus-2025",
+      "sourceType": "l2_spoken_english",
+      "status": "access_check",
+      "license": "Cambridge dataset terms; review before local import",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": false,
+      "canUseForPersonalMemory": false,
+      "intendedCoverage": ["ielts_like", "l2_errors", "disfluency", "asr"]
+    },
+    {
+      "id": "trinity-lancaster",
+      "name": "Trinity Lancaster Corpus",
+      "homepageUrl": "https://cass.lancs.ac.uk/trinity-lancaster-corpus/",
+      "sourceType": "l2_exam_interaction",
+      "status": "access_check",
+      "license": "TLC Hub terms; review before local import",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": false,
+      "canUseForPersonalMemory": false,
+      "intendedCoverage": ["speaking_exam", "examiner_candidate", "long_turn"]
+    },
+    {
+      "id": "talcs",
+      "name": "TALCS Mandarin-English Code-Switching Corpus",
+      "homepageUrl": "https://arxiv.org/abs/2206.13135",
+      "sourceType": "code_switching_asr",
+      "status": "access_check",
+      "license": "Permissive license claimed by paper; verify download terms before local import",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": false,
+      "canUseForPersonalMemory": false,
+      "intendedCoverage": ["chinese_english", "asr", "english_learning"]
+    },
+    {
+      "id": "harper-valley-bank",
+      "name": "HarperValleyBank",
+      "homepageUrl": "https://arxiv.org/abs/2010.13929",
+      "sourceType": "spoken_call_center",
+      "status": "access_check",
+      "license": "Public domain / CC-BY noted by paper; verify repository terms before local import",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": false,
+      "canUseForPersonalMemory": false,
+      "intendedCoverage": ["service", "banking", "role_confusion", "task_dialog"]
+    },
+    {
+      "id": "od3",
+      "name": "OD3 Open Directed Dialogue Dataset",
+      "homepageUrl": "https://www.amazon.science/code-and-datasets/od3-open-directed-dialogue-dataset",
+      "sourceType": "task_dialog_repair",
+      "status": "access_check",
+      "license": "Repository terms; review before local import",
+      "requiresAttribution": true,
+      "canUseForEval": true,
+      "canStoreRawTranscript": false,
+      "canStoreGeneratedCases": false,
+      "canUseForPersonalMemory": false,
+      "intendedCoverage": ["repeat", "rephrase", "failed_utterance", "repair"]
+    }
+  ]
+}

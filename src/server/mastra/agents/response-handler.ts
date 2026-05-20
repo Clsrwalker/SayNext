@@ -10,12 +10,13 @@ import { EventMemoryManager, type EventMemorySnapshot } from '../../memory/event
 import { routeFastScene, type SceneBuiltinKey } from '../../scene/fast-scene-router';
 import { makeTelepromptOpeningLine, shouldStartTeleprompt, TelepromptRuntime, type TelepromptDisplay } from '../../teleprompt/teleprompt-runtime';
 import { OpenAiConversationSession, isOpenAiConversationStateEnabled } from './openai-conversation-state';
+import { normalizeKnownProjectAsrAliases } from '../../text/asr-corrections';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 const SUGGESTION_ECHO_WINDOW_MS = 45 * 1000;
 const SUGGESTION_ECHO_REFRESH_MS = 45 * 1000;
 const SUGGESTION_ECHO_REDRAW_THRESHOLD_MS = 5 * 1000;
-const READBACK_CONTINUATION_SILENCE_MS = Number(process.env.READBACK_CONTINUATION_SILENCE_MS || 1600);
+const READBACK_CONTINUATION_SILENCE_MS = Number(process.env.READBACK_CONTINUATION_SILENCE_MS || 850);
 const READBACK_CONTINUATION_MIN_COVERAGE = Number(process.env.READBACK_CONTINUATION_MIN_COVERAGE || 0.78);
 const READBACK_CONTINUATION_COOLDOWN_MS = Number(process.env.READBACK_CONTINUATION_COOLDOWN_MS || 20_000);
 const RESPONSE_STALE_GRACE_MS = Number(process.env.RESPONSE_STALE_GRACE_MS || 120);
@@ -106,6 +107,11 @@ type LastDisplayedAnswerContext = {
   activeSceneProfilePrompt: string;
   relevantPersonalMemoryContext: string;
   timestamp: number;
+};
+
+type ReadbackContinuationPrefetch = {
+  key: string;
+  promise: Promise<string | null>;
 };
 
 export type SuggestionEchoMatch = {
@@ -381,6 +387,7 @@ export class MergeResponseHandler {
   private lastDisplayedAnswerContext: LastDisplayedAnswerContext | null = null;
   private readbackContinuationTimer: NodeJS.Timeout | null = null;
   private readbackContinuationSeq: number = 0;
+  private readbackContinuationPrefetch: ReadbackContinuationPrefetch | null = null;
   private lastContinuationAt: number = 0;
   private readbackTokenCoverageByDisplay: Map<string, Set<string>> = new Map();
   private autoSceneKey: SceneBuiltinKey = "daily_chat";
@@ -421,6 +428,12 @@ export class MergeResponseHandler {
    * Process a new transcript and update the conversation
    */
   async processTranscript(text: string, timestamp: number, reason: "isFinal" | "timeout" = "isFinal"): Promise<void> {
+    const originalText = text;
+    text = normalizeKnownProjectAsrAliases(text);
+    if (text !== originalText) {
+      this.session.logger.info(`Corrected known ASR alias: "${originalText}" -> "${text}"`);
+    }
+
     if (this.isPausedForReading) {
       this.session.logger.info(`Manual pause active, ignoring transcript: "${text}"`);
       this.onStatus?.({ type: "processing_done", reason: "paused" });
@@ -590,6 +603,19 @@ export class MergeResponseHandler {
 
     // Trim conversation history if it gets too long
     this.trimConversationHistory();
+  }
+
+  handlePartialTranscript(text: string, timestamp: number): boolean {
+    if (this.isPausedForReading || this.teleprompt.isActive()) return false;
+
+    const suggestionEcho = this.getRecentDisplayedSuggestionEcho(text, timestamp);
+    if (!suggestionEcho) return false;
+
+    this.trackReadbackEchoAndMaybeScheduleContinuation(suggestionEcho, text, timestamp, {
+      allowSchedule: false,
+    });
+    this.onStatus?.({ type: "readback_partial_echo" });
+    return true;
   }
 
   private resolveActiveSceneProfilePrompt(latestTranscript: string, timestamp: number, recentTranscripts: string[]): string {
@@ -1221,7 +1247,13 @@ export class MergeResponseHandler {
     return true;
   }
 
-  private trackReadbackEchoAndMaybeScheduleContinuation(echo: DisplayedSuggestionEcho, transcript: string, timestamp: number): void {
+  private trackReadbackEchoAndMaybeScheduleContinuation(
+    echo: DisplayedSuggestionEcho,
+    transcript: string,
+    timestamp: number,
+    options: { allowSchedule?: boolean } = {},
+  ): void {
+    const allowSchedule = options.allowSchedule ?? true;
     const context = this.lastDisplayedAnswerContext;
     if (!context || context.displayText !== echo.displayText) return;
     if (!this.isReadbackContinuationEligible(echo.displayText, context.sourceTranscript)) {
@@ -1232,6 +1264,8 @@ export class MergeResponseHandler {
       this.onStatus?.({ type: "readback_continuation_skipped", reason: "cooldown" });
       return;
     }
+
+    this.ensureReadbackContinuationPrefetch(context);
 
     const sourceTokens = new Set(echoTokens(echo.displayText));
     if (sourceTokens.size < 4) return;
@@ -1276,7 +1310,41 @@ export class MergeResponseHandler {
       return;
     }
 
-    this.scheduleReadbackContinuation(echo.displayText, timestamp);
+    if (allowSchedule) {
+      this.scheduleReadbackContinuation(echo.displayText, timestamp);
+    }
+  }
+
+  private ensureReadbackContinuationPrefetch(context: LastDisplayedAnswerContext): void {
+    const key = this.readbackDisplayKey(context.displayText);
+    if (this.readbackContinuationPrefetch?.key === key) return;
+
+    const promise = generateOptionalContinuation({
+      conversation: context.context,
+      eventMemory: context.eventSnapshot,
+      outputLanguage: this.outputLanguage,
+      activePrenoteContext: context.activePrenoteContext,
+      activeSceneProfilePrompt: context.activeSceneProfilePrompt,
+      relevantPersonalMemoryContext: context.relevantPersonalMemoryContext,
+      displayedAnswer: context.displayText,
+      sourceTranscript: context.sourceTranscript,
+    });
+
+    this.readbackContinuationPrefetch = { key, promise };
+    this.onStatus?.({ type: "readback_continuation_prefetch_started" });
+
+    promise
+      .then((continuation) => {
+        if (this.readbackContinuationPrefetch?.key !== key) return;
+        this.onStatus?.({
+          type: continuation ? "readback_continuation_prefetch_ready" : "readback_continuation_prefetch_declined",
+        });
+      })
+      .catch(() => {
+        if (this.readbackContinuationPrefetch?.key === key) {
+          this.onStatus?.({ type: "readback_continuation_prefetch_failed" });
+        }
+      });
   }
 
   private scheduleReadbackContinuation(displayText: string, timestamp: number): void {
@@ -1304,6 +1372,17 @@ export class MergeResponseHandler {
       this.readbackContinuationTimer = null;
       this.onStatus?.({ type: "readback_continuation_cancelled", reason });
     }
+    if ([
+      "new_transcript",
+      "new_display",
+      "clear_conversation",
+      "runtime_reset",
+      "manual_pause",
+      "manual_resume",
+      "close",
+    ].includes(reason)) {
+      this.readbackContinuationPrefetch = null;
+    }
   }
 
   private async runReadbackContinuation(seq: number, displayText: string, timestamp: number): Promise<void> {
@@ -1322,16 +1401,25 @@ export class MergeResponseHandler {
     }
 
     this.onStatus?.({ type: "readback_continuation_generating" });
-    const continuation = await generateOptionalContinuation({
-      conversation: context.context,
-      eventMemory: context.eventSnapshot,
-      outputLanguage: this.outputLanguage,
-      activePrenoteContext: context.activePrenoteContext,
-      activeSceneProfilePrompt: context.activeSceneProfilePrompt,
-      relevantPersonalMemoryContext: context.relevantPersonalMemoryContext,
-      displayedAnswer: context.displayText,
-      sourceTranscript: context.sourceTranscript,
-    });
+    const key = this.readbackDisplayKey(displayText);
+    const prefetch = this.readbackContinuationPrefetch?.key === key
+      ? this.readbackContinuationPrefetch
+      : null;
+    const continuation = prefetch
+      ? await prefetch.promise
+      : await generateOptionalContinuation({
+        conversation: context.context,
+        eventMemory: context.eventSnapshot,
+        outputLanguage: this.outputLanguage,
+        activePrenoteContext: context.activePrenoteContext,
+        activeSceneProfilePrompt: context.activeSceneProfilePrompt,
+        relevantPersonalMemoryContext: context.relevantPersonalMemoryContext,
+        displayedAnswer: context.displayText,
+        sourceTranscript: context.sourceTranscript,
+      });
+    if (prefetch && this.readbackContinuationPrefetch?.key === key) {
+      this.readbackContinuationPrefetch = null;
+    }
 
     if (seq !== this.readbackContinuationSeq) return;
     if (!continuation) {

@@ -82,6 +82,10 @@ function hasChinese(text: string): boolean {
   return /[\u3400-\u9fff]/.test(text);
 }
 
+function hasUnexpectedNonEnglishScript(text: string): boolean {
+  return /[\u0400-\u04FF]|\?{2,}/.test(text);
+}
+
 function includesAny(text: string, terms: string[] = []): boolean {
   const normalized = text.toLowerCase();
   return terms.some((term) => normalized.includes(term.toLowerCase()));
@@ -229,6 +233,7 @@ function outputFlags(test: StressCase, output: string, memoryRefs: string[] = []
   if (test.expectAny?.length && !includesAny(output, test.expectAny)) flags.push(`missing_expected:${test.expectAny.join("|")}`);
   if (test.rejectAny?.length && includesAny(output, test.rejectAny)) flags.push(`contains_rejected:${test.rejectAny.join("|")}`);
   if (!test.allowChinese && test.language !== "chinese" && hasChinese(output)) flags.push("unexpected_chinese");
+  if (!test.allowChinese && test.language !== "chinese" && hasUnexpectedNonEnglishScript(output)) flags.push("unexpected_non_english_script");
 
   if (test.sourceKind !== "open_dialogue" && /^(and|yeah|yes|right|present|water|thank you|me too|good idea)[.!?\s]*$/i.test(latest)) {
     if (wordCount(output) > 10) flags.push("fragment_overexpanded");
@@ -255,6 +260,16 @@ function outputFlags(test: StressCase, output: string, memoryRefs: string[] = []
   ];
   if (test.shouldNotOvershare !== false && includesAny(output, sensitiveTerms)) {
     flags.push("sensitive_overshare");
+  }
+
+  const unsupportedSpecificTerms = [
+    "playing some guitar",
+    "hot tea",
+    "complex programming assignment",
+    "last semester",
+  ];
+  if (test.shouldBeGrounded !== false && includesAny(output, unsupportedSpecificTerms)) {
+    flags.push("unsupported_specific_detail");
   }
 
   if (test.sourceKind.startsWith("open_") && includesAny(output, [
@@ -335,15 +350,23 @@ function makeSyntheticCases(): StressCase[] {
     interview_self: ["xiang-profile:identity-education"],
     interview_why_cs: ["xiang-update:2026-05:why-computer-science"],
     interview_job: ["xiang-update:2026-05:future-job"],
-    interview_saynext: ["doc:saynext:positioning", "doc:saynext:runtime-flow", "xiang-profile:project-saynext"],
+    interview_saynext: [
+      "xiang-update:2026-05-18:hybrid-search-memory-assistant-origin",
+      "xiang-update:2026-05-18:hybrid-search-memory-assistant-goal-architecture",
+      "redacted-project:ai-context-engine-hybrid-search",
+    ],
     interview_elder: ["doc:elderalbum:aws-architecture-deployment", "xiang-profile:project-elder-album"],
     interview_dalpark: ["doc:dalparkaid:overview-problem", "xiang-profile:project-dal-parking-aid"],
-    interview_joblens: ["doc:joblens:overview-problem", "doc:joblens:workflow-features"],
+    interview_joblens: ["doc:joblens:overview-scope", "doc:joblens:workflow-features"],
     interview_bug: ["xiang-behavioral:saynext-hard-bug-context", "xiang-behavioral:saynext-local-llm-json-latency"],
     interview_conflict: ["xiang-behavioral:team-disagreement-pattern"],
     interview_feedback: ["xiang-behavioral:constructive-feedback-ai-like"],
     interview_failure: ["xiang-behavioral:saynext-prompt-failure"],
-    asr_project_next: ["doc:saynext:positioning", "doc:saynext:interview-story", "xiang-profile:project-saynext"],
+    asr_project_next: [
+      "xiang-update:2026-05-18:hybrid-search-memory-assistant-origin",
+      "xiang-update:2026-05-18:hybrid-search-memory-assistant-goal-architecture",
+      "redacted-project:ai-context-engine-hybrid-search",
+    ],
     asr_cloud_why: ["xiang-update:2026-05:favorite-subjects", "knowledge:cs-interview:aws-well-architected"],
     asr_lambda: ["knowledge:cs-interview:serverless-lambda"],
     asr_supervise: ["knowledge:cs-interview:ml-fundamentals"],

@@ -141,6 +141,8 @@ export class User {
         return;
       }
 
+      this.responseHandler?.handlePartialTranscript(text, Date.now());
+
       if (this.utteranceTimer) {
         clearTimeout(this.utteranceTimer);
       }

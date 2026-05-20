@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import { buildLosslessRuntimeContext, isLosslessPrenoteRuntimeContext } from "../prenotes/prenote-processor";
+import { expandKnownTermAsrAliasesForSearch, normalizeKnownProjectAsrAliases } from "../text/asr-corrections";
 
 export interface ConversationSampleRecord {
   id: number;
@@ -844,8 +845,9 @@ function tokenizeSearchText(text: string): string[] {
 function expandAsrSearchQuery(text: string): string {
   const raw = String(text || "").trim();
   if (!raw) return "";
+  const aliasCorrectedRaw = normalizeKnownProjectAsrAliases(raw);
 
-  const corrected = raw
+  const corrected = aliasCorrectedRaw
     .toLowerCase()
     .replace(/\bexplan\b/g, "explain")
     .replace(/\bprojct\b/g, "project")
@@ -872,7 +874,11 @@ function expandAsrSearchQuery(text: string): string {
     .replace(/\btranscrip\b/g, "transcript");
 
   const expansions = [raw];
+  if (aliasCorrectedRaw !== raw) expansions.push(aliasCorrectedRaw);
   if (corrected !== raw.toLowerCase()) expansions.push(corrected);
+  for (const asrExpansion of expandKnownTermAsrAliasesForSearch(raw)) {
+    if (!expansions.includes(asrExpansion)) expansions.push(asrExpansion);
+  }
 
   if (/周末|星期六|星期天|礼拜六|礼拜天/.test(raw)) {
     expansions.push("weekend free time games");
@@ -2937,8 +2943,34 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
   const category = memory.category.toLowerCase();
   const title = memory.title.toLowerCase();
   const sourceRef = memory.sourceRef.toLowerCase();
+  const programmingLanguageQuestion = includesAny(normalizedQuery, [
+    "programming language", "programming languages", "program langu",
+    "coding language", "coding languages", "technical stack", "tech stack",
+  ]) || (hasAnyToken(tokens, ["programming", "coding"]) && hasAnyToken(tokens, ["language", "languages"]));
+  const cloudProjectQuestion = includesAny(normalizedQuery, [
+    "cloud project", "cloud projects", "cloud experience", "cloud-related project",
+    "cloud related project", "cloud architecture project", "cloud computing project",
+    "aws project", "aws cloud project", "aws experience",
+  ]) || (
+    (hasAnyToken(tokens, ["cloud", "aws"]) || includesAny(normalizedQuery, ["cloud-related", "cloud related"]))
+    && hasAnyToken(tokens, ["project", "projects", "experience", "architecture"])
+  );
+  const explicitSayNextProjectQuestion = includesAny(normalizedQuery, [
+    "saynext", "say next", "hybrid search memory assistant", "hybrid search",
+    "conversation assistant", "live transcript", "live transcripts",
+    "local mode", "travel mode", "vps", "frp", "ollama", "qwen",
+  ]);
+  const namedProjectTechStackQuestion = programmingLanguageQuestion && includesAny(normalizedQuery, [
+    "ai meeting monitor", "meeting monitor", "joblens", "job lens",
+    "elderalbum", "elder album", "dalparkaid", "dal park",
+    "hybrid search memory assistant", "hybrid search", "blood donation",
+  ]);
+  const explicitElderAlbumQuestion = includesAny(normalizedQuery, ["elderalbum", "elder album"])
+    && !includesAny(normalizedQuery, ["joblens", "job lens", "job matching", "resume matching"]);
   const sayNextPublicProjectIntent = includesAny(normalizedQuery, [
     "saynext", "say next", "hybrid search memory assistant", "hybrid search",
+    "ai context engine", "hybrid retrieval", "retrieval design", "memory gating",
+    "input token reduction", "token reduction", "token-efficient context",
     "what project you did for next", "project you did for next", "project did for next",
     "what project did you do for next", "project you made for next", "conversation assistant",
     "real-time ai assistant", "realtime ai assistant", "real time ai assistant",
@@ -3326,6 +3358,37 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     boost += 0.45;
   }
 
+  if (cloudProjectQuestion) {
+    if (sourceRef.includes("cloud-projects:joblens-elderalbum")) boost += 0.8;
+    if (sourceRef.startsWith("doc:joblens")) {
+      boost += 0.38;
+      if (sourceRef.includes("architecture")) boost += 0.16;
+      if (sourceRef.includes("overview")) boost += 0.08;
+    }
+    if (sourceRef.startsWith("doc:elderalbum") || sourceRef.includes("project-elder-album")) {
+      boost += 0.22;
+      if (sourceRef.includes("aws-architecture")) boost += 0.1;
+    }
+    if ((sourceRef.startsWith("doc:saynext")
+      || sourceRef.includes("project-saynext")
+      || sourceRef.includes("hybrid-search-memory-assistant")
+      || sourceRef.startsWith("redacted-project:"))
+      && !explicitSayNextProjectQuestion) {
+      boost -= 0.6;
+    }
+  }
+
+  if (explicitElderAlbumQuestion) {
+    if (sourceRef.startsWith("doc:elderalbum") || sourceRef.includes("project-elder-album")) boost += 0.46;
+    if (sourceRef.startsWith("doc:joblens")) boost -= 0.3;
+  }
+
+  if (programmingLanguageQuestion && !namedProjectTechStackQuestion) {
+    if (sourceRef.includes("programming-language-framework-profile")) boost += 0.55;
+    if (category === "career_profile" && includesAny(title, ["programming", "technical", "language", "framework"])) boost += 0.2;
+    if (category === "language_learning") boost -= 0.35;
+  }
+
   if (sourceRef.startsWith("xiang-update:2026-05-18:")) {
     if (sourceRef.includes("hybrid-search-memory-assistant")
       && includesAny(normalizedQuery, [
@@ -3373,9 +3436,12 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
       "c#", "database-backed", "backend logic", "form submission", "login session",
     ])) boost += 0.34;
     if (sourceRef.includes("ai-meeting-monitor") && includesAny(normalizedQuery, [
-      "ai meeting monitor", "meeting monitor", "meeting summary", "action item",
-      "transcript navigation", "react", "typescript", "vite", "integration",
-      "stabilized", "stabilised", "a grade", "api coordination",
+      "ai meeting monitor", "meeting monitor", "ai meeting analysis",
+      "meeting summary", "meeting report", "action item", "action items",
+      "transcript navigation", "transcript timeline", "meeting transcript",
+      "meeting recording", "recording bot", "discord bot", "faster whisper",
+      "gemini", "flask postgresql", "data processing service",
+      "demo stabilization", "demo stabilisation", "a grade", "api coordination",
     ])) boost += 0.34;
     if (sourceRef.includes("solitude-communication-preferences") && includesAny(normalizedQuery, [
       "prefer being alone", "prefer solitude", "solitude", "communication style",
@@ -3426,6 +3492,8 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
       "more and less experienced", "more experienced", "less experienced",
       "which technical areas", "skill confidence", "experienced in",
     ])) boost += 0.28;
+    if (programmingLanguageQuestion && !namedProjectTechStackQuestion && sourceRef.includes("programming-language-framework-profile")) boost += 0.5;
+    if (programmingLanguageQuestion && !namedProjectTechStackQuestion && sourceRef.includes("career-target-workplace-preferences")) boost += 0.16;
     if (sourceRef.includes("motivation-energy-work-rhythm") && includesAny(normalizedQuery, [
       "motivation pattern", "work rhythm", "interest-triggered", "interest triggered",
       "stable grinder", "long-term grinder", "cool", "futuristic", "technically interesting",
@@ -3797,6 +3865,7 @@ function personalMemoryIntentBoost(query: string, memory: Pick<PersonalMemoryRec
     "语言", "英语", "德语", "日语",
   ])) {
     boost += 0.2;
+    if (programmingLanguageQuestion) boost -= 0.28;
   }
 
   if (sourceRef.includes("xiang-update:2026-05-18:soccer-history") && includesAny(normalizedQuery, [
@@ -5125,12 +5194,19 @@ class ConversationLogger {
           "project you made", "project you built", "project for next",
           "parking project", "react native project parking", "react native experience",
           "my aws project", "my aws cloud project", "aws cloud project", "cloud project",
+          "cloud experience", "cloud-related project", "cloud related project",
+          "cloud architecture project", "cloud computing project", "aws experience",
           "project album", "job matching app", "connecting aws services",
+          "meeting recording", "meeting transcript", "meeting analysis pipeline",
+          "transcript pipeline", "recording bot", "discord bot",
+          "meeting dashboard", "meeting report", "ai meeting analysis",
           "what project did i use", "what project did you use",
           "conversation assistant", "conversation support", "real time conversation",
           "realtime conversation", "real-time conversation", "live transcript", "live transcripts",
           "hybrid search memory assistant", "hybrid search", "real-time ai assistant",
-          "realtime ai assistant", "blood donation management system", "ai meeting monitor",
+          "realtime ai assistant", "ai context engine", "hybrid retrieval",
+          "retrieval design", "memory gating", "input token reduction", "token reduction",
+          "token-efficient context", "blood donation management system", "ai meeting monitor",
         ]) || (
           explicitProjectQuestion && includesAny(normalizedQuery, [
             "aws", "cloud", "serverless", "lambda", "dynamodb", "s3", "api gateway",
@@ -5138,6 +5214,19 @@ class ConversationLogger {
             "fargate", "terraform", "event-driven",
           ])
         ));
+        const cloudProjectQuestion = includesAny(normalizedQuery, [
+          "cloud project", "cloud projects", "cloud experience", "cloud-related project",
+          "cloud related project", "cloud architecture project", "cloud computing project",
+          "aws project", "aws cloud project", "aws experience",
+        ]) || (
+          (hasAnyToken(queryTokens, ["cloud", "aws"]) || includesAny(normalizedQuery, ["cloud-related", "cloud related"]))
+          && hasAnyToken(queryTokens, ["project", "projects", "experience", "architecture"])
+        );
+        const explicitSayNextProjectQuestion = includesAny(normalizedQuery, [
+          "saynext", "say next", "hybrid search memory assistant", "hybrid search",
+          "conversation assistant", "live transcript", "live transcripts",
+          "local mode", "travel mode", "vps", "frp", "ollama", "qwen",
+        ]);
         const shortPersonalCoursePreferenceQuestion = queryWordCount <= 14 && includesAny(normalizedQuery, [
           "cloud architecture why", "deep learning like why", "why you like deep learning",
         ]);
@@ -5306,10 +5395,21 @@ class ConversationLogger {
           return acc;
         }
 
+        if (cloudProjectQuestion
+          && !explicitSayNextProjectQuestion
+          && (sourceRef.startsWith("doc:saynext")
+            || sourceRef.includes("project-saynext")
+            || sourceRef.includes("hybrid-search-memory-assistant")
+            || sourceRef.startsWith("redacted-project:"))) {
+          return acc;
+        }
+
         if (sourceRef.startsWith("doc:joblens") && !includesAny(normalizedQuery, [
           "joblens", "job lens", "job matching", "job aggregation", "resume upload",
           "resume parsing", "match analysis", "resume with a job posting", "job posting",
           "application tracking", "aws", "cloud", "cloud architecture", "aws architecture",
+          "cloud experience", "cloud-related", "cloud related", "cloud computing project",
+          "aws experience",
           "serverless", "lambda", "api gateway", "dynamodb", "s3", "eventbridge", "sqs",
           "fargate", "terraform", "event-driven",
         ])) {
@@ -5335,6 +5435,12 @@ class ConversationLogger {
           return acc;
         }
 
+        if (sourceRef.startsWith("doc:resume") && includesAny(normalizedQuery, [
+          "parking aid", "parking sensor", "parking sensors", "car camera",
+        ]) && !projectQuestion) {
+          return acc;
+        }
+
         if ((sourceRef.startsWith("doc:") || memory.category === "technical_projects") && includesAny(normalizedQuery, [
           "privacy-sensitive place", "personal data should not", "not be overshared",
           "should not be overshared",
@@ -5342,18 +5448,39 @@ class ConversationLogger {
           return acc;
         }
 
+        if ((sourceRef.includes("project-dal-parking-aid") || sourceRef.startsWith("doc:dalparkaid"))
+          && !includesAny(normalizedQuery, [
+            "dalparkaid", "dal park", "react native", "crowd report", "crowd reports",
+            "crowdsourced", "30 meter", "proximity", "weather and class", "class timetable",
+            "parking app",
+          ])
+          && !(projectQuestion && includesAny(normalizedQuery, ["parking", "mobile", "campus", "prediction"]))) {
+          return acc;
+        }
+
         if (sourceRef.startsWith("doc:dalparkaid") && !includesAny(normalizedQuery, [
-          "dalparkaid", "dal park", "parking", "react native", "crowd report", "crowd reports",
+          "dalparkaid", "dal park", "react native", "crowd report", "crowd reports",
           "crowdsourced", "30 meter", "proximity", "weather and class", "class timetable",
           "parking app",
-        ]) && !(projectQuestion && includesAny(normalizedQuery, ["mobile", "campus", "prediction"]))) {
+        ]) && !(projectQuestion && includesAny(normalizedQuery, ["parking", "mobile", "campus", "prediction"]))) {
+          return acc;
+        }
+
+        if ((sourceRef.includes("project-elder-album") || sourceRef.includes("cloud-projects:joblens-elderalbum") || sourceRef.startsWith("doc:elderalbum"))
+          && !includesAny(normalizedQuery, [
+            "elderalbum", "elder album", "album sharing app", "photo album app", "photo sharing app", "serverless", "aws",
+            "cloud", "cloud experience", "cloud project", "cloud-related", "cloud related",
+            "lambda", "dynamodb", "s3", "api gateway", "share token", "cloudfront", "cognito",
+          ])
+          && !(projectQuestion && includesAny(normalizedQuery, ["album", "photo", "photos", "aws", "cloud", "serverless"]))) {
           return acc;
         }
 
         if (sourceRef.startsWith("doc:elderalbum") && !includesAny(normalizedQuery, [
-          "elderalbum", "elder album", "album", "photo", "photos", "serverless", "aws",
+          "elderalbum", "elder album", "album sharing app", "photo album app", "photo sharing app", "serverless", "aws",
+          "cloud", "cloud experience", "cloud project", "cloud-related", "cloud related",
           "lambda", "dynamodb", "s3", "api gateway", "share token", "cloudfront", "cognito",
-        ]) && !(projectQuestion && includesAny(normalizedQuery, ["aws", "cloud", "serverless"]))) {
+        ]) && !(projectQuestion && includesAny(normalizedQuery, ["album", "photo", "photos", "aws", "cloud", "serverless"]))) {
           return acc;
         }
 

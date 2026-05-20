@@ -1,4 +1,5 @@
 import { findBestMatch } from "string-similarity";
+import { getBestKnownTermAsrCandidate, normalizeKnownProjectAsrAliases } from "../text/asr-corrections";
 
 const MAX_CHUNK_CHARS = 240;
 const MAX_SHORT_MERGE_CHARS = 280;
@@ -681,7 +682,11 @@ export class TelepromptRuntime {
 }
 
 export function makeTelepromptOpeningLine(text: string): string {
-  const normalized = normalize(text);
+  const normalized = normalize(normalizeKnownProjectAsrAliases(text));
+  const knownTermCandidate = getBestKnownTermAsrCandidate(text);
+  const inferredKnownTerm = knownTermCandidate && knownTermCandidate.confidence >= 0.82
+    ? knownTermCandidate.canonical
+    : "";
 
   if (/\b(lambda|lamba|lamda|serverless|server less|cold start|cold starts|database index|data base in dex|data base index|supervised learning|supervise learning|superwise learning|regularization|backpropagation|cloud architecture|multi az|multi-az|dynamodb|api gateway|s3|vpc|terraform|docker|container|kubernetes)\b/.test(normalized)) {
     if (/\b(lambda|lamba|lamda|cold start|cold starts|cold stared|cold starter)\b/.test(normalized)) {
@@ -695,6 +700,26 @@ export function makeTelepromptOpeningLine(text: string): string {
   }
 
   if (/\b(saynext|say next)\b/.test(normalized)) {
+    return "Yeah, I can talk about Hybrid Search Memory Assistant. It's my real-time AI conversation project.";
+  }
+
+  if (inferredKnownTerm === "JobLens AI" || /\b(joblens|job lens)\b/.test(normalized)) {
+    return "Yeah, I can explain JobLens AI. It's my cloud-based job platform project.";
+  }
+
+  if (inferredKnownTerm === "ElderAlbum" || /\b(elderalbum|elder album)\b/.test(normalized)) {
+    return "Yeah, I can explain ElderAlbum. It's my AWS serverless photo album project.";
+  }
+
+  if (inferredKnownTerm === "AI Meeting Monitor" || /\bai meeting monitor\b/.test(normalized)) {
+    return "Yeah, I can explain AI Meeting Monitor. It's my meeting transcript and analysis project.";
+  }
+
+  if (inferredKnownTerm === "DalParkAid" || /\b(dalparkaid|dal parking aid|dal park aid)\b/.test(normalized)) {
+    return "Yeah, I can explain DalParkAid. It's my React Native campus parking project.";
+  }
+
+  if (inferredKnownTerm === "Hybrid Search Memory Assistant") {
     return "Yeah, I can talk about Hybrid Search Memory Assistant. It's my real-time AI conversation project.";
   }
 

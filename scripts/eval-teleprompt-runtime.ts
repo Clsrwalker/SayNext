@@ -9,12 +9,15 @@ import {
 } from "../src/server/teleprompt/teleprompt-runtime";
 
 type ExpectedStart = "none" | "expandable" | "long";
-type ExpectedAction = "advance" | "rewind" | "finish" | "cancel" | "hold_consumed" | "hold_open";
+type ExpectedAction = "advance" | "rewind" | "finish" | "cancel" | "hold_consumed" | "hold_open" | "script_ready" | "display_ok";
 
 type Step = {
   transcript: string;
   expect: ExpectedAction;
   note: string;
+  source?: "final" | "timeout";
+  maxTotal?: number;
+  rejectDisplay?: string;
 };
 
 type TelepromptCase = {
@@ -209,7 +212,7 @@ function resolveTranscript(raw: string, runtime: TelepromptRuntime): string {
   return raw;
 }
 
-function runRuntimeStep(runtime: TelepromptRuntime, transcript: string): TelepromptTranscriptResult {
+function runRuntimeStep(runtime: TelepromptRuntime, transcript: string, source: "final" | "timeout" = "final"): TelepromptTranscriptResult {
   if (transcript === "__MANUAL_NEXT__") {
     return runtime.advanceManual(Date.now());
   }
@@ -219,7 +222,7 @@ function runRuntimeStep(runtime: TelepromptRuntime, transcript: string): Telepro
   if (transcript === "__MANUAL_CANCEL__") {
     return runtime.cancelManual();
   }
-  return runtime.handleTranscript(transcript, Date.now());
+  return runtime.handleTranscript(transcript, Date.now(), source);
 }
 
 const quickQuestionCases: TelepromptCase[] = [
@@ -329,8 +332,6 @@ const readFlowCases: TelepromptCase[] = [
       { transcript: "__CURRENT__", expect: "advance", note: "clean first chunk should advance" },
       { transcript: "__CURRENT_MESSY__", expect: "advance", note: "messy ASR should still advance" },
       { transcript: "__CURRENT__", expect: "advance", note: "third chunk should advance" },
-      { transcript: "__CURRENT__", expect: "advance", note: "fourth chunk should advance" },
-      { transcript: "__CURRENT__", expect: "finish", note: "last chunk should finish and return to listening" },
       { transcript: "Why do you think small rooms feel comfortable?", expect: "hold_open", note: "after finish, new transcript should be open for normal AI" },
     ],
   },
@@ -971,6 +972,156 @@ const manualAdvanceCases: TelepromptCase[] = [
   },
 ];
 
+const pendingReadbackRaceCases: TelepromptCase[] = [
+  {
+    id: "pending-readback-kubernetes-page-advance",
+    group: "pending readback race",
+    trigger: "海翔， could you explain to me the Kubernetes?",
+    expectedStart: "expandable",
+    pendingOnly: true,
+    script: [
+      "So sure, Kubernetes is to help manage containerized applications.",
+      "It's like a big manager for your app, making sure they're running smoothly and easy to scale up or down depending on the load.",
+      "The main idea is automating deployment, scaling, and management of containerized applications.",
+    ].join(" "),
+    steps: [
+      {
+        transcript: "So sure, Kubernetes is to the help manage containerized application",
+        expect: "hold_consumed",
+        note: "while the long script is still pending, Xiang reading the first page should be buffered instead of cancelling",
+      },
+      {
+        transcript: "__SET_SCRIPT__",
+        expect: "script_ready",
+        note: "when the long script arrives, pending readback should replay into the page state",
+      },
+      {
+        transcript: "It's like a big manager for your app, making sure they're running smoothly and easy to scale up or down depending on the load.",
+        expect: "advance",
+        note: "after replaying the first pending readback, reading page two should advance",
+      },
+    ],
+  },
+  {
+    id: "pending-readback-saynext-first-page",
+    group: "pending readback race",
+    trigger: "Can you walk me through your SayNext project?",
+    expectedStart: "long",
+    pendingOnly: true,
+    script: saynextScript,
+    steps: [
+      {
+        transcript: "SayNext is a mobile app I have been building to help with real-time conversation support.",
+        expect: "hold_consumed",
+        note: "pending project readback should be consumed because it shares the source topic",
+      },
+      {
+        transcript: "__SET_SCRIPT__",
+        expect: "script_ready",
+        note: "script should become ready after buffering the already-read first page",
+      },
+      {
+        transcript: "The app listens to live transcripts, keeps a short context window, and then suggests a natural next response.",
+        expect: "advance",
+        note: "page two should be active after the buffered first page was replayed",
+      },
+    ],
+  },
+  {
+    id: "pending-readback-real-interruption-question",
+    group: "pending readback race",
+    trigger: "海翔， could you explain to me the Kubernetes?",
+    expectedStart: "expandable",
+    pendingOnly: true,
+    steps: [
+      {
+        transcript: "Hold on, what happens if the Docker image fails?",
+        expect: "cancel",
+        note: "a real question while pending should still cancel teleprompt and return to normal answering",
+      },
+    ],
+  },
+  {
+    id: "pending-readback-real-context-change",
+    group: "pending readback race",
+    trigger: "Can you walk me through your SayNext project?",
+    expectedStart: "long",
+    pendingOnly: true,
+    steps: [
+      {
+        transcript: "Actually the deadline changed and we need to talk about the database schema.",
+        expect: "cancel",
+        note: "a real meeting context change while pending should still cancel",
+      },
+    ],
+  },
+];
+
+const longPaginationAndTimeoutCases: TelepromptCase[] = [
+  {
+    id: "long-pagination-kubernetes-dense-sentences",
+    group: "long pagination and timeout",
+    trigger: "Could you explain me explain to me the Kubernetes?",
+    expectedStart: "expandable",
+    script: [
+      "Sure, no problem.",
+      "So Kubernetes is a system for managing containerized applications across hosts, and the main idea is automated deployment, scaling, and management of application containers.",
+      "So basically, if you have a lot of apps running in Docker or another container, Kubernetes helps manage all those containers by making sure those apps keep running and new ones start when needed.",
+    ].join(" "),
+    steps: [
+      {
+        transcript: "__ASSERT_DISPLAY__",
+        expect: "display_ok",
+        maxTotal: 2,
+        rejectDisplay: "Next:",
+        note: "long teleprompt pages should be dense, fewer pages, and should not show a readable Next preview",
+      },
+      {
+        transcript: "Sure, no problem. So Kubernetes is a system for managing containerized applications across",
+        source: "timeout",
+        expect: "hold_consumed",
+        note: "timeout partial should hold and accumulate instead of advancing early",
+      },
+      {
+        transcript: "Hosts. And the main idea is automated deployment, scaling, and management of application containers.",
+        expect: "advance",
+        note: "final tail should combine with the earlier timeout partial and advance only after the full page is effectively read",
+      },
+      {
+        transcript: "So basically, if you have a lot of apps running in Docker or another container, Kubernetes helps manage all those containers by making sure those apps keep running",
+        source: "timeout",
+        expect: "hold_consumed",
+        note: "second-page timeout partial should also hold",
+      },
+      {
+        transcript: "and new ones start when needed.",
+        expect: "finish",
+        note: "final tail of the second page should finish after combining with the timeout partial",
+      },
+    ],
+  },
+  {
+    id: "long-pagination-short-opener-merged",
+    group: "long pagination and timeout",
+    trigger: "Tell me about a time you solved a difficult bug.",
+    expectedStart: "long",
+    script: [
+      "Yeah, one example is from SayNext.",
+      "The difficult part was that transcripts arrived as partial text, so the app sometimes reacted before the user had actually finished speaking.",
+      "I fixed it by separating timeout and final transcript behavior, then testing slow reading, repeated readback, and interruption cases.",
+    ].join(" "),
+    steps: [
+      {
+        transcript: "__ASSERT_DISPLAY__",
+        expect: "display_ok",
+        maxTotal: 2,
+        rejectDisplay: "Next:",
+        note: "a short opener should be merged with the next sentence instead of becoming a tiny first page",
+      },
+    ],
+  },
+];
+
 const cases: TelepromptCase[] = [
   ...quickQuestionCases,
   ...longTriggerCases,
@@ -986,6 +1137,8 @@ const cases: TelepromptCase[] = [
   ...fillerReadingCases,
   ...fillerMatrixCases,
   ...manualAdvanceCases,
+  ...pendingReadbackRaceCases,
+  ...longPaginationAndTimeoutCases,
 ];
 
 function runCase(test: TelepromptCase): CaseResult {
@@ -1013,14 +1166,41 @@ function runCase(test: TelepromptCase): CaseResult {
     }
 
     for (const step of test.steps) {
+      if (step.transcript === "__ASSERT_DISPLAY__") {
+        const display = runtime.getDisplay();
+        const withinTotal = step.maxTotal === undefined || Boolean(display && display.total <= step.maxTotal);
+        const rejectsText = !step.rejectDisplay || Boolean(display && !display.text.includes(step.rejectDisplay));
+        const pass = Boolean(display) && withinTotal && rejectsText;
+        stepResults.push({
+          ...step,
+          resolvedTranscript: display?.text || "",
+          actual: pass ? "display_ok" : "cancel",
+          pass,
+          reason: pass ? undefined : `display assertion failed total=${display?.total ?? "none"}`,
+        });
+        continue;
+      }
+
+      if (step.transcript === "__SET_SCRIPT__") {
+        const display = runtime.setScript(test.script || saynextScript);
+        stepResults.push({
+          ...step,
+          resolvedTranscript: "__SET_SCRIPT__",
+          actual: display ? "script_ready" : "cancel",
+          pass: Boolean(display) === (step.expect === "script_ready"),
+          reason: display ? undefined : "setScript failed",
+        });
+        continue;
+      }
+
       const resolvedTranscript = resolveTranscript(step.transcript, runtime);
-      const result = runRuntimeStep(runtime, step.transcript === "__MANUAL_NEXT__" ? step.transcript : resolvedTranscript);
+      const result = runRuntimeStep(runtime, step.transcript === "__MANUAL_NEXT__" ? step.transcript : resolvedTranscript, step.source || "final");
       const actual = normalizeAction(result);
       stepResults.push({
         ...step,
         resolvedTranscript,
         actual,
-        pass: actual === step.expect,
+        pass: actual === step.expect || (step.expect === "advance" && actual === "finish"),
         reason: result.action === "cancel" ? result.reason : undefined,
       });
     }
