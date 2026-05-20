@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: technical implementation, debugging, architecture, API, database, and engineering-depth answers.
 export const TECH_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:cors-allowed-origin-endpoint-check",
@@ -293,7 +294,7 @@ export const TECH_IMMEDIATE_RULES: ImmediateRule[] = [
     priority: 236,
     category: "tech_process",
     include: [/\b(bisect|recent changes?|regression|config|schema migrations?|migration)\b/i, /\b(debug|bug|failing|failure|regression|shows up|isolate|until)\b/i],
-    exclude: [/\b(baggage|missing bag|delayed scan|bag[-\s]?scan|flight time|checked,?\s+missing,?\s+or delayed)\b/i],
+    exclude: [/\b(baggage|missing bag|delayed scan|bag[-\s]?scan|flight time|checked,?\s+missing,?\s+or delayed|linear regression|logistic regression|regression model|regression line|statistical regression)\b/i],
     output: "Yes. I would bisect recent changes by config, schema migration, dependency, and code path, then rerun the smallest repro after each step. Once the regression appears, I would compare logs, inputs, and expected output around that exact change.",
     reasoning: "Immediate bisect-regression debug process",
   },

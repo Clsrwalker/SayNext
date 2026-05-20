@@ -50,9 +50,10 @@ import {
   generateTelepromptScript,
 } from "../../saynext/teleprompt-runtime";
 import {
+  formatImmediateRouteHints,
   getContextAwareProjectImmediateResponse,
   getFallbackResponse,
-  getImmediateResponse,
+  getImmediateDecision,
   getPrenoteExactAnswerImmediateResponse,
   getUnsupportedPremiseImmediateResponse,
 } from "../../saynext/immediate-response";
@@ -116,18 +117,30 @@ export async function processConversation(
     buildGeneralAsrPromptHint(rawLatestTranscript),
   ].filter(Boolean).join("\n");
   const promptMode = detectPromptMode(latestTranscript, eventMemory);
-
-  const immediateResponse = getImmediateResponse(latestTranscript, currentTimestamp, outputLanguage);
-  if (immediateResponse) {
-    return withProcessTrace(immediateResponse, latestTranscript, "immediate_rule", promptMode);
-  }
-
-  const processHint = buildProcessHint(latestTranscript, promptMode);
-  const latestLooksLikeQuestion = looksLikeQuestion(latestTranscript);
   const latestTranscriptIndex = findLatestTranscriptIndex(conversation);
   const compactConversation = conversation
     .filter((_, index) => index !== latestTranscriptIndex)
     .slice(-4);
+  const previousTranscriptTexts = compactConversation
+    .filter((item) => item.type === "transcript")
+    .map((item) => item.text);
+  const hasRecentAgentOutput = compactConversation.some((item) => item.type === "insight" || item.type === "silent" || item.type === "route");
+
+  const immediateDecision = getImmediateDecision(latestTranscript, currentTimestamp, outputLanguage, {
+    previousTranscriptTexts,
+    hasPriorTranscript: previousTranscriptTexts.length > 0,
+    hasRecentAgentOutput,
+  });
+  const immediateResponse = immediateDecision.response;
+  if (immediateResponse) {
+    return withProcessTrace(immediateResponse, latestTranscript, "immediate_rule", promptMode);
+  }
+  const immediateRouteHints = immediateDecision.routeHints;
+  const formattedImmediateRouteHints = formatImmediateRouteHints(immediateRouteHints);
+  const immediateHintRuleIds = immediateRouteHints.map((hint) => `hint:${hint.id}`);
+
+  const processHint = buildProcessHint(latestTranscript, promptMode);
+  const latestLooksLikeQuestion = looksLikeQuestion(latestTranscript);
   const formattedHistoryLines: string[] = [];
   for (const item of compactConversation) {
     switch (item.type) {
@@ -238,6 +251,11 @@ Latest transcript looks like a direct question: ${latestLooksLikeQuestion ? "yes
 --- PROCESS HINT ---
 ${processHint}
 --- END PROCESS HINT ---
+${formattedImmediateRouteHints ? `
+--- ROUTE/GUARD HINTS ---
+${formattedImmediateRouteHints}
+--- END ROUTE/GUARD HINTS ---
+` : ""}
 
 --- LATEST TRANSCRIPT ---
 Transcript: "${latestTranscript}"
@@ -380,6 +398,9 @@ OpenAI conversation state may contain previous clean transcript turns from this 
                 reasoning,
                 source: "model_generation",
                 promptMode,
+                rulesFired: immediateHintRuleIds.length
+                  ? [...immediateHintRuleIds, "model-ollama-generation"]
+                  : undefined,
                 ruleId: "model-ollama-generation",
               }),
             }),
@@ -409,6 +430,9 @@ OpenAI conversation state may contain previous clean transcript turns from this 
               reasoning,
               source: "model_generation",
               promptMode,
+              rulesFired: immediateHintRuleIds.length
+                ? [...immediateHintRuleIds, "model-openai-generation"]
+                : undefined,
               ruleId: "model-openai-generation",
             }),
           }),

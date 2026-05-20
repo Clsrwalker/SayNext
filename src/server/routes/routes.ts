@@ -27,6 +27,7 @@ import {
 import { getTranscriptExport, listTranscriptExports, summarizeTranscriptExport } from "../api/transcript-exports";
 import { createSceneProfile, deleteSceneProfile, getSceneProfile, listSceneProfiles, updateSceneProfile } from "../api/scene-profiles";
 import { createPersonalMemory, deletePersonalMemory, listPersonalMemories, searchPersonalMemories, updatePersonalMemory } from "../api/personal-memories";
+import { replaySayNextApi } from "../api/debug-saynext-replay";
 import {
   extractSessionMemoryCandidatesApi,
   deleteSessionMemoryCandidate,
@@ -97,3 +98,6 @@ api.patch("/session-memory-candidates/:id", updateSessionMemoryCandidate);
 api.post("/session-memory-candidates/:id/promote", promoteSessionMemoryCandidate);
 api.post("/session-memory-candidates/:id/reject", rejectSessionMemoryCandidate);
 api.delete("/session-memory-candidates/:id", deleteSessionMemoryCandidate);
+
+// Local replay/debug endpoint. The handler returns 404 unless explicitly enabled.
+api.post("/debug/saynext-replay", replaySayNextApi);

@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: localized Chinese/English immediate answers and language-specific presentation choices.
 function chineseOrEnglish(isChinese: boolean, chinese: string, english: string): string {
   return isChinese ? chinese : english;
 }

@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: life-admin service exchanges such as appointments, receipts, transport, customer support, and practical logistics.
 export const SERVICE_LIFE_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:meeting-privacy-blocker",
@@ -157,5 +158,72 @@ export const SERVICE_LIFE_IMMEDIATE_RULES: ImmediateRule[] = [
     output: "I would check the appointment or room confirmation directly first. I do not want to guess a room number.",
     reasoning: "Immediate appointment room anti-guess response",
     confidence: 0.88,
+  },
+  {
+    id: "immediate:non-cs-role-no-fake-example",
+    priority: 372,
+    category: "career_pitch",
+    include: [
+      /\b(real mistake|example|reschedule|caught late|last minute)\b/i,
+      /\b(restaurant|order|handoff|scheduling|schedule|admin|office|rush|shift)\b/i,
+    ],
+    output: "I don't have a direct job-specific story for that role, so I wouldn't make one up. The transferable example is that when something changes late, I stop, confirm the new priority, update the people affected, and add one final check before handing it off.",
+    reasoning: "Immediate no-fake non-CS role example answer",
+    confidence: 0.88,
+  },
+  {
+    id: "immediate:student-availability-transport",
+    priority: 370,
+    category: "service_admin",
+    include: [
+      /\b(hours?|what time|time blocks?|available|availability|after classes|after class|get here|how far|start time|start work|start the shift|start shifts?|can you start)\b/i,
+      /\b(work|shift|class|student|school|part[- ]?time|get here|transportation|commute|start time|start work|start the shift|start shifts?|can you start)\b/i,
+    ],
+    exclude: [/\b(debug|uncertainty|unreliable|reject|side effects|younger self|customers? argue|trust is built|class discussion|breakfast|dizzy|nauseous|nausea|skip breakfast|access pattern|deployment|monitoring|cloud|joblens|job lens|dynamodb|database|api|cold[- ]?start|serverless|lambda|logs?|bugs?|bus or walking|walking feels|feels more comfortable|day[- ]to[- ]day)\b/i],
+    output: "I can work around my school schedule, mostly after classes and on some weekends. For transportation, I can use the bus or drive depending on the location. I would confirm the exact hours from my class schedule instead of guessing.",
+    reasoning: "Immediate student availability and transport answer",
+    confidence: 0.88,
+  },
+  {
+    id: "immediate:angry-customer-wording",
+    priority: 368,
+    category: "service_admin",
+    include: [/\bangry customers?\b/i, /\b(calm|tone|steady|defensive|wording|handling|handle)\b/i],
+    output: "Yeah, the wording should stay calm and specific. I would acknowledge the issue, avoid sounding defensive, check the record, and explain the next step I can actually take.",
+    reasoning: "Immediate angry-customer wording response",
+    confidence: 0.88,
+  },
+  {
+    id: "immediate:public-transport-uncertainty-debug",
+    priority: 366,
+    category: "service_admin",
+    include: [
+      /\b(public transport|public transportation|bus|walking)\b/i,
+      /\b(debug|uncertainty|unreliable|delays?|data)\b/i,
+    ],
+    output: "I would treat it like a system issue: separate delay data, timetable data, and real-world observations, then check which source changed first. If data is unreliable, use a backup route and mark confidence lower.",
+    reasoning: "Immediate public transport uncertainty debug response",
+    confidence: 0.88,
+  },
+  {
+    id: "immediate:public-transport-schedule",
+    priority: 364,
+    category: "service_admin",
+    include: [
+      /\b(public transport|public transportation|bus|walking)\b/i,
+      /\b(swimming schedule|daily schedule|routine|affect|coach)\b/i,
+    ],
+    output: "Public transportation affects the schedule mainly through uncertainty. If I need to swim or get somewhere on time, I would plan a buffer or choose walking/driving when the bus timing is unreliable.",
+    reasoning: "Immediate public transport schedule response",
+    confidence: 0.86,
+  },
+  {
+    id: "immediate:cautious-return-time",
+    priority: 362,
+    category: "service_admin",
+    include: [/\bwhen are you coming back\b/i],
+    output: "I'm not sure yet; probably later. I can let you know when I know.",
+    reasoning: "Immediate cautious return-time response",
+    confidence: 0.84,
   },
 ];

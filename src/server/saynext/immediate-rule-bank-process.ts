@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: general process contracts, debugging workflow, scope control, and regression-safe operational answers.
 export const PROCESS_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:hard-bug-debugging-process",
@@ -207,7 +208,14 @@ export const PROCESS_IMMEDIATE_RULES: ImmediateRule[] = [
     id: "immediate:scope-cut-exact-change-list",
     priority: 510,
     category: "meeting_process",
-    include: [/\b(cut scope|scope cut|scope again|demo timeline|before demo)\b/i, /\b(what exactly changes|exactly changes|change list|what changes|that will not work)\b/i],
+    when: ({ normalized }) => (
+      /\b(cut scope|scope cut|scope again|demo timeline|before demo)\b/i.test(normalized)
+      && /\b(what exactly changes|exactly changes|change list|what changes|that will not work)\b/i.test(normalized)
+    ) || (
+      /\b(deadline|due|demo|presentation)\b/i.test(normalized)
+      && /\b(too many features|scope|cut|what should we do|what do we do|right now)\b/i.test(normalized)
+      && /\b(exactly changes|what exactly changes|concrete list|what changes)\b/i.test(normalized)
+    ),
     exclude: [/\b(sensitive artifacts?|sensitive data(?:sets?)?|datasets?|data lineage|lineage|provenance|consent basis|retention|chain[-\s]?of[-\s]?custody|audit logs?|privacy)\b/i],
     output: "Exact change list: keep the core demo path, freeze the API contract, cut nice-to-have screens, and defer risky extras. Then assign one owner and one test for the remaining demo flow.",
     reasoning: "Immediate scope-cut exact change list",
@@ -271,7 +279,7 @@ export const PROCESS_IMMEDIATE_RULES: ImmediateRule[] = [
     confidence: 0.88,
   },
   {
-    id: "immediate:customer-conflict-reliability",
+    id: "immediate:customer-conflict-simple-reliability",
     priority: 160,
     category: "service_admin",
     include: [/\b(customers? argue|customer conflict|stay reliable|trust is built|every shift)\b/i],

@@ -142,6 +142,10 @@ export function writeConversationReport(
       lines.push(`Memory: ${turn.memoryRefs.join(" | ") || "none"}`);
       if (turn.processTrace) {
         lines.push(`Route: ${turn.processTrace.route || "unknown"}; source=${turn.processTrace.source || "unknown"}; rules=${turn.processTrace.rulesFired?.join(" | ") || "none"}`);
+        if (turn.processTrace.immediateRule) {
+          const rule = turn.processTrace.immediateRule;
+          lines.push(`ImmediateRule: ${rule.id || "unknown"}; bank=${rule.bank || "unknown"}; category=${rule.category || "unknown"}; priority=${rule.priority ?? "unknown"}`);
+        }
         if (turn.processTrace.processContract?.length) {
           lines.push(`Contract: ${turn.processTrace.processContract.join(" | ")}`);
         }

@@ -1,6 +1,52 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: open-topic turns that need an owner, blocker, decision, metric, or meeting/process next step.
 export const OPEN_TOPIC_PROCESS_IMMEDIATE_RULES: ImmediateRule[] = [
+  {
+      id: "immediate:meeting-privacy-risk-next-action",
+      priority: 215,
+      category: "meeting_process",
+      include: [/\b(private user data|expose private|privacy breach|user data)\b/i],
+      output: "Let's pause and map what data is exposed, who can access it, and add that as the next review item before shipping.",
+      reasoning: "Immediate meeting privacy-risk response with next action",
+      confidence: 0.9,
+    },
+  {
+      id: "immediate:meeting-scope-control-notifications",
+      priority: 190,
+      category: "meeting_process",
+      include: [/\badd notifications\b/i, /\bmatching bug\b/i],
+      output: "Next, I would fix the matching bug first, then add notifications after the core flow is stable and tested.",
+      reasoning: "Immediate meeting scope-control response",
+      confidence: 0.9,
+    },
+  {
+      id: "immediate:meeting-ui-add-button-clarity",
+      priority: 185,
+      category: "meeting_process",
+      include: [/\busers?\b/i, /\bconfused\b/i, /\badd button\b/i],
+      output: "We should make the Add button label or tooltip clearer, then test the main flow again with a fresh user.",
+      reasoning: "Immediate meeting UI clarity response",
+      confidence: 0.9,
+    },
+  {
+      id: "immediate:meeting-branch-clarification",
+      priority: 180,
+      category: "meeting_process",
+      include: [/\b(which branch|latest code|latest branch)\b/i],
+      output: "Let's check the remote branches and recent commits first, then pick the latest tested branch and write down which one we are using.",
+      reasoning: "Immediate meeting branch clarification response",
+      confidence: 0.88,
+    },
+  {
+      id: "immediate:meeting-api-contract-owner",
+      priority: 175,
+      category: "meeting_process",
+      include: [/\bwho\s+owns\b/i, /\b(contract|api\s+contract|demo)\b/i],
+      output: "I don't want to guess a name. Let's assign one owner now, and that person should write the current v1 API contract before the demo.",
+      reasoning: "Immediate meeting owner clarification",
+      confidence: 0.88,
+    },
   {
       id: "immediate:cloud-access-pattern-next-step",
       priority: 200,

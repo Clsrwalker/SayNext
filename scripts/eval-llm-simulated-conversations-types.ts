@@ -73,6 +73,12 @@ export type ProcessTraceSnapshot = {
   route?: string;
   source?: string;
   rulesFired?: string[];
+  immediateRule?: {
+    id?: string;
+    bank?: string;
+    category?: string;
+    priority?: number;
+  };
   ruleReasoning?: string;
   processContract?: string[];
   promptMode?: string;

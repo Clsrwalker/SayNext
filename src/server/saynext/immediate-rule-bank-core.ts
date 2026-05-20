@@ -1,6 +1,7 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 import { isLikelySpeakerLabelTranscript } from "./output-postprocess";
 
+// Bank responsibility: highest-priority guardrails, no-intervention cases, and global ASR/domain misdirection stops.
 export const CORE_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:no-intervention-speaker-labelled-third-party",
@@ -10,6 +11,19 @@ export const CORE_IMMEDIATE_RULES: ImmediateRule[] = [
     output: "No action needed yet.",
     reasoning: "Immediate neutral response for speaker-labelled third-party dialogue",
     confidence: 0.86,
+  },
+  {
+    id: "immediate:silent-short-acknowledgement-closing",
+    priority: 995,
+    category: "no_intervention",
+    action: "silent",
+    include: [
+      /^\s*(?:that'?s\s+fine|fine|thanks?|thank\s+you(?:\s+very\s+much)?|thanks\s+so\s+much|thank\s+you[.!?,\s]+no|ok(?:ay)?[.!?,\s]+that'?s\s+all[.!?,\s]+thanks?|that'?s\s+all[.!?,\s]+thanks?|yeah[.!?,\s]+happy)\s*[.!?,]*\s*$/i,
+    ],
+    when: ({ signals }) => signals.likelyNoDisplay,
+    output: "",
+    reasoning: "Silent short acknowledgement or closing without stale-context continuation",
+    confidence: 0.9,
   },
   {
     id: "immediate:joblens-correction-conflicting-green-retrofit",

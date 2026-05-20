@@ -1,6 +1,19 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: current-affairs and freshness-sensitive topics where SayNext should avoid claiming live facts.
 export const CURRENT_AFFAIRS_IMMEDIATE_RULES: ImmediateRule[] = [
+  {
+    id: "immediate:openai-current-pricing-freshness",
+    priority: 420,
+    category: "risk_boundary",
+    include: [
+      /\b(openai|gpt)\b/i,
+      /\b(latest|today|current|pricing|price|per[-\s]?1m|per million|model list|which model)\b/i,
+    ],
+    output: "I would check the official OpenAI pricing page first, because the exact prices can change. For a live assistant, I would compare latency, quality, input cost, output cost, and test the cheapest model that still answers reliably.",
+    reasoning: "Immediate current OpenAI pricing uncertainty answer",
+    confidence: 0.9,
+  },
   {
     id: "immediate:immigration-policy-bottleneck",
     priority: 410,
@@ -84,7 +97,7 @@ export const CURRENT_AFFAIRS_IMMEDIATE_RULES: ImmediateRule[] = [
     id: "immediate:supply-chain-store-impact",
     priority: 265,
     category: "service_admin",
-    include: [/\b(supply[- ]chain|disruption|stores? like ours|checkout|inventory)\b/i, /\b(old news|changed|stores? like ours|now|delays?|waste|checkout)\b/i],
+    include: [/\b(supply[- ]chain|disruption|stores? like ours|inventory)\b/i, /\b(old news|changed|stores? like ours|now|delays?|waste|substitutes?|shelves|inventory)\b/i],
     output: "For stores, the practical change is more buffer and better visibility: track delayed items earlier, keep substitutes ready, and reduce checkout or inventory bottlenecks instead of reacting after shelves are already empty.",
     reasoning: "Immediate supply-chain store impact answer",
     confidence: 0.88,

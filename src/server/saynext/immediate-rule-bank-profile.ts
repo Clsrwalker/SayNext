@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: stable self-introduction, education, interview-profile, and supported personal background facts.
 export const PROFILE_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:formal-self-introduction",
@@ -73,31 +74,15 @@ export const PROFILE_IMMEDIATE_RULES: ImmediateRule[] = [
     priority: 420,
     category: "casual",
     when: ({ normalized }) => /\b(work\s+or\s+(?:are\s+you\s+)?(?:a\s+)?student|student\s+or\s+work|are\s+you\s+(?:a\s+)?student|do\s+you\s+work\s+or\s+study)\b/i.test(normalized)
-      || /\bwork\b.{0,40}\bor\b.{0,40}\bare\s+you(?:\s+a)?(?:\s+student)?\b/i.test(normalized),
-    output: "I'm a MACS student at Dalhousie right now, basically Applied Computer Science.",
-    reasoning: "Immediate current student/program answer",
-    confidence: 0.94,
-  },
-  {
-    id: "immediate:asr-current-student-program",
-    priority: 415,
-    category: "casual",
-    include: [/\b(?:student\s+or\s+working|working\s+or\s+student|study\s+or\s+work|work\s+or\s+study|you\s+student|you\s+working)\b/i],
-    output: "I'm a MACS student at Dalhousie right now, basically Applied Computer Science.",
-    reasoning: "Immediate ASR current student/program answer",
-    confidence: 0.92,
-  },
-  {
-    id: "immediate:current-major-program",
-    priority: 410,
-    category: "casual",
-    when: ({ normalized }) => /\b(?:what|which)\s+(?:is\s+)?(?:your\s+)?(?:major|program|degree)\b/i.test(normalized)
+      || /\bwork\b.{0,40}\bor\b.{0,40}\bare\s+you(?:\s+a)?(?:\s+student)?\b/i.test(normalized)
+      || /\b(?:student\s+or\s+working|working\s+or\s+student|study\s+or\s+work|work\s+or\s+study|you\s+student|you\s+working)\b/i.test(normalized)
+      || /\b(?:what|which)\s+(?:is\s+)?(?:your\s+)?(?:major|program|degree)\b/i.test(normalized)
       || /\b(?:what|which)\s+(?:program|major|degree)\s+(?:are\s+you\s+)?(?:in|studying|taking)\b/i.test(normalized)
       || /\bwhat\s+(?:are\s+you\s+)?studying\b/i.test(normalized)
       || /\bwhat\s+do\s+you\s+study\b/i.test(normalized),
-    output: "I'm in MACS at Dalhousie, so Master of Applied Computer Science.",
-    reasoning: "Immediate current major/program answer",
-    confidence: 0.95,
+    output: "I'm a MACS student at Dalhousie, so Master of Applied Computer Science.",
+    reasoning: "Immediate current student/program answer",
+    confidence: 0.94,
   },
   {
     id: "immediate:supported-class-room",

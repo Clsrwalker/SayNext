@@ -33,16 +33,18 @@ export function withProcessTrace(
 ): AgentResponse {
   if (response.type !== Action.INSIGHT) return response;
   const existingTrace = (response.metadata.agentInput as any)?.processTrace as ProcessTrace | undefined;
+  const processTrace = buildProcessTrace({
+    transcript,
+    output: response.output,
+    reasoning: response.reasoning,
+    source,
+    promptMode,
+    ruleId: existingTrace?.rulesFired?.[0],
+  });
+  if (existingTrace?.immediateRule) processTrace.immediateRule = existingTrace.immediateRule;
   response.metadata.agentInput = {
     ...(response.metadata.agentInput || {}),
-    processTrace: buildProcessTrace({
-      transcript,
-      output: response.output,
-      reasoning: response.reasoning,
-      source,
-      promptMode,
-      ruleId: existingTrace?.rulesFired?.[0],
-    }),
+    processTrace,
   };
   return response;
 }
@@ -72,5 +74,13 @@ export function createInsight(
         }),
       }),
     },
+  };
+}
+
+export function createSilent(reasoning: string, timestamp: number): AgentResponse {
+  return {
+    type: Action.SILENT,
+    reasoning,
+    timestamp,
   };
 }

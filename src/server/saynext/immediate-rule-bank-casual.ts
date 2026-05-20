@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: generic low-risk daily chat and casual acknowledgements that should not pull in project or memory context.
 export const CASUAL_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:cooking-task-acknowledgement",
@@ -66,20 +67,28 @@ export const CASUAL_IMMEDIATE_RULES: ImmediateRule[] = [
   },
   {
     id: "immediate:honest-fiction-book-preference",
+    effect: "route_hint",
+    route: "casual",
     priority: 225,
     category: "casual",
     include: [/\b(page[- ]?turner|mystery|thriller|gone girl|dragon tattoo|fast chapters|twisty)\b/i, /\b(book|read|try|want|craving|recommend|lighter)\b/i],
-    output: "I have not read enough to pretend I know the exact book, but a fast mystery or thriller fits me better than heavy nonfiction. I would try it if it is not too slow.",
+    hint: "This is a casual book-preference prompt. Do not pretend Xiang has read a specific title unless supported; prefer a modest preference for lighter, faster fiction.",
+    mustInclude: ["modest uncertainty about exact titles", "preference for fast mystery or thriller over heavy nonfiction"],
+    mustAvoid: ["claiming to have read a specific book", "fake detailed recommendation"],
     reasoning: "Immediate honest fiction-book preference response",
     confidence: 0.88,
   },
   {
     id: "immediate:grounded-confidence-story",
+    effect: "route_hint",
+    route: "casual",
     priority: 220,
     category: "casual",
     include: [/\b(confident|confidence)\b/i, /\b(feel|made|something|time|describe)\b/i],
     exclude: [/\b(clothes?|shirt|outfit|wear|hoodie|formal)\b/i],
-    output: "Probably when I keep adjusting a UI and it finally looks good. It is not dramatic, but it makes me feel like, okay, I can actually build this.",
+    hint: "This is a casual confidence-story prompt. Keep it grounded and small; do not invent a dramatic success story.",
+    mustInclude: ["small grounded build or project moment", "not dramatic"],
+    mustAvoid: ["fake award", "fake public recognition", "unsupported specific project outcome"],
     reasoning: "Immediate grounded confidence-story response",
     confidence: 0.88,
   },
@@ -94,6 +103,8 @@ export const CASUAL_IMMEDIATE_RULES: ImmediateRule[] = [
   },
   {
     id: "immediate:honest-book-recommendation-boundary",
+    effect: "route_hint",
+    route: "casual",
     priority: 205,
     category: "casual",
     when: ({ normalized }) => !(/\b(themes?)\b/i.test(normalized) && /\b(games?|anime|music|nonfiction|article|translate)\b/i.test(normalized))
@@ -105,7 +116,9 @@ export const CASUAL_IMMEDIATE_RULES: ImmediateRule[] = [
           && (/\b(book|essay|read|sapiens|denial of death|man without a country|left hand|darkness|country|anthropocene reviewed|braiding sweetgrass)\b/i.test(normalized) || /\*[^*]+\*/.test(normalized))
         )
       ),
-    output: "Honestly, I do not read serious nonfiction that often, so I would not pretend to have a strong book list. I am more into games, anime, music, and online content, but I can talk about what kind of ideas sound interesting.",
+    hint: "This is a book-recommendation or nonfiction prompt. Do not fabricate a strong reading history; answer modestly and redirect to themes or interests if needed.",
+    mustInclude: ["does not read serious nonfiction that often", "modest boundary"],
+    mustAvoid: ["pretending to have a strong book list", "fake reading history"],
     reasoning: "Immediate honest book-recommendation boundary",
     confidence: 0.88,
   },
@@ -129,19 +142,27 @@ export const CASUAL_IMMEDIATE_RULES: ImmediateRule[] = [
   },
   {
     id: "immediate:grounded-shoes-open-topic",
+    effect: "route_hint",
+    route: "casual",
     priority: 170,
     category: "casual",
     include: [/\b(shoes?|sidewalks?|potholes?|tourists?)\b/i, /\b(could talk|complain|what would they say|all energy)\b/i],
-    output: "They would probably complain about rain, potholes, and too much walking. I would keep it simple, not turn it into a huge serious point.",
+    hint: "This is a playful open-topic prompt about shoes or sidewalks. Keep it light and simple; do not turn it into a serious lecture.",
+    mustInclude: ["rain, potholes, or too much walking"],
+    mustAvoid: ["serious lecture", "project or career context"],
     reasoning: "Immediate grounded shoes open-topic response",
     confidence: 0.86,
   },
   {
     id: "immediate:honest-media-to-nonfiction-theme",
+    effect: "route_hint",
+    route: "casual",
     priority: 165,
     category: "casual",
     include: [/\b(themes?)\b/i, /\b(games?|anime|music|nonfiction|article|translate)\b/i],
-    output: "The themes I would connect to nonfiction are worldbuilding, technology, loneliness, identity, and how people adapt under pressure. Those fit me better than pretending I read a lot of serious books.",
+    hint: "This asks for themes connecting media interests to nonfiction. Do not pretend Xiang reads a lot of serious books; use themes that fit games, anime, music, and online content.",
+    mustInclude: ["worldbuilding, technology, loneliness, identity, or adaptation under pressure"],
+    mustAvoid: ["fake serious reading habit", "specific unsupported book claims"],
     reasoning: "Immediate honest media-to-nonfiction theme response",
     confidence: 0.88,
   },

@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { matchSayNextProcessRules, type ProcessRuleMatch, type ProcessRoute } from "../src/server/saynext/process-router";
 
+type RouteCategory = "no_intervention" | "technical" | "risk" | "career" | "process" | "service" | "casual" | "generator";
+
 type Probe = {
   id: string;
   transcript: string;
@@ -22,6 +24,22 @@ const positionalFile = process.argv.slice(2).find((arg) => !arg.startsWith("--")
 const casesPath = args.get("file") || positionalFile;
 const failOnConflict = process.argv.includes("--fail-on-conflict");
 const failOnMismatch = process.argv.includes("--fail-on-mismatch");
+
+const ROUTE_CATEGORY: Record<ProcessRoute, RouteCategory> = {
+  no_intervention: "no_intervention",
+  multi_intent: "process",
+  tech_debug: "technical",
+  technical_concept: "technical",
+  product_scope: "process",
+  privacy_risk: "risk",
+  risk_boundary: "risk",
+  career_pitch: "career",
+  meeting_process: "process",
+  memory_process: "process",
+  service_admin: "service",
+  casual: "casual",
+  generator: "generator",
+};
 
 const BUILTIN_PROBES: Probe[] = [
   {
@@ -98,10 +116,35 @@ function describeMatches(matches: ProcessRuleMatch[]): string {
   return matches.map((match) => `${match.id}:${match.route}:${match.priority}`).join(" | ") || "none";
 }
 
+function categoryOf(route?: ProcessRoute): RouteCategory {
+  return route ? ROUTE_CATEGORY[route] : "generator";
+}
+
+function increment(map: Map<string, number>, key: string): void {
+  map.set(key, (map.get(key) || 0) + 1);
+}
+
+function formatCounts(map: Map<string, number>): string {
+  return [...map.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([key, count]) => `${key}=${count}`)
+    .join(" ") || "none";
+}
+
+function matchCategorySummary(matches: ProcessRuleMatch[]): string {
+  const counts = new Map<string, number>();
+  for (const match of matches) increment(counts, categoryOf(match.route));
+  return formatCounts(counts);
+}
+
 function main(): void {
   const probes = casesPath ? loadProbesFromJsonl(casesPath) : BUILTIN_PROBES;
   let conflicts = 0;
   let mismatches = 0;
+  const topRouteCounts = new Map<string, number>();
+  const topCategoryCounts = new Map<string, number>();
+  const conflictCategoryCounts = new Map<string, number>();
+  const mismatchCategoryCounts = new Map<string, number>();
 
   console.log(`[process-rule-conflicts] source=${casesPath || "builtin-probes"} total=${probes.length}`);
 
@@ -114,15 +157,23 @@ function main(): void {
     const top = matches[0];
     const hasRouteConflict = routes.size > 1 && routePriorities.size > 1 && !isExpectedCompositeMatch(matches);
     const hasMismatch = Boolean(probe.expectedTopRoute && top?.route !== probe.expectedTopRoute);
+    const topRoute = top?.route || "generator";
+    const topCategory = categoryOf(top?.route);
 
     if (hasRouteConflict) conflicts += 1;
     if (hasMismatch) mismatches += 1;
+    increment(topRouteCounts, topRoute);
+    increment(topCategoryCounts, topCategory);
+    if (hasRouteConflict) increment(conflictCategoryCounts, topCategory);
+    if (hasMismatch) increment(mismatchCategoryCounts, `${categoryOf(probe.expectedTopRoute)}->${topCategory}`);
 
     if (!hasRouteConflict && !hasMismatch) continue;
 
     console.log("");
     console.log(`[${hasMismatch ? "mismatch" : "conflict"}] ${probe.id}`);
     console.log(`  expected_top_route=${probe.expectedTopRoute || "none"} actual_top_route=${top?.route || "generator"}`);
+    console.log(`  expected_category=${categoryOf(probe.expectedTopRoute)} actual_category=${topCategory}`);
+    console.log(`  match_categories=${matchCategorySummary(matches)}`);
     console.log(`  matches=${describeMatches(matches)}`);
     if (hasRouteConflict) {
       console.log("  suggestion: inspect rule priority and negative patterns; do not add an output patch until the winning route is intentional.");
@@ -133,6 +184,10 @@ function main(): void {
   }
 
   console.log("");
+  console.log(`[process-rule-conflicts] top_routes=${formatCounts(topRouteCounts)}`);
+  console.log(`[process-rule-conflicts] top_categories=${formatCounts(topCategoryCounts)}`);
+  if (conflictCategoryCounts.size) console.log(`[process-rule-conflicts] conflict_categories=${formatCounts(conflictCategoryCounts)}`);
+  if (mismatchCategoryCounts.size) console.log(`[process-rule-conflicts] mismatch_category_flows=${formatCounts(mismatchCategoryCounts)}`);
   console.log(`[process-rule-conflicts] conflicts=${conflicts} mismatches=${mismatches}`);
 
   if ((failOnConflict && conflicts > 0) || (failOnMismatch && mismatches > 0)) {

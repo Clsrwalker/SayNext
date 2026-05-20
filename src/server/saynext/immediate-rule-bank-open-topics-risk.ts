@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: open-topic questions that become risk, safety, verification, or anti-overclaiming boundaries.
 export const OPEN_TOPIC_RISK_IMMEDIATE_RULES: ImmediateRule[] = [
   {
       id: "immediate:stationery-threat-model",
@@ -8,6 +9,29 @@ export const OPEN_TOPIC_RISK_IMMEDIATE_RULES: ImmediateRule[] = [
       include: [/\b(threat model|counterfeit|leaks?|mask risks?|risk)\b/i, /\b(statinary|stationary|stationery|pens?|paper|notebooks?|tactile)\b/i],
       output: "If we are threat-modeling it, the risk is not the stationery itself but source and trust: counterfeit materials, misleading labels, or unknown sellers. I would check seller, price, and materials before treating it as safe.",
       reasoning: "Immediate stationery threat-model answer",
+      confidence: 0.88,
+    },
+  {
+      id: "immediate:gossip-boundary-verbatim-hint",
+      effect: "route_hint",
+      route: "risk_boundary",
+      priority: 310,
+      category: "risk_boundary",
+      include: [/\b(who do you tell|who should i tell|what do you say|what should i say|verbatim|in practice)\b/i],
+      when: ({ normalized, previousTranscriptTexts }) => /\b(gossip|rumou?r|hearsay|team trust|protecting boundaries|reporting)\b/i.test(normalized)
+        || (previousTranscriptTexts || []).some((text) => /\b(gossip|rumou?r|hearsay|team trust|protecting boundaries|reporting)\b/i.test(text)),
+      hint: [
+        "This is a workplace gossip/boundary wording request.",
+        "Answer the latest question directly: who to tell and one short sentence Xiang can say.",
+        "Do not switch to engineering requirements, prototypes, or personal-life examples.",
+      ],
+      mustInclude: [
+        "tell an appropriate owner only if it affects work or safety",
+        "one verbatim sentence",
+        "avoid names and hearsay details",
+      ],
+      mustAvoid: ["requirements", "prototype", "normal life example", "repeat rumor details"],
+      reasoning: "Immediate gossip boundary verbatim route hint",
       confidence: 0.88,
     },
   {

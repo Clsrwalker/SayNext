@@ -1,5 +1,6 @@
 import type { ImmediateRule, ImmediateRuleContext } from "./immediate-rule-registry";
 
+// Bank responsibility: supported project, career pitch, portfolio, and project-name ASR clarification answers.
 function asksCloudProjectExperience({ normalized }: ImmediateRuleContext): boolean {
   return /\b(cloud|aws)\b/i.test(normalized)
     && /\b(project|projects|experience|architecture)\b/i.test(normalized)
@@ -23,6 +24,15 @@ function asksProgrammingLanguageExperience({ normalized }: ImmediateRuleContext)
 }
 
 export const PROJECT_PROFILE_IMMEDIATE_RULES: ImmediateRule[] = [
+  {
+    id: "immediate:react-environment-project-clarification",
+    priority: 472,
+    category: "career_pitch",
+    include: [/\b(real project|your project|in your project|what changed)\b/i, /\b(react|classroom|environment|constraints?)\b/i],
+    output: "I would separate the two. React changed the implementation constraints, like component state and UI flow, while the classroom environment changed how I explained and tested the idea. So the project changed through both technical constraints and feedback context.",
+    reasoning: "Immediate React-versus-environment project clarification",
+    confidence: 0.9,
+  },
   {
     id: "immediate:supported-saynext-technical-tradeoff",
     priority: 470,
@@ -107,12 +117,17 @@ export const PROJECT_PROFILE_IMMEDIATE_RULES: ImmediateRule[] = [
     confidence: 0.92,
   },
   {
-    id: "immediate:aws-over-azure-project-scope",
+    id: "immediate:aws-azure-project-scope-framing",
     priority: 427,
     category: "career_pitch",
-    include: [/\b(aws|migrating to aws|migration)\b/i, /\bazure\b/i, /\b(project scope|changed your mind|why|frame)\b/i],
-    output: "I would not say Azure was wrong. I would frame it as AWS fitting the project scope better, especially for serverless pieces like S3, API Gateway, Lambda, and DynamoDB.",
-    reasoning: "Immediate AWS over Azure project-scope framing",
+    includeAny: [
+      /\b(aws|migrating to aws|migration)\b.*\bazure\b|\bazure\b.*\b(aws|migrating to aws|migration)\b/i,
+      /\b(migrating to aws|azure project|from azure)\b/i,
+      /\bchanged your mind\b.*\b(aws|azure|cloud)\b|\b(aws|azure|cloud)\b.*\bchanged your mind\b/i,
+    ],
+    include: [/\b(aws|azure|project|cloud|scope|changed your mind|why|frame)\b/i],
+    output: "I would not say Azure was wrong. I would frame it as AWS fitting the project scope better, especially for serverless pieces like S3, API Gateway, Lambda, and DynamoDB. The reason is simpler deployment and clearer course/project fit.",
+    reasoning: "Immediate AWS/Azure project-scope framing",
     confidence: 0.9,
   },
   {
@@ -132,6 +147,15 @@ export const PROJECT_PROFILE_IMMEDIATE_RULES: ImmediateRule[] = [
     output: "I've used quite a few languages through school and projects, including C++, Java, Python, C#, JavaScript, and TypeScript. Right now I'm most comfortable with JavaScript and TypeScript, especially with React, React Native, web frontend work, APIs, and databases. C++ and Java are things I learned and used a bit before, but they are more rusty now.",
     reasoning: "Immediate supported programming language experience answer",
     confidence: 0.92,
+  },
+  {
+    id: "immediate:javascript-asr-meaning-clarification",
+    priority: 419,
+    category: "asr_correction",
+    include: [/\b(java script|javascript)\b/i, /\b(exact wording|intended meaning|mean|confirm|what is it)\b/i],
+    output: "If you mean JavaScript, I would say it as the programming language and confirm whether you mean wording or technical experience.",
+    reasoning: "Immediate JavaScript ASR meaning clarification",
+    confidence: 0.88,
   },
   {
     id: "immediate:elderalbum-lambda-tag-pipeline",
@@ -244,5 +268,32 @@ export const PROJECT_PROFILE_IMMEDIATE_RULES: ImmediateRule[] = [
     output: "DalParkAid was a React Native parking app for Dalhousie. It estimated campus parking availability using timetable, weather, and crowd-report context, then showed lot status with simple map markers.",
     reasoning: "Immediate grounded DalParkAid interview response",
     confidence: 0.92,
+  },
+  {
+    id: "immediate:public-saynext-project-overview",
+    priority: 394,
+    category: "career_pitch",
+    when: ({ normalized }) => (
+      /\b(what|which|tell me|explain|describe|talk about)\b/i.test(normalized)
+      && /\b(project|app|application)\b/i.test(normalized)
+      && !/\b(cloud|aws|joblens|job lens|jobless|job level|elderalbum|elder album|older album|dalparkaid|dal park|parking|ai meeting|meeting monitor|meeting model)\b/i.test(normalized)
+      && !/\b(requirements?|unclear|scope|trade[- ]?off|public health)\b/i.test(normalized)
+      && (
+        /\b(saynext|say next|for next|did you make|you made|you built)\b/i.test(normalized)
+        || /\byour project\b/i.test(normalized)
+      )
+    ),
+    output: "Hybrid Search Memory Assistant is my real-time AI conversation project. It uses live transcripts, personal memory, prenotes, and hybrid retrieval so the model only sees the most relevant context.",
+    reasoning: "Immediate public project overview",
+    confidence: 0.92,
+  },
+  {
+    id: "immediate:above-and-beyond-saynext",
+    priority: 392,
+    category: "career_pitch",
+    include: [/\babove and beyond\b/i],
+    output: "One example is Hybrid Search Memory Assistant. I did not just fix one bug; I kept testing messy ASR, memory retrieval, and teleprompt cases until the system felt more usable.",
+    reasoning: "Immediate grounded above-and-beyond interview answer",
+    confidence: 0.9,
   },
 ];

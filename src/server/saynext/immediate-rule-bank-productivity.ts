@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: productivity, focus, habits, deep work, and phone-distraction topics without technical routing.
 export const PRODUCTIVITY_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:deep-work-security-boundary",

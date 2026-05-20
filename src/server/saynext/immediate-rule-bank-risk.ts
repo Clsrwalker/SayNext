@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: high-risk legal, financial, medical, fraud, safety, and sensitive-action boundaries.
 export const RISK_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:money-risk-plus-api-debug",
@@ -136,6 +137,16 @@ export const RISK_IMMEDIATE_RULES: ImmediateRule[] = [
     reasoning: "Immediate consent checklist meeting response",
   },
   {
+    id: "immediate:tax-deductible-home-office-boundary",
+    priority: 545,
+    category: "risk_boundary",
+    include: [/\b(tax|deductible|deduct|home[- ]?office|personal expense)\b/i],
+    includeAny: [/\b(roommate|noise|conflict)\b/i, /\b(non[- ]?deductible|personal expense|work[- ]?from[- ]?home|home[- ]?office)\b/i],
+    output: "I would not make the tax call myself. I would say this is a roommate-noise issue, and before calling it deductible or non-deductible, I need a tax preparer or official guidance to confirm the category and documentation.",
+    reasoning: "Immediate tax deductible home-office boundary",
+    confidence: 0.9,
+  },
+  {
     id: "immediate:sensitive-demo-data-handling",
     priority: 540,
     category: "risk_boundary",
@@ -183,24 +194,6 @@ export const RISK_IMMEDIATE_RULES: ImmediateRule[] = [
     output: "I would give the exact observed start time and the preferred pickup window. If one detail is not confirmed, say unknown instead of guessing.",
     reasoning: "Immediate start-time pickup-window clarification",
     confidence: 0.88,
-  },
-  {
-    id: "immediate:allergy-pickup-time-followup",
-    priority: 280,
-    category: "risk_boundary",
-    include: [/\b(allergy|allergies|allergen|peanuts?|tree nuts?|shellfish|dairy|eggs?|gluten|soy|sesame)\b/i, /\b(pickup time|pickup window|exact pickup|when'?s pickup|when is pickup|do you know .*pickup|right now)\b/i],
-    exclude: [/\bsymptoms?\b/i, /\b(swelling|wheezing|breathing|fainting|reaction severity|severe reaction|symptoms? .*started)\b/i],
-    output: "I do not know the exact pickup time yet. I would confirm the pickup window directly, and still keep the allergy part separate: exact allergen, ingredients, and cross-contact before pickup.",
-    reasoning: "Immediate allergy pickup-time follow-up",
-  },
-  {
-    id: "immediate:allergy-symptom-safety-boundary",
-    priority: 270,
-    category: "risk_boundary",
-    include: [/\b(allergy|allergies|allergen|peanuts?|tree nuts?|shellfish|dairy|eggs?|gluten|soy|sesame)\b/i, /\b(symptoms?|pickup|safest option|right now|reaction)\b/i],
-    output: "I would not choose a safest option from symptoms alone. First confirm the exact allergen, reaction severity, and pickup window. If there is swelling, wheezing, or trouble breathing, treat it as urgent. Repeated words like peanuts are not enough; confirm ingredients and cross-contact before pickup.",
-    reasoning: "Immediate allergy symptom safety boundary",
-    confidence: 0.92,
   },
   {
     id: "immediate:service-fee-clarification",

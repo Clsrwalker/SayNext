@@ -40,6 +40,12 @@ export type ProcessTrace = {
   route: ProcessRoute;
   source: ProcessTraceSource;
   rulesFired: string[];
+  immediateRule?: {
+    id: string;
+    bank?: string;
+    category?: string;
+    priority?: number;
+  };
   matchedRules?: ProcessRuleMatch[];
   ruleReasoning?: string;
   processContract: string[];
@@ -113,6 +119,7 @@ export const PROCESS_RULES: ProcessRule[] = [
     negative: [
       /\b(api|interface|schema|downstream|service|integration|core)\s+contract\b/i,
       /\bcontract\s+(?:test|first|before integration|between services|for the endpoint|for the api)\b/i,
+      /\b(linear regression|logistic regression|regression model|regression line|statistical regression)\b/i,
     ],
     owner: "process-router",
     description: "Debugging or failure-diagnosis question.",

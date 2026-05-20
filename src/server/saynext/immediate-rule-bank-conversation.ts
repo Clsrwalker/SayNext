@@ -1,13 +1,16 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: conversation mechanics, short acknowledgements, handoffs, and output-shape-safe replies.
 export const CONVERSATION_IMMEDIATE_RULES: ImmediateRule[] = [
   {
     id: "immediate:minimal-acknowledgement-filler",
     priority: 240,
-    category: "casual",
+    category: "no_intervention",
+    action: "silent",
     include: [/^\s*(?:mm+[-\s]?hmm+|mhm+|uh[-\s]?huh|yeah|yep|okay|ok)[.!?\s]*$/i],
-    output: "Yeah, I'm following.",
-    reasoning: "Immediate minimal acknowledgement for filler transcript",
+    when: ({ signals }) => signals.likelyNoDisplay,
+    output: "",
+    reasoning: "Silent minimal acknowledgement without stale-context continuation",
     confidence: 0.82,
   },
   {
@@ -40,6 +43,7 @@ export const CONVERSATION_IMMEDIATE_RULES: ImmediateRule[] = [
     id: "immediate:single-name-fragment",
     priority: 220,
     category: "casual",
+    exclude: [/^\s*(?:hello|hi|hey|thanks?|thank\s+you|okay|ok|yeah|yep|fine)\s*[.!?]*\s*$/i],
     when: ({ transcript }) => /^\s*[A-Z][a-zA-Z'-]{2,24}[.!?\s]*$/.test(transcript),
     output: "I heard the name, but I don't have enough context yet.",
     reasoning: "Immediate single-name fragment response without forced follow-up",
@@ -64,21 +68,12 @@ export const CONVERSATION_IMMEDIATE_RULES: ImmediateRule[] = [
     confidence: 0.82,
   },
   {
-    id: "immediate:unclear-name-fragment",
+    id: "immediate:unclear-fragment-clarification",
     priority: 205,
     category: "casual",
-    include: [/\bname and the\b/i],
+    includeAny: [/\bname and the\b/i, /\bgargle\b/i],
     output: "Sorry, I didn't catch that clearly.",
-    reasoning: "Immediate unclear name-fragment response without forced follow-up",
-    confidence: 0.82,
-  },
-  {
-    id: "immediate:unclear-gargle-fragment",
-    priority: 200,
-    category: "casual",
-    include: [/\bgargle\b/i],
-    output: "Sorry, I didn't catch that clearly.",
-    reasoning: "Immediate unclear gargle-fragment response without forced follow-up",
+    reasoning: "Immediate unclear fragment response without forced follow-up",
     confidence: 0.82,
   },
   {
@@ -98,14 +93,5 @@ export const CONVERSATION_IMMEDIATE_RULES: ImmediateRule[] = [
     output: "That is just a handoff; no action needed yet.",
     reasoning: "Immediate handoff response without forced follow-up",
     confidence: 0.82,
-  },
-  {
-    id: "immediate:simple-thanks",
-    priority: 185,
-    category: "casual",
-    include: [/^\s*(?:thank you|thanks|thank you very much)[.!?\s]*$/i],
-    output: "You're welcome.",
-    reasoning: "Immediate simple thanks response",
-    confidence: 0.86,
   },
 ];

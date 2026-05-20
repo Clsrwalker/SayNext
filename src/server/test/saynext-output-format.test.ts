@@ -1,8 +1,29 @@
 import { expect, test } from "bun:test";
 import { finalizeSayNextOutput, processConversation, resolveOpenAiModelConfig, routeSayNextProcess, sanitizeSayNextOutput } from "../mastra/agents/initial-agent";
 import { Action } from "../mastra/types";
+import { getImmediateDecision } from "../saynext/immediate-rules";
 import { makeTelepromptOpeningLine } from "../teleprompt/teleprompt-runtime";
 import { getKnownTermAsrCandidates, normalizeKnownProjectAsrAliases } from "../text/asr-corrections";
+
+function expectImmediateHint(
+  input: string,
+  expectedId: string,
+  mustContain: string[] = [],
+  mustAvoid: string[] = [],
+  context: Parameters<typeof getImmediateDecision>[3] = {},
+) {
+  const decision = getImmediateDecision(input, Date.now(), "english", context);
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0]?.id).toBe(expectedId);
+  const hintText = [
+    ...(decision.routeHints[0]?.instructions || []),
+    ...(decision.routeHints[0]?.mustInclude || []),
+    ...(decision.routeHints[0]?.mustAvoid || []),
+  ].join(" ").toLowerCase();
+  for (const term of mustContain) expect(hintText).toContain(term.toLowerCase());
+  for (const term of mustAvoid) expect(hintText).not.toContain(term.toLowerCase());
+  return decision.routeHints[0];
+}
 
 test("removes you-can-say prefix", () => {
   expect(sanitizeSayNextOutput("You can say: I'm leaning toward co-op, but I'm still checking the deadline."))
@@ -54,22 +75,125 @@ test("resolves separate live and long OpenAI models", () => {
   });
 });
 
-test("attaches process trace to immediate rules", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "I am outside - can you confirm the deposit, and also fix that CORS error real quick?", timestamp: Date.now() }],
-    "high",
-    undefined,
+test("immediate rules return route hints instead of fixed display text", () => {
+  const hint = expectImmediateHint(
+    "I am outside - can you confirm the deposit, and also fix that CORS error real quick?",
+    "immediate:money-risk-plus-api-debug",
+    ["deposit separate", "backend API URL", "request and response headers"],
+  );
+
+  expect(hint.route).toBe("multi_intent");
+  expect(hint.category).toBe("multi_intent");
+});
+
+test("stays silent on short acknowledgements and closings", async () => {
+  const closingInputs = [
+    "Okay.",
+    "Yeah.",
+    "That's fine.",
+    "Thanks so much.",
+    "OK. That's all. Thanks,",
+    "Thank you. No.",
+  ];
+
+  for (const input of closingInputs) {
+    const response = await processConversation(
+      [
+        {
+          type: "transcript",
+          text: "In high-dimensional space, a linear classifier learns a boundary from labelled data.",
+          timestamp: Date.now() - 1_000,
+        },
+        { type: "transcript", text: input, timestamp: Date.now() },
+      ],
+      "high",
+      undefined,
+      "english",
+    );
+
+    expect(response.type).toBe(Action.SILENT);
+  }
+});
+
+test("keeps linear-classifier visual viewpoint in classroom route instead of photo template", async () => {
+  const decision = getImmediateDecision(
+    "There's also a different way you can think about what a linear classifier is doing. For image classification, it's called a visual viewpoint. If you write this W matrix like a 2D picture and take a weighted sum, it is like putting W on top of the image and doing pixel-wise multiplication. If we learned the best W and B, visually what is it really learning?",
+    Date.now(),
     "english",
   );
 
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    const trace = (response.metadata.agentInput as any).processTrace;
-    expect(trace.route).toBe("multi_intent");
-    expect(trace.rulesFired[0]).toContain("money-risk-plus-api-debug");
-    expect(trace.processContract).toContain("address every active intent");
-    expect(trace.riskLevel).toBe("high");
-  }
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0].id).toBe("immediate:classroom-linear-classifier-visual-template");
+  expect(decision.routeHints[0].route).toBe("technical_concept");
+  expect(decision.routeHints[0].mustInclude?.join(" ")).toMatch(/class template|pixels|bias/i);
+  expect(decision.routeHints[0].mustAvoid?.join(" ")).toMatch(/photo|documents|deadline|screenshot/i);
+});
+
+test("keeps linear-classifier geometric lecture away from document deadline template", async () => {
+  const decision = getImmediateDecision(
+    "In high-dimensional space, if you think of what this linear classifier is learning, we are learning some form of lines. In high-dimensional spaces, these are called hyperplanes. They cannot learn decision boundaries where you need some form of nonlinear decision boundary.",
+    Date.now(),
+    "english",
+  );
+
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0].id).toBe("immediate:classroom-linear-classifier-geometric-boundary");
+  expect(decision.routeHints[0].mustInclude?.join(" ")).toMatch(/hyperplane|nonlinear decision boundary/i);
+  expect(decision.routeHints[0].mustAvoid?.join(" ")).toMatch(/documents|deadline|screenshot|photo/i);
+});
+
+test("keeps algebraic linear-classifier viewpoint on weighted sums", async () => {
+  const decision = getImmediateDecision(
+    "Any questions? The first viewpoint is the algebraic viewpoint: the score for a class is taking the weighted sum of the input and adding a bias. What is a linear classifier doing? It is trying to take a weighted sum of the inputs.",
+    Date.now(),
+    "english",
+  );
+
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0].id).toBe("immediate:classroom-linear-classifier-wx-plus-b");
+  expect(decision.routeHints[0].mustInclude?.join(" ")).toMatch(/weighted sum|bias|score/i);
+  expect(decision.routeHints[0].mustAvoid?.join(" ")).toMatch(/template limitation|documents|deadline/i);
+});
+
+test("does not treat linear regression classroom mention as debug regression", async () => {
+  const decision = getImmediateDecision(
+    "For people interested, you can look at it called linear regression. The output quantity can be a real number, but here we are looking at classification.",
+    Date.now(),
+    "english",
+  );
+
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0].id).toBe("immediate:classroom-linear-regression-vs-classification");
+  expect(decision.routeHints[0].mustInclude?.join(" ")).toMatch(/real number|classification|scores/i);
+  expect(decision.routeHints[0].mustAvoid?.join(" ")).toMatch(/bisect|schema migration|smallest repro|debugging/i);
+});
+
+test("uses open-topic photo rules as route hints instead of fixed templates", () => {
+  const decision = getImmediateDecision(
+    "Describe a picture or photo in your home that you like.",
+    Date.now(),
+    "english",
+  );
+
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0].id).toBe("immediate:grounded-photo");
+  expect(decision.routeHints[0].route).toBe("casual");
+  expect(decision.routeHints[0].mustInclude?.join(" ")).toMatch(/no invented specific photo|period-of-life/i);
+  expect(decision.routeHints[0].mustAvoid?.join(" ")).toMatch(/specific childhood photo|linear-classifier/i);
+});
+
+test("uses book preference boundary as a route hint instead of fixed template", () => {
+  const decision = getImmediateDecision(
+    "Do you have any serious nonfiction book recommendation, like Sapiens or Atomic Habits?",
+    Date.now(),
+    "english",
+  );
+
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0].id).toBe("immediate:honest-book-recommendation-boundary");
+  expect(decision.routeHints[0].route).toBe("casual");
+  expect(decision.routeHints[0].mustInclude?.join(" ")).toMatch(/does not read serious nonfiction/i);
+  expect(decision.routeHints[0].mustAvoid?.join(" ")).toMatch(/pretending|fake reading history/i);
 });
 
 test("routes process cases without calling the model", () => {
@@ -98,58 +222,29 @@ test("does not route API contract wording as legal risk", () => {
   expect(trace.rulesFired).not.toContain("route:high-risk-boundary");
 });
 
-test("immediately answers noisy programming language experience question", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "What's programming have you do you have an experiment with?", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes noisy programming language experience question as a hint", () => {
+  expectImmediateHint(
+    "What's programming have you do you have an experiment with?",
+    "immediate:programming-language-experience",
+    ["TypeScript", "JavaScript", "C++", "Java", "Python", "React Native", "databases"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toContain("TypeScript");
-    expect(response.output).toContain("JavaScript");
-    expect(response.output).toContain("C++");
-    expect(response.output).toContain("Java");
-    expect(response.output).toContain("Python");
-    expect(response.output).toContain("React Native");
-    expect(response.output).toContain("databases");
-  }
 });
 
-test("immediately answers clipped program language correction", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "I mean the program langu", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes clipped program language correction as a hint", () => {
+  expectImmediateHint(
+    "I mean the program langu",
+    "immediate:programming-language-experience",
+    ["TypeScript", "JavaScript", "rusty"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toMatch(/TypeScript|JavaScript/);
-    expect(response.output).toContain("rusty");
-    expect(response.reasoning).toBe("Immediate supported programming language experience answer");
-  }
 });
 
-test("immediately answers cloud project with JobLens and ElderAlbum instead of Hybrid Search", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "Which project should I talk about for cloud experience?", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes cloud project selection as a hint instead of fixed text", () => {
+  expectImmediateHint(
+    "Which project should I talk about for cloud experience?",
+    "immediate:cloud-project-selection",
+    ["JobLens AI", "ElderAlbum", "Lambda"],
+    ["Hybrid Search", "I should use"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toContain("JobLens AI");
-    expect(response.output).toContain("ElderAlbum");
-    expect(response.output).toContain("Lambda");
-    expect(response.output).not.toContain("Hybrid Search");
-    expect(response.output).not.toContain("I should use");
-  }
 });
 
 test("normalizes JobLens ASR aliases without treating them as unknown projects", () => {
@@ -245,34 +340,22 @@ test("removes sports filler question tail", () => {
     .toBe("Yeah, he's definitely tall and built. Must be from all that training.");
 });
 
-test("does not reuse financial exact-wording template for JavaScript ASR", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "So to be safe, could you confirm the exact wording and intended meaning of java script?", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes JavaScript ASR wording without financial template", () => {
+  expectImmediateHint(
+    "So to be safe, could you confirm the exact wording and intended meaning of java script?",
+    "immediate:javascript-asr-meaning-clarification",
+    ["JavaScript", "programming language"],
+    ["inflation", "hawkish", "dovish", "rates"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toContain("JavaScript");
-    expect(response.output).not.toMatch(/inflation|hawkish|dovish|rates/i);
-  }
 });
 
-test("answers allergy checks from Xiang profile instead of listing generic allergens", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "Honestly, I think people fear missing chances, but no pressure - what allergies should we avoid?", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes allergy checks from Xiang profile instead of listing generic allergens", () => {
+  expectImmediateHint(
+    "Honestly, I think people fear missing chances, but no pressure - what allergies should we avoid?",
+    "immediate:food-allergy-safety",
+    ["do not have food allergies"],
+    ["nuts", "shellfish", "sesame"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toContain("do not have food allergies");
-    expect(response.output).not.toMatch(/nuts|shellfish|sesame/i);
-  }
 });
 
 test("replaces placeholder progress answers with process-safe status request", () => {
@@ -297,63 +380,39 @@ test("corrects misdirected media guard for dream movie scope", () => {
     .toBe("For the movie idea, I would keep it simple: one main feeling, one setting, and one short scene, then decide the timeline after the concept is clear.");
 });
 
-test("does not guess class room for appointment room ASR", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "For the point mint, which room number should I go to?", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes appointment-room ASR without guessing room number", () => {
+  expectImmediateHint(
+    "For the point mint, which room number should I go to?",
+    "immediate:appointment-room-anti-guess",
+    ["appointment", "confirmation", "guess"],
+    ["134"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toMatch(/appointment|confirmation|guess/i);
-    expect(response.output).not.toContain("134");
-  }
 });
 
-test("handles flash versus Flask ASR by returning to team ownership process", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "For flash ownership in the team, how would you explain the boundaries?", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes flash versus Flask ASR back to team ownership process", () => {
+  expectImmediateHint(
+    "For flash ownership in the team, how would you explain the boundaries?",
+    "immediate:flask-ownership-asr-boundary",
+    ["ownership", "handoff", "integration"],
+    ["web framework", "microframework"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toMatch(/ownership|handoff|integration/i);
-    expect(response.output).not.toMatch(/web framework|microframework/i);
-  }
 });
 
-test("answers sincere apology questions with reasoning structure", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "What evidence do you have that an apology feels sincere to nontechnical users?", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes sincere apology questions with reasoning structure", () => {
+  expectImmediateHint(
+    "What evidence do you have that an apology feels sincere to nontechnical users?",
+    "immediate:sincere-apology-reasoning",
+    ["went wrong", "impact", "change"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toMatch(/went wrong|impact|change/i);
-  }
 });
 
-test("answers response-window documentation requests instead of no action", async () => {
-  const response = await processConversation(
-    [{ type: "transcript", text: "I need that in writing: define response windows and the escalation path if pressure spikes.", timestamp: Date.now() }],
-    "high",
-    undefined,
-    "english",
+test("routes response-window documentation requests instead of no action", () => {
+  expectImmediateHint(
+    "I need that in writing: define response windows and the escalation path if pressure spikes.",
+    "immediate:response-window-escalation-process",
+    ["response", "escalation", "writing"],
+    ["No action needed"],
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toMatch(/response|escalation|writing/i);
-    expect(response.output).not.toMatch(/^No action needed/i);
-  }
 });
 
 test("corrects misdirected media guard for ElderAlbum Lambda follow-up", () => {
@@ -484,7 +543,12 @@ test("uses category-level guards for misdirected output domains", () => {
 });
 
 test("keeps process-first answers under ASR and topic noise", async () => {
-  const cases = [
+  const cases: Array<{
+    input: string;
+    must: string[];
+    avoid: string[];
+    routeHint?: string;
+  }> = [
     {
       input: "Atomic Habits sounds good, but what is the measurable payoff?",
       must: ["track", "behavior"],
@@ -522,7 +586,8 @@ test("keeps process-first answers under ASR and topic noise", async () => {
     },
     {
       input: "Honestly, I think some people just like the statinary smell, no pressure, like pens and paper.",
-      must: ["small", "practical"],
+      routeHint: "immediate:stationery-comfort",
+      must: ["small, practical, or tactile", "tiny sense of order"],
       avoid: ["brain clocks"],
     },
     {
@@ -652,7 +717,8 @@ test("keeps process-first answers under ASR and topic noise", async () => {
     },
     {
       input: "Okay, name two specific Genshin tracks - no more - so we can stop debating.",
-      must: ["not fake official track titles", "Inazuma", "verify the exact names"],
+      routeHint: "immediate:genshin-exact-title-grounding",
+      must: ["not fake official track titles", "Inazuma", "verify exact names"],
       avoid: ["Drum'n'Bass"],
     },
     {
@@ -1132,12 +1198,14 @@ test("keeps process-first answers under ASR and topic noise", async () => {
     },
     {
       input: "Hey, take your time - why do you think Xiang stopped playing, with AI and memory?",
-      must: ["do not think AI was the reason", "not fully sure", "separate study topic"],
+      routeHint: "immediate:non-speculative-stopped-playing",
+      must: ["do not think AI was the reason", "not fully sure", "AI point is separate"],
       avoid: ["dopamine"],
     },
     {
       input: "Oh, take your time - I'm curious, why did Xiang stop playing, do you know?",
-      must: ["not fully sure", "moving to Canada", "routine faded"],
+      routeHint: "immediate:concise-stopped-playing-reason",
+      must: ["not fully sure", "after moving to Canada", "fewer chances"],
       avoid: ["swimming"],
     },
     {
@@ -1293,6 +1361,20 @@ test("keeps process-first answers under ASR and topic noise", async () => {
   ];
 
   for (const item of cases) {
+    const decision = getImmediateDecision(item.input, Date.now(), "english");
+    if (item.routeHint || decision.routeHints.length) {
+      expect(decision.response).toBeNull();
+      if (item.routeHint) expect(decision.routeHints[0].id).toBe(item.routeHint);
+      const hintText = [
+        ...(decision.routeHints[0].instructions || []),
+        ...(decision.routeHints[0].mustInclude || []),
+        ...(decision.routeHints[0].mustAvoid || []),
+      ].join(" ").toLowerCase();
+      for (const term of item.must) expect(hintText).toContain(term.toLowerCase());
+      for (const term of item.avoid) expect(hintText).not.toContain(term.toLowerCase());
+      continue;
+    }
+
     const response = await processConversation(
       [{ type: "transcript", text: item.input, timestamp: Date.now() }],
       "high",
@@ -1326,24 +1408,16 @@ test("keeps cloud follow-up on access pattern instead of student availability", 
   }
 });
 
-test("does not leak JobLens into generic API 403 log follow-up", async () => {
-  const response = await processConversation(
-    [
-      { type: "transcript", text: "What happened with the API 403, and what is the next step checklist?", timestamp: Date.now() - 1_000 },
-      { type: "transcript", text: "Can you list the specific logs and AWS components we should check first?", timestamp: Date.now() },
-    ],
-    "high",
-    undefined,
-    "english",
+test("routes generic API 403 log follow-up without leaking JobLens", () => {
+  expectImmediateHint(
+    "Can you list the specific logs and AWS components we should check first?",
+    "immediate:generic-aws-api-logs-checklist",
+    ["API Gateway", "Lambda logs", "IAM"],
+    ["JobLens"],
+    {
+      previousTranscriptTexts: ["What happened with the API 403, and what is the next step checklist?"],
+    },
   );
-
-  expect(response.type).toBe(Action.INSIGHT);
-  if (response.type === Action.INSIGHT) {
-    expect(response.output).toContain("API Gateway");
-    expect(response.output).toContain("Lambda logs");
-    expect(response.output).toContain("IAM");
-    expect(response.output).not.toContain("JobLens");
-  }
 });
 
 test("keeps car service follow-up on symptom checklist", async () => {

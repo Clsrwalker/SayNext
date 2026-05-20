@@ -1,6 +1,144 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: classroom-style technical concepts, definitions, trade-offs, and professor/TA explanation prompts.
 export const TECH_CLASSROOM_IMMEDIATE_RULES: ImmediateRule[] = [
+  {
+    id: "immediate:classroom-any-questions-smart-question",
+    effect: "route_hint",
+    route: "technical_concept",
+    priority: 360,
+    category: "tech_process",
+    include: [/^\s*(?:any questions?|questions on (?:this|that|it|the .*?)?|does anybody have questions?|do you have any questions?)\s*[.!?]*\s*$/i],
+    when: ({ signals }) => signals.previousHasClassroomTopic,
+    hint: [
+      "The teacher is asking for questions after a recent classroom topic. Produce one short, low-profile smart question tied to the recent topic, not a lecture answer.",
+      "If the recent topic is WX plus B or linear classifiers, a good question shape is asking whether WX plus B gives class scores first and the decision comes from comparing those scores.",
+    ],
+    mustInclude: ["one short student-like question ending with a question mark", "connect to the recent concept or formula"],
+    mustAvoid: ["personal project", "unrelated topic", "mini lecture", "I do not have the exact detail yet", "new advanced terms like logits or softmax unless already mentioned"],
+    reasoning: "Immediate classroom any-questions smart-question hint",
+    confidence: 0.86,
+  },
+  {
+    id: "immediate:classroom-action-info-note",
+    effect: "route_hint",
+    route: "service_admin",
+    priority: 360,
+    category: "service_admin",
+    when: ({ normalized, signals }) => signals.latestHasClassroomTaskSignal
+      && (signals.previousHasClassroomTopic || /\b(class|course|professor|lecture|assignment|rubric|exam|midterm|final|homework|quiz|brightspace)\b/i.test(normalized)),
+    hint: [
+      "This sounds like classroom action information such as a rubric, deadline, exam hint, assignment, or requirement. Note the exact requirement and what Xiang should verify.",
+      "If the latest transcript combines student ID with a rubric/form question, answer both parts separately: handle ID through the required channel, and do not invent the exact rubric or form name if it was not provided.",
+    ],
+    mustInclude: ["sounds like an important note or requirement", "exact item to write down or verify", "if there are two asks, address both"],
+    mustAvoid: ["invented rubric details", "invented exact form name", "casually sharing student ID", "personal project unless explicitly asked", "casual small talk"],
+    reasoning: "Immediate classroom action-info note hint",
+    confidence: 0.86,
+  },
+  {
+    id: "immediate:classroom-core-definition-note",
+    effect: "route_hint",
+    route: "technical_concept",
+    priority: 260,
+    category: "tech_process",
+    when: ({ signals }) => signals.latestHasClassroomConceptSignal
+      && signals.previousHasClassroomTopic
+      && !signals.latestIsAnyQuestionsPrompt,
+    hint: "The teacher just stated a core definition, formula, or concept boundary. Produce a compact note-style supplement, not a full textbook explanation.",
+    mustInclude: ["compressed definition or formula", "one practical implication or example"],
+    mustAvoid: ["personal project", "unrelated memory", "long explanation"],
+    reasoning: "Immediate classroom core-definition note hint",
+    confidence: 0.8,
+  },
+  {
+    id: "immediate:classroom-linear-classifier-visual-template",
+    effect: "route_hint",
+    route: "technical_concept",
+    priority: 360,
+    category: "tech_process",
+    when: ({ normalized }) => /\blinear classifi(?:er|cation)\b/i.test(normalized)
+      && (
+        /\bvisual viewpoint\b/i.test(normalized)
+        || /\bimage classification\b/i.test(normalized)
+        || /\bbest W and B\b/i.test(normalized)
+        || (/\bW\s*(?:X|\*|x)?\s*\+?\s*B\b/i.test(normalized) && /\b(picture|image|pixel|weighted sum)\b/i.test(normalized))
+      )
+      && !/\b(only one template|one template image|multiple modes?|modalities|different viewpoints?)\b/i.test(normalized),
+    hint: "This is a classroom linear-classifier visual-viewpoint explanation, not a personal photo or image-memory question. Let GPT write the final spoken answer naturally.",
+    mustInclude: ["each row of W as one class template", "score by matching against image pixels plus bias", "limitation around multiple viewpoints or modes"],
+    mustAvoid: ["photo story", "documents", "deadline", "screenshot"],
+    reasoning: "Immediate classroom linear-classifier visual-template answer",
+    confidence: 0.9,
+  },
+  {
+    id: "immediate:classroom-linear-classifier-geometric-boundary",
+    effect: "route_hint",
+    route: "technical_concept",
+    priority: 359,
+    category: "tech_process",
+    when: ({ normalized }) => (
+      /\blinear classifi(?:er|cation)\b/i.test(normalized)
+      || /\bhyperplanes?\b/i.test(normalized)
+    )
+      && (
+        /\bhigh[-\s]?dimensional\b/i.test(normalized)
+        || /\bhyperplanes?\b/i.test(normalized)
+        || /\bgeometric viewpoint\b/i.test(normalized)
+        || /\bnonlinear decision boundar(?:y|ies)\b/i.test(normalized)
+        || /\b(draw|drawing|learns?) lines?\b/i.test(normalized)
+      ),
+    hint: "This is a classroom geometric-viewpoint explanation about linear classifiers. Let GPT explain the concept, not a document/deadline workflow.",
+    mustInclude: ["line in 2D or hyperplane in high-dimensional space", "linearly separable data", "curved or nonlinear decision boundary limitation"],
+    mustAvoid: ["documents", "deadline", "screenshot", "photo"],
+    reasoning: "Immediate classroom linear-classifier geometric-boundary answer",
+    confidence: 0.9,
+  },
+  {
+    id: "immediate:classroom-linear-classifier-single-template-limit",
+    effect: "route_hint",
+    route: "technical_concept",
+    priority: 358,
+    category: "tech_process",
+    include: [/\blinear classifi(?:er|cation)\b/i, /\b(template|one template|different viewpoints?|multiple modes?|modalities)\b/i],
+    hint: "This is a classroom limitation explanation: linear classifiers can learn one weighted template per class and may average multiple modes.",
+    mustInclude: ["one weighted template per class", "multiple viewpoints or modes", "averaging instead of separate patterns"],
+    mustAvoid: ["photo story", "documents", "deadline", "screenshot"],
+    reasoning: "Immediate classroom linear-classifier single-template limitation answer",
+    confidence: 0.9,
+  },
+  {
+    id: "immediate:classroom-linear-classifier-wx-plus-b",
+    effect: "route_hint",
+    route: "technical_concept",
+    priority: 357,
+    category: "tech_process",
+    when: ({ normalized }) => /\blinear classifi(?:er|cation)\b/i.test(normalized)
+      && (
+        /\bW\s*(?:X|x)\s*\+\s*B\b/i.test(normalized)
+        || /\bW into X\b/i.test(normalized)
+        || /\bweighted sum\b/i.test(normalized)
+      ),
+    hint: "This is a classroom algebraic-viewpoint explanation of WX plus B. Let GPT produce a compact spoken explanation.",
+    mustInclude: ["weighted sum of input", "bias", "score for each class", "highest score as prediction"],
+    mustAvoid: ["template limitation unless asked", "documents", "deadline"],
+    reasoning: "Immediate classroom linear-classifier weighted-sum answer",
+    confidence: 0.9,
+  },
+  {
+    id: "immediate:classroom-linear-regression-vs-classification",
+    effect: "route_hint",
+    route: "technical_concept",
+    priority: 356,
+    category: "tech_process",
+    include: [/\blinear regression\b/i],
+    exclude: [/\b(regression test|regression bug|debug regression|bisect|schema migration|config change|recent change|shows up)\b/i],
+    hint: "This is a classroom distinction between linear regression and linear classification, not a software regression-debug task.",
+    mustInclude: ["linear regression output is a real number", "classification uses scores", "scores become class decisions"],
+    mustAvoid: ["bisect", "schema migration", "smallest repro", "debugging workflow"],
+    reasoning: "Immediate classroom linear-regression versus classification answer",
+    confidence: 0.9,
+  },
   {
     id: "immediate:classroom-lambda-s3-dynamodb-latency",
     priority: 335,

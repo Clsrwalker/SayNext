@@ -1,5 +1,6 @@
 import type { ImmediateRule } from "./immediate-rule-registry";
 
+// Bank responsibility: open-topic prompts framed through service work, retail, restaurant, or practical customer scenarios.
 export const OPEN_TOPIC_SERVICE_IMMEDIATE_RULES: ImmediateRule[] = [
   {
       id: "immediate:restaurant-repeat-demand",
