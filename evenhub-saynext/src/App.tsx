@@ -64,6 +64,7 @@ export default function App() {
   const glassesTextRef = useRef("");
   const bridgeConnectingRef = useRef(false);
   const pendingTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wantListeningRef = useRef(true);
 
   const glassesText = useMemo(() => formatGlassesText(display, config.settings), [display, config.settings]);
 
@@ -145,9 +146,10 @@ export default function App() {
       onMessage: handleServerMessage,
       onStatus: setWsStatus,
       onOpen: () => {
-        if (displayRef.current.recording) {
-          wsRef.current?.sendControl("start_listening");
-        }
+        if (!wantListeningRef.current) return;
+        wsRef.current?.sendControl("start_listening");
+        void bridgeRef.current?.setRecording(true).catch(() => undefined);
+        setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
       },
     });
     wsRef.current = client;
@@ -172,6 +174,7 @@ export default function App() {
         setBridgeStatus(`G2 ${event.replace(/_/g, " ")}`);
         if (event === "foreground_exit" || event === "abnormal_exit" || event === "system_exit") {
           clearPendingTap();
+          wantListeningRef.current = false;
           void bridgeRef.current?.setRecording(false).catch(() => undefined);
           sendControl("stop_listening");
           setDisplay((current) => ({
@@ -192,10 +195,12 @@ export default function App() {
           const action = commandForGesture(gesture, Boolean(displayRef.current.transcript), displayRef.current.recording);
           if (!action) return;
           if (action === "start_listening") {
+            wantListeningRef.current = true;
             void bridgeRef.current?.setRecording(true);
             sendControl("start_listening");
             setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
           } else if (action === "stop_listening") {
+            wantListeningRef.current = false;
             void bridgeRef.current?.setRecording(false);
             sendControl("stop_listening");
             setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
@@ -205,6 +210,7 @@ export default function App() {
         },
       });
       await bridgeRef.current.render(glassesTextRef.current);
+      wantListeningRef.current = true;
       await bridgeRef.current.setRecording(true);
       sendControl("start_listening");
       setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
@@ -229,12 +235,14 @@ export default function App() {
   };
 
   const startListening = async () => {
+    wantListeningRef.current = true;
     await bridgeRef.current?.setRecording(true);
     sendControl("start_listening");
     setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
   };
 
   const stopListening = async () => {
+    wantListeningRef.current = false;
     await bridgeRef.current?.setRecording(false);
     sendControl("stop_listening");
     setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
