@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { connectBridge, type BridgeHandle, type BridgeLifecycleEvent } from "./bridge";
 import { commandForGesture, normalizeGlassEvent, redactEventPayload, summarizeRawEvent } from "./events";
 import { formatGlassesText, INITIAL_DISPLAY_STATE, reduceServerMessage, type DisplayState } from "./display";
-import { DEFAULT_SETTINGS, defaultRelayToken, defaultWsUrl, makeClientSessionId, normalizeSavedWsUrl, type SayNextSettings, type ServerMessage } from "./protocol";
+import { DEFAULT_SETTINGS, defaultRelayToken, defaultWsUrl, makeClientSessionId, normalizeSavedWsUrl, normalizeSettings, type SayNextSettings, type ServerMessage } from "./protocol";
 import { startPhoneMic, type PhoneMicHandle } from "./phone-audio";
 import { SayNextWsClient } from "./ws-client";
 
@@ -17,12 +17,6 @@ type SavedConfig = {
   settings: SayNextSettings;
 };
 
-type EventLogEntry = {
-  time: string;
-  summary: string;
-  payload?: unknown;
-};
-
 function readSavedConfig(): SavedConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -33,10 +27,7 @@ function readSavedConfig(): SavedConfig {
         token: parsed.token || defaultRelayToken(),
         userId: parsed.userId || "xiang",
         sessionId: parsed.sessionId || makeClientSessionId(),
-        settings: {
-          ...DEFAULT_SETTINGS,
-          ...(parsed.settings || {}),
-        },
+        settings: normalizeSettings(parsed.settings),
       };
     }
   } catch {
@@ -56,9 +47,7 @@ export default function App() {
   const [display, setDisplay] = useState<DisplayState>(INITIAL_DISPLAY_STATE);
   const [bridgeStatus, setBridgeStatus] = useState("Bridge not connected");
   const [wsStatus, setWsStatus] = useState("Disconnected");
-  const [audioStatus, setAudioStatus] = useState("Audio idle");
-  const [debugText, setDebugText] = useState("");
-  const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
+  const [, setAudioStatus] = useState("Audio idle");
   const bridgeRef = useRef<BridgeHandle | null>(null);
   const wsRef = useRef<SayNextWsClient | null>(null);
   const configRef = useRef(config);
@@ -98,18 +87,12 @@ export default function App() {
     setDisplay((current) => reduceServerMessage(current, message));
   }, []);
 
-  const pushEventLog = useCallback((summary: string, payload?: unknown) => {
-    const time = new Date().toLocaleTimeString();
-    setEventLog((current) => [{ time, summary, payload }, ...current].slice(0, 40));
-  }, []);
-
-  const copyEventLog = useCallback(() => {
-    const text = JSON.stringify(eventLog, null, 2);
-    void navigator.clipboard?.writeText(text);
-  }, [eventLog]);
-
   const sendControl = useCallback((action: Parameters<SayNextWsClient["sendControl"]>[0]) => {
     wsRef.current?.sendControl(action);
+  }, []);
+
+  const sendClientEventLog = useCallback((summary: string, payload?: unknown) => {
+    wsRef.current?.sendClientEventLog(summary, payload);
   }, []);
 
   const clearPendingTap = useCallback(() => {
@@ -215,7 +198,7 @@ export default function App() {
     setBridgeStatus("Connecting bridge...");
     try {
       const handleLifecycle = (event: BridgeLifecycleEvent) => {
-        pushEventLog(`lifecycle=${event}`);
+        sendClientEventLog(`lifecycle=${event}`);
         setBridgeStatus(`G2 ${event.replace(/_/g, " ")}`);
         if (event === "foreground_exit" || event === "abnormal_exit" || event === "system_exit") {
           clearPendingTap();
@@ -238,7 +221,8 @@ export default function App() {
         },
         onLifecycle: handleLifecycle,
         onEvent: (event) => {
-          pushEventLog(summarizeRawEvent(event), redactEventPayload(event));
+          const summary = summarizeRawEvent(event);
+          sendClientEventLog(summary, redactEventPayload(event));
           const gesture = normalizeGlassEvent(event);
           const action = commandForGesture(gesture, Boolean(displayRef.current.transcript), displayRef.current.recording);
           if (!action) return;
@@ -261,7 +245,7 @@ export default function App() {
     } finally {
       bridgeConnectingRef.current = false;
     }
-  }, [clearPendingTap, dispatchGestureAction, pushEventLog, startSelectedAudio, stopSelectedAudio]);
+  }, [clearPendingTap, dispatchGestureAction, sendClientEventLog, startSelectedAudio, stopSelectedAudio]);
 
   useEffect(() => {
     void connectGlasses();
@@ -292,58 +276,129 @@ export default function App() {
     });
   }, [config.settings.micSource, startSelectedAudio]);
 
+  const pageCount = Math.max(display.totalPages, 1);
+  const currentPage = display.answerText ? display.pageIndex + 1 : 0;
+  const micLabel = config.settings.micSource === "g2" ? "G2 Mic" : "Phone Mic";
+  const activityLabel = display.recording ? "Listening" : "Paused";
+  const sessionState = wsStatus === "Connected" ? "Connected" : "Disconnected";
+  const bridgeReady = bridgeStatus.toLowerCase().includes("connected")
+    || bridgeStatus.toLowerCase().includes("ready")
+    || display.recording;
+  const transcriptLabel = display.transcript
+    ? "Last transcript"
+    : display.recording
+      ? "Waiting for speech"
+      : "Transcript paused";
+  const answerLabel = display.answerText
+    ? `Pinned answer ${currentPage}/${pageCount}`
+    : "Pinned answer";
+
   return (
-    <main className="app-shell">
-      <section className="panel hero">
-        <div>
-          <p className="eyebrow">EvenHub SayNext</p>
-          <h1>Manual-first G2 control</h1>
+    <main className="app-shell product-app">
+      <section className="session-hero">
+        <div className="hero-top">
+          <div>
+            <p className="eyebrow">SayNext</p>
+            <h1>Live cue session</h1>
+          </div>
+          <span className={sessionState === "Connected" ? "presence online" : "presence"}>
+            {sessionState}
+          </span>
         </div>
-        <div className="status-grid">
-          <span className={wsStatus === "Connected" ? "ok" : ""}>{wsStatus}</span>
-          <span className={display.recording ? "ok" : ""}>{display.recording ? "Listening" : bridgeStatus}</span>
+
+        <div className="session-strip">
+          <div>
+            <span>Mic</span>
+            <strong>{micLabel}</strong>
+          </div>
+          <div>
+            <span>State</span>
+            <strong>{activityLabel}</strong>
+          </div>
+          <div>
+            <span>Mode</span>
+            <strong>{config.settings.sceneMode}</strong>
+          </div>
         </div>
       </section>
 
-      <section className="panel live-card">
-        <h2>Live</h2>
-        <div className="glance-grid">
+      <section className="now-card">
+        <div className="section-heading">
           <div>
-            <span>Transcript</span>
-            <strong>{display.transcript ? "Ready" : "Waiting"}</strong>
+            <p className="eyebrow">{answerLabel}</p>
+            <h2>AI Cues</h2>
           </div>
-          <div>
-            <span>Answer</span>
-            <strong>{display.answerText ? `${display.pageIndex + 1}/${Math.max(display.totalPages, 1)}` : "None"}</strong>
-          </div>
-          <div>
-            <span>Audio</span>
-            <strong>{display.audioBytesReceived ? `${Math.round(display.audioBytesReceived / 1024)} KB` : "0 KB"}</strong>
-          </div>
+          <span className={display.answerText ? "answer-state ready" : "answer-state"}>
+            {display.answerText ? "Ready" : "Empty"}
+          </span>
         </div>
-        <div className="button-row primary-controls">
-          <button onClick={() => sendControl("generate")}>Generate</button>
-          <button onClick={() => sendControl("regenerate")}>Retry</button>
-          <button onClick={() => sendControl("page_previous")}>Prev</button>
-          <button onClick={() => sendControl("page_next")}>Next</button>
-          <button onClick={() => sendControl("clear")}>Clear</button>
+        <div className={display.answerText ? "answer-body" : "answer-body empty"}>
+          {display.answerText || "Start listening, then generate when you want a short cue on the glasses."}
+        </div>
+        <div className="page-controls">
+          <button disabled={pageCount <= 1} onClick={() => sendControl("page_previous")}>Previous</button>
+          <span>{display.answerText ? `${currentPage}/${pageCount}` : "No answer"}</span>
+          <button disabled={pageCount <= 1} onClick={() => sendControl("page_next")}>Next</button>
         </div>
       </section>
 
-      <section className="panel">
-        <h2>Quick Settings</h2>
-        <div className="segmented">
-          {(["auto", "classroom", "interview", "discussion", "daily", "teleprompt"] as const).map((mode) => (
-            <button
-              key={mode}
-              className={config.settings.sceneMode === mode ? "active" : ""}
-              onClick={() => updateSettings({ sceneMode: mode })}
-            >
-              {mode}
-            </button>
-          ))}
+      <section className="transcript-card">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">{transcriptLabel}</p>
+            <h2>Transcript</h2>
+          </div>
+          <span className={display.recording ? "presence online" : "presence"}>
+            {display.recording ? "Live" : "Paused"}
+          </span>
         </div>
-        <div className="two-col">
+        <p className={display.transcript ? "transcript-text" : "transcript-text empty"}>
+          {display.transcript || "No speech captured yet."}
+        </p>
+      </section>
+
+      <section className="settings-card">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Session controls</p>
+            <h2>Input and mode</h2>
+          </div>
+          <button className="compact-button" onClick={connectGlasses}>
+            {bridgeReady ? "Reconnect" : "Connect G2"}
+          </button>
+        </div>
+
+        <div className="setting-group">
+          <span>Mic source</span>
+          <div className="segmented">
+            {(["g2", "phone"] as const).map((source) => (
+              <button
+                key={source}
+                className={config.settings.micSource === source ? "active" : ""}
+                onClick={() => updateSettings({ micSource: source })}
+              >
+                {source === "g2" ? "G2 glasses" : "Phone"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="setting-group">
+          <span>Scene</span>
+          <div className="segmented compact">
+            {(["auto", "classroom", "interview", "discussion", "daily"] as const).map((mode) => (
+              <button
+                key={mode}
+                className={config.settings.sceneMode === mode ? "active" : ""}
+                onClick={() => updateSettings({ sceneMode: mode })}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="setting-row">
           <label>
             Depth
             <select value={config.settings.depth} onChange={(event) => updateSettings({ depth: event.target.value as SayNextSettings["depth"] })}>
@@ -353,83 +408,23 @@ export default function App() {
             </select>
           </label>
           <label>
-            Display
-            <select value={config.settings.displayMode} onChange={(event) => updateSettings({ displayMode: event.target.value as SayNextSettings["displayMode"] })}>
-              <option value="answer">Answer</option>
-              <option value="transcript">Transcript</option>
-              <option value="split">Split</option>
-              <option value="teleprompt">Teleprompt</option>
-            </select>
-          </label>
-          <label>
-            Mic
-            <select value={config.settings.micSource} onChange={(event) => updateSettings({ micSource: event.target.value as SayNextSettings["micSource"] })}>
-              <option value="g2">G2 glasses</option>
-              <option value="phone">Phone</option>
+            Language
+            <select value={config.settings.outputLanguage} onChange={(event) => updateSettings({ outputLanguage: event.target.value as SayNextSettings["outputLanguage"] })}>
+              <option value="english">English</option>
+              <option value="chinese">Chinese</option>
             </select>
           </label>
         </div>
       </section>
 
-      <section className="panel">
-        <h2>Audio</h2>
-        <div className="button-row">
-          <button onClick={startListening}>Start listening</button>
-          <button onClick={stopListening}>Stop</button>
-          <button onClick={connectGlasses}>Reconnect G2</button>
-        </div>
-        <p className="hint">{audioStatus}</p>
-      </section>
-
-      <section className="panel preview">
-        <h2>G2 Preview</h2>
-        <pre>{glassesText}</pre>
-        <p>Audio bytes: {display.audioBytesReceived}</p>
-      </section>
-
-      <details className="panel">
-        <summary>Connection</summary>
-        <label>
-          VPS WebSocket
-          <input value={config.wsUrl} onChange={(event) => setConfig({ ...config, wsUrl: event.target.value })} />
-        </label>
-        <div className="two-col">
-          <label>
-            User
-            <input value={config.userId} onChange={(event) => setConfig({ ...config, userId: event.target.value })} />
-          </label>
-          <label>
-            Session
-            <input value={config.sessionId} onChange={(event) => setConfig({ ...config, sessionId: event.target.value || makeClientSessionId() })} />
-          </label>
-        </div>
-        <label>
-          Token
-          <input value={config.token} onChange={(event) => setConfig({ ...config, token: event.target.value })} />
-        </label>
-        <div className="button-row">
-          <button onClick={connectWs}>Reconnect VPS</button>
-          <button onClick={() => setConfig((current) => ({ ...current, sessionId: makeClientSessionId() }))}>New session</button>
-        </div>
-      </details>
-
-      <details className="panel">
-        <summary>Debug Transcript</summary>
-        <textarea value={debugText} onChange={(event) => setDebugText(event.target.value)} placeholder="Type transcript text for no-glasses testing." />
-        <div className="button-row">
-          <button onClick={() => wsRef.current?.sendDebugTranscript(debugText, false)}>Send transcript</button>
-          <button onClick={() => wsRef.current?.sendDebugTranscript(debugText, true)}>Send + generate</button>
-        </div>
-      </details>
-
-      <details className="panel event-log">
-        <summary>Raw Event Log</summary>
-        <div className="button-row">
-          <button onClick={copyEventLog}>Copy JSON</button>
-          <button onClick={() => setEventLog([])}>Clear log</button>
-        </div>
-        <pre>{eventLog.length ? eventLog.map((entry) => `${entry.time} ${entry.summary}`).join("\n") : "No raw events yet."}</pre>
-      </details>
+      <nav className="action-bar" aria-label="Session actions">
+        <button className={display.recording ? "secondary-action" : "primary-action"} onClick={display.recording ? stopListening : startListening}>
+          {display.recording ? "Pause" : "Resume"}
+        </button>
+        <button className="primary-action" onClick={() => sendControl("generate")}>Generate</button>
+        <button onClick={() => sendControl("regenerate")}>Retry</button>
+        <button onClick={() => sendControl("clear")}>Clear</button>
+      </nav>
     </main>
   );
 }

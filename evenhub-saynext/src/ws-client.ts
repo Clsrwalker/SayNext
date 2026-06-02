@@ -118,6 +118,16 @@ export class SayNextWsClient {
     });
   }
 
+  sendClientEventLog(summary: string, payload?: unknown): void {
+    if (import.meta.env.VITE_SAYNEXT_SEND_EVENT_LOGS !== "true") return;
+    this.send({
+      type: "client_event_log",
+      summary,
+      payload,
+      clientEventId: `client-event-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    });
+  }
+
   private scheduleReconnect(): void {
     this.clearReconnectTimer();
     const delayMs = Math.min(8000, 750 * 2 ** this.reconnectAttempt);

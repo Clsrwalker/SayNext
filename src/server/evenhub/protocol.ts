@@ -1,15 +1,17 @@
 export const EVENHUB_WS_PATH = "/api/evenhub/ws";
 
-export type EvenHubDisplayMode = "answer" | "transcript" | "split" | "teleprompt";
+export type EvenHubDisplayMode = "answer" | "transcript" | "split";
 export type EvenHubDepth = "short" | "normal" | "deep";
-export type EvenHubSceneMode = "auto" | "classroom" | "interview" | "discussion" | "daily" | "teleprompt";
+export type EvenHubSceneMode = "auto" | "classroom" | "interview" | "discussion" | "daily";
 export type EvenHubMicSource = "g2" | "phone";
+export type EvenHubOutputLanguage = "english" | "chinese";
 
 export type EvenHubRuntimeSettings = {
   sceneMode: EvenHubSceneMode;
   depth: EvenHubDepth;
   displayMode: EvenHubDisplayMode;
   micSource: EvenHubMicSource;
+  outputLanguage: EvenHubOutputLanguage;
   manualFirst: boolean;
 };
 
@@ -30,6 +32,12 @@ export type EvenHubClientMessage =
       text: string;
       isFinal?: boolean;
       autoGenerate?: boolean;
+      clientEventId?: string;
+    }
+  | {
+      type: "client_event_log";
+      summary: string;
+      payload?: unknown;
       clientEventId?: string;
     }
   | {
@@ -91,6 +99,7 @@ export function defaultEvenHubSettings(): EvenHubRuntimeSettings {
     depth: "normal",
     displayMode: "answer",
     micSource: "g2",
+    outputLanguage: "english",
     manualFirst: true,
   };
 }
@@ -100,17 +109,20 @@ export function normalizeEvenHubSettings(
   fallback: EvenHubRuntimeSettings = defaultEvenHubSettings(),
 ): EvenHubRuntimeSettings {
   const next = { ...fallback };
-  if (value?.sceneMode && ["auto", "classroom", "interview", "discussion", "daily", "teleprompt"].includes(value.sceneMode)) {
+  if (value?.sceneMode && ["auto", "classroom", "interview", "discussion", "daily"].includes(value.sceneMode)) {
     next.sceneMode = value.sceneMode;
   }
   if (value?.depth && ["short", "normal", "deep"].includes(value.depth)) {
     next.depth = value.depth;
   }
-  if (value?.displayMode && ["answer", "transcript", "split", "teleprompt"].includes(value.displayMode)) {
+  if (value?.displayMode && ["answer", "transcript", "split"].includes(value.displayMode)) {
     next.displayMode = value.displayMode;
   }
   if (value?.micSource && ["g2", "phone"].includes(value.micSource)) {
     next.micSource = value.micSource;
+  }
+  if (value?.outputLanguage && ["english", "chinese"].includes(value.outputLanguage)) {
+    next.outputLanguage = value.outputLanguage;
   }
   if (typeof value?.manualFirst === "boolean") {
     next.manualFirst = value.manualFirst;
@@ -152,6 +164,17 @@ export function parseEvenHubClientMessage(raw: string): EvenHubClientMessage | n
       text,
       isFinal: typeof value.isFinal === "boolean" ? value.isFinal : true,
       autoGenerate: typeof value.autoGenerate === "boolean" ? value.autoGenerate : false,
+      clientEventId: typeof value.clientEventId === "string" ? value.clientEventId : undefined,
+    };
+  }
+
+  if (type === "client_event_log") {
+    const summary = typeof value.summary === "string" ? value.summary.trim() : "";
+    if (!summary) return null;
+    return {
+      type,
+      summary,
+      payload: value.payload,
       clientEventId: typeof value.clientEventId === "string" ? value.clientEventId : undefined,
     };
   }

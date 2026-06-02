@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { defaultWsUrlForLocation, normalizeSavedWsUrl, REMOTE_SAYNEXT_WS_URL } from "./protocol";
+import { defaultWsUrlForLocation, normalizeSavedWsUrl, normalizeSettings, REMOTE_SAYNEXT_WS_URL } from "./protocol";
 
 describe("defaultWsUrlForLocation", () => {
   test("uses the current host for the SayNext VPS", () => {
@@ -46,5 +46,19 @@ describe("normalizeSavedWsUrl", () => {
 
   test("keeps explicit non-Vite websocket URLs", () => {
     expect(normalizeSavedWsUrl("ws://127.0.0.1:3000/api/evenhub/ws")).toBe("ws://127.0.0.1:3000/api/evenhub/ws");
+  });
+});
+
+describe("normalizeSettings", () => {
+  test("drops removed teleprompt values from saved settings", () => {
+    const settings = normalizeSettings({
+      sceneMode: "teleprompt" as never,
+      displayMode: "teleprompt" as never,
+      outputLanguage: "chinese",
+    });
+
+    expect(settings.sceneMode).toBe("auto");
+    expect(settings.displayMode).toBe("answer");
+    expect(settings.outputLanguage).toBe("chinese");
   });
 });

@@ -84,9 +84,10 @@ describe("formatGlassesText", () => {
       totalPages: 1,
     };
     const text = formatGlassesText(state, { ...DEFAULT_SETTINGS, sceneMode: "classroom" });
-    expect(text).toContain("CLASSROOM | NO NEW SPEECH");
+    expect(text).toContain("CLASSROOM | ANSWER+LISTEN");
     expect(text).toContain("Use a GSI");
-    expect(text).toContain("No new speech committed yet.");
+    expect(text).not.toContain("NO NEW SPEECH");
+    expect(text).not.toContain("No new speech committed yet.");
   });
 
   test("formats transcript mode without an answer", () => {

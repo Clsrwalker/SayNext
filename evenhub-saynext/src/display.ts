@@ -2,6 +2,7 @@ import type { SayNextSettings, ServerMessage } from "./protocol";
 
 export type DisplayState = {
   status: string;
+  debugStatus: string;
   recording: boolean;
   transcript: string;
   answerText: string;
@@ -14,6 +15,7 @@ export type DisplayState = {
 
 export const INITIAL_DISPLAY_STATE: DisplayState = {
   status: "Disconnected",
+  debugStatus: "",
   recording: false,
   transcript: "",
   answerText: "",
@@ -26,6 +28,14 @@ export const INITIAL_DISPLAY_STATE: DisplayState = {
 
 const TRANSCRIPT_TAIL_CHARS = 420;
 const BODY_MAX_CHARS = 520;
+const INTERNAL_STATUSES = new Set([
+  "audio_received",
+  "ready",
+  "no_new_speech",
+  "no_current_answer",
+  "cleared",
+  "stt_connected",
+]);
 
 function tail(text: string, maxChars: number): string {
   const compact = text.replace(/\s+/g, " ").trim();
@@ -41,10 +51,18 @@ function trimBody(text: string): string {
 
 export function reduceServerMessage(state: DisplayState, message: ServerMessage): DisplayState {
   if (message.type === "status") {
+    const nextRecording = message.status === "listening"
+      ? true
+      : message.status === "cleared"
+        ? false
+        : state.recording;
+    const debugStatus = message.message || message.status;
+    const shouldShowStatus = !INTERNAL_STATUSES.has(message.status);
     return {
       ...state,
-      status: message.message || message.status,
-      recording: message.status === "listening" ? true : message.status === "cleared" ? false : state.recording,
+      status: shouldShowStatus ? debugStatus : nextRecording ? "Listening" : state.answerText ? "Answer" : "Ready",
+      debugStatus,
+      recording: nextRecording,
       audioBytesReceived: message.audioBytesReceived ?? state.audioBytesReceived,
       error: "",
     };
@@ -55,6 +73,7 @@ export function reduceServerMessage(state: DisplayState, message: ServerMessage)
       ...state,
       transcript: message.text,
       status: message.type === "transcript_final" ? "Transcript ready" : "Listening",
+      debugStatus: "",
       error: "",
     };
   }
@@ -67,6 +86,7 @@ export function reduceServerMessage(state: DisplayState, message: ServerMessage)
       pageIndex: message.pageIndex,
       totalPages: message.totalPages,
       status: "Answer",
+      debugStatus: "",
       error: "",
     };
   }
@@ -74,13 +94,21 @@ export function reduceServerMessage(state: DisplayState, message: ServerMessage)
   if (message.type === "answer_done") {
     return {
       ...state,
-      status: message.status === "ok" ? "Ready" : message.status.replace(/_/g, " "),
+      status: message.status === "ok"
+        ? state.recording
+          ? "Listening"
+          : "Ready"
+        : state.answerText
+          ? "Answer"
+          : "Ready",
+      debugStatus: message.status,
     };
   }
 
   return {
     ...state,
     status: "Error",
+    debugStatus: message.message,
     error: message.message,
   };
 }
@@ -89,7 +117,7 @@ export function formatGlassesText(state: DisplayState, settings: SayNextSettings
   const scene = settings.sceneMode.toUpperCase();
   const page = state.totalPages > 1 ? ` ${state.pageIndex + 1}/${state.totalPages}` : "";
   const normalizedStatus = state.status.toLowerCase().replace(/\s+/g, "_");
-  const attentionStatus = ["generating", "regenerating", "busy", "no_new_speech", "no_current_answer", "error"].includes(normalizedStatus)
+  const attentionStatus = ["generating", "regenerating", "busy", "error"].includes(normalizedStatus)
     ? normalizedStatus.replace(/_/g, " ").toUpperCase()
     : "";
   const status = attentionStatus || (state.answerText && !state.recording
@@ -114,9 +142,7 @@ export function formatGlassesText(state: DisplayState, settings: SayNextSettings
   }
 
   if (state.answerText) {
-    const notice = attentionStatus === "NO NEW SPEECH"
-      ? "\n\nNo new speech committed yet."
-      : attentionStatus === "BUSY"
+    const notice = attentionStatus === "BUSY"
         ? "\n\nStill generating. Wait a moment."
         : "";
     return `${header}\n\n${trimBody(state.answerText)}${notice}`;

@@ -1,13 +1,15 @@
-export type SceneMode = "auto" | "classroom" | "interview" | "discussion" | "daily" | "teleprompt";
+export type SceneMode = "auto" | "classroom" | "interview" | "discussion" | "daily";
 export type AnswerDepth = "short" | "normal" | "deep";
-export type DisplayMode = "answer" | "transcript" | "split" | "teleprompt";
+export type DisplayMode = "answer" | "transcript" | "split";
 export type MicSource = "g2" | "phone";
+export type OutputLanguage = "english" | "chinese";
 
 export type SayNextSettings = {
   sceneMode: SceneMode;
   depth: AnswerDepth;
   displayMode: DisplayMode;
   micSource: MicSource;
+  outputLanguage: OutputLanguage;
   manualFirst: boolean;
 };
 
@@ -26,6 +28,12 @@ export type ClientMessage =
   | {
       type: "settings";
       settings: Partial<SayNextSettings>;
+    }
+  | {
+      type: "client_event_log";
+      summary: string;
+      payload?: unknown;
+      clientEventId?: string;
     }
   | {
       type: "debug_transcript";
@@ -81,10 +89,11 @@ export const DEFAULT_SETTINGS: SayNextSettings = {
   depth: "normal",
   displayMode: "answer",
   micSource: "g2",
+  outputLanguage: "english",
   manualFirst: true,
 };
 
-export const APP_VERSION = "0.1.9";
+export const APP_VERSION = "0.1.11";
 export const REMOTE_SAYNEXT_WS_URL = "wss://saynext.167.172.153.109.sslip.io/api/evenhub/ws";
 
 type LocationLike = Pick<Location, "protocol" | "hostname" | "host" | "port">;
@@ -138,4 +147,27 @@ export function makeClientSessionId(): string {
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   return `evenhub-${random}`;
+}
+
+export function normalizeSettings(value: Partial<SayNextSettings> | undefined): SayNextSettings {
+  const next = { ...DEFAULT_SETTINGS };
+  if (value?.sceneMode && ["auto", "classroom", "interview", "discussion", "daily"].includes(value.sceneMode)) {
+    next.sceneMode = value.sceneMode;
+  }
+  if (value?.depth && ["short", "normal", "deep"].includes(value.depth)) {
+    next.depth = value.depth;
+  }
+  if (value?.displayMode && ["answer", "transcript", "split"].includes(value.displayMode)) {
+    next.displayMode = value.displayMode;
+  }
+  if (value?.micSource && ["g2", "phone"].includes(value.micSource)) {
+    next.micSource = value.micSource;
+  }
+  if (value?.outputLanguage && ["english", "chinese"].includes(value.outputLanguage)) {
+    next.outputLanguage = value.outputLanguage;
+  }
+  if (typeof value?.manualFirst === "boolean") {
+    next.manualFirst = value.manualFirst;
+  }
+  return next;
 }

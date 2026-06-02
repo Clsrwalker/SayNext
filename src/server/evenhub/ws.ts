@@ -84,6 +84,12 @@ function summarizeClientMessage(message: ReturnType<typeof parseEvenHubClientMes
   if (message.type === "debug_transcript") {
     return `recv type=debug_transcript len=${message.text.length} autoGenerate=${Boolean(message.autoGenerate)}`;
   }
+  if (message.type === "client_event_log") {
+    const payload = message.payload === undefined
+      ? ""
+      : ` payload=${JSON.stringify(message.payload).slice(0, 500)}`;
+    return `recv type=client_event_log summary=${JSON.stringify(message.summary).slice(0, 240)}${payload}`;
+  }
   return `recv type=control action=${message.action} event=${message.clientEventId || "-"}`;
 }
 

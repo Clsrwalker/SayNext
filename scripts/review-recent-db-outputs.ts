@@ -58,6 +58,36 @@ function classify(row: SampleRow): Review {
   const outputAsksQuestion = /\?\s*$/.test((row.aiReply || "").trim());
   const isGreeting = /^(hello|hi|hey)[.!?,\s]*$/i.test(row.transcript.trim());
   const isAttendance = /\b(attendance|brightspace)\b/i.test(row.transcript);
+  const isTechnical = /\b(database|index|locking|api gateway|microservice|grpc|kafka|flink|shard|recommendation|latency|query|architecture|cdn|cloudfront|edge|model|feature|vector|dynamodb|redis|elasticsearch|consistency|partition)\b/i.test(row.transcript);
+  const isGenericFiller = /\b(main idea is pretty straightforward|let me explain it in a simple way|i can talk about that|i can explain that)\b/i.test(row.aiReply || "");
+
+  if (isTechnical && isGenericFiller) {
+    return {
+      taxonomy: "quality_failure:generic_technical_filler",
+      severity: 3,
+      reason: "Technical/classroom transcript got a generic filler reply instead of a concrete mechanism, example, or trade-off.",
+      expectedProcess: [
+        "identify the current technical concept",
+        "answer with the mechanism or useful lecture supplement",
+        "avoid empty openings like 'main idea is straightforward'",
+      ],
+      feedbackQuestion: "Should the classroom answer favor a concrete mechanism/trade-off even when the transcript is a lecture fragment?",
+    };
+  }
+
+  if (isTechnical && outputWords > 0 && outputWords < 18) {
+    return {
+      taxonomy: "quality_failure:too_shallow_technical",
+      severity: 2,
+      reason: `Technical/classroom reply is probably too shallow (${outputWords} words).`,
+      expectedProcess: [
+        "do not force an overly short word count",
+        "include one concrete mechanism",
+        "add one trade-off, example, or next concept when useful",
+      ],
+      feedbackQuestion: "Should technical/classroom replies be allowed to use 2-4 short sentences when needed?",
+    };
+  }
 
   if (isShortAck && hasLectureCarryover) {
     return {
@@ -115,17 +145,18 @@ function classify(row: SampleRow): Review {
     };
   }
 
-  if (outputWords > 45) {
+  const longOutputLimit = isTechnical ? 90 : 65;
+  if (outputWords > longOutputLimit) {
     return {
       taxonomy: "quality_watch:length",
       severity: 1,
-      reason: `Output is long for live SayNext use (${outputWords} words).`,
+      reason: `Output is long for this live scene (${outputWords} words, limit ${longOutputLimit}).`,
       expectedProcess: [
-        "keep live answer concise",
+        "keep live answer readable",
         "preserve main answer",
-        "avoid overexplaining",
+        "avoid unnecessary overexplaining",
       ],
-      feedbackQuestion: "Should this answer be compressed to one sentence, or is a two-sentence explanation acceptable?",
+      feedbackQuestion: "Should this answer be shortened, or is the extra depth useful for this scene?",
     };
   }
 

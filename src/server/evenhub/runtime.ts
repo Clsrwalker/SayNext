@@ -25,6 +25,7 @@ type ManualHandlerLike = {
   getManualState(): ManualRuntimeState;
   getRuntimeSessionId(): string;
   setManualPromptModeOverride?: (mode: PromptMode | null) => void;
+  outputLanguage?: "english" | "chinese";
   onStatus?: (event: { type: string; [key: string]: unknown }) => void;
   onInsight?: (insight: { text: string; timestamp: number; agentType: string; reasoning: string }) => void;
 };
@@ -124,7 +125,6 @@ function promptModeForEvenHubScene(sceneMode: EvenHubRuntimeSettings["sceneMode"
   if (sceneMode === "auto") return null;
   if (sceneMode === "daily") return "casual";
   if (sceneMode === "discussion") return "general";
-  if (sceneMode === "teleprompt") return "general";
   if (sceneMode === "classroom" || sceneMode === "interview") return sceneMode;
   return null;
 }
@@ -166,6 +166,7 @@ export class EvenHubRuntime {
     this.settings = normalizeEvenHubSettings(options.settings, defaultEvenHubSettings());
     this.manualHandler = options.manualHandler || createMergeManualHandler(this.userId, (message) => this.sendMessage(message));
     this.applySceneModeOverride();
+    this.applyOutputLanguage();
     this.sttAdapter = (options.sttAdapterFactory || createEvenHubSttAdapter)({
       onTranscript: (event) => this.handleSttTranscript(event.text, event.isFinal),
       onStatus: (message) => this.sendMessage({ type: "status", status: "stt_status", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message }),
@@ -228,6 +229,7 @@ export class EvenHubRuntime {
     if (message.type === "hello") {
       this.settings = normalizeEvenHubSettings(message.settings, this.settings);
       this.applySceneModeOverride();
+      this.applyOutputLanguage();
       this.sendMessage({
         type: "status",
         status: "ready",
@@ -242,6 +244,7 @@ export class EvenHubRuntime {
     if (message.type === "settings") {
       this.settings = normalizeEvenHubSettings(message.settings, this.settings);
       this.applySceneModeOverride();
+      this.applyOutputLanguage();
       this.sendMessage({
         type: "status",
         status: "settings_updated",
@@ -258,6 +261,10 @@ export class EvenHubRuntime {
       if (message.autoGenerate) {
         await this.generate(message.clientEventId);
       }
+      return;
+    }
+
+    if (message.type === "client_event_log") {
       return;
     }
 
@@ -463,6 +470,10 @@ export class EvenHubRuntime {
 
   private applySceneModeOverride(): void {
     this.manualHandler.setManualPromptModeOverride?.(promptModeForEvenHubScene(this.settings.sceneMode));
+  }
+
+  private applyOutputLanguage(): void {
+    this.manualHandler.outputLanguage = this.settings.outputLanguage;
   }
 
   private sendMessage(message: EvenHubServerMessage): void {

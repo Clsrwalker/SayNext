@@ -83,6 +83,8 @@ test("parseEvenHubClientMessage accepts debug transcripts and control commands",
     .toMatchObject({ type: "debug_transcript", text: "What is a GSI?" });
   expect(parseEvenHubClientMessage(JSON.stringify({ type: "control", action: "generate" })))
     .toMatchObject({ type: "control", action: "generate" });
+  expect(parseEvenHubClientMessage(JSON.stringify({ type: "client_event_log", summary: "kind=sys type=1 gesture=tap" })))
+    .toMatchObject({ type: "client_event_log", summary: "kind=sys type=1 gesture=tap" });
   expect(parseEvenHubClientMessage(JSON.stringify({ type: "control", action: "bad" }))).toBeNull();
 });
 
@@ -103,6 +105,24 @@ test("EvenHubRuntime commits debug transcript and emits generated answer", async
   expect(sent.some((message) => message.type === "transcript_final" && message.text.includes("database index"))).toBe(true);
   expect(sent.some((message) => message.type === "answer_page" && message.text.includes("find rows faster"))).toBe(true);
   expect(sent.some((message) => message.type === "answer_done" && message.status === "ok")).toBe(true);
+});
+
+test("EvenHubRuntime applies output language settings to manual handler", async () => {
+  const sent: EvenHubServerMessage[] = [];
+  const manualHandler = makeManualHandler();
+  const runtime = new EvenHubRuntime({
+    userId: "test-user",
+    send: (message) => sent.push(message),
+    manualHandler,
+  });
+
+  await runtime.handleClientMessage({
+    type: "settings",
+    settings: { outputLanguage: "chinese" },
+  });
+
+  expect(manualHandler.outputLanguage).toBe("chinese");
+  expect(sent.some((message) => message.type === "status" && message.status === "settings_updated")).toBe(true);
 });
 
 test("EvenHubRuntime reports audio chunk receipt before STT adapter is enabled", () => {
