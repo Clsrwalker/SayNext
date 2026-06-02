@@ -1,0 +1,29 @@
+{
+  "package_id": "com.xiangli.saynext.evenhub",
+  "name": "SayNext",
+  "version": "0.1.0",
+  "edition": "202601",
+  "description": "Manual-first live conversation support for Even G2 glasses.",
+  "tagline": "Listen, generate, and page SayNext replies from your G2.",
+  "author": "Xiang Li",
+  "entrypoint": "index.html",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.10",
+  "supported_languages": ["en"],
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Connects to the SayNext VPS websocket for STT and response generation.",
+      "whitelist": [
+        "https://saynext.167.172.153.109.sslip.io",
+        "wss://saynext.167.172.153.109.sslip.io",
+        "http://localhost:3000",
+        "ws://localhost:3000"
+      ]
+    },
+    {
+      "name": "g2-microphone",
+      "desc": "Streams G2 microphone PCM to the SayNext VPS for live transcription."
+    }
+  ]
+}

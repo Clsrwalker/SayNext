@@ -1,0 +1,178 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #161616;
+  background: #f4f5f2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #d9ddd4;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  background: #f9fbf3;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #68705f;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+h2 {
+  margin-bottom: 10px;
+  font-size: 15px;
+}
+
+.status-grid {
+  min-width: 118px;
+  display: grid;
+  gap: 4px;
+  text-align: right;
+  color: #4f5848;
+  font-size: 12px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: #4f5848;
+  font-size: 12px;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid #ccd0c8;
+  border-radius: 6px;
+  padding: 10px;
+  color: #171717;
+  background: #fbfbfa;
+}
+
+textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+button {
+  border: 1px solid #b9c0b2;
+  background: #eef3e8;
+  color: #151915;
+  border-radius: 6px;
+  padding: 9px 11px;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+.segmented {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.segmented button {
+  padding: 8px 10px;
+  background: #f5f6f2;
+}
+
+.segmented button.active {
+  background: #1d241a;
+  color: #ffffff;
+  border-color: #1d241a;
+}
+
+.preview pre {
+  min-height: 170px;
+  white-space: pre-wrap;
+  margin: 0;
+  background: #10140f;
+  color: #f2f4ee;
+  padding: 12px;
+  border-radius: 6px;
+  line-height: 1.35;
+}
+
+.event-log pre {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 10px 0 0;
+  background: #f5f6f2;
+  color: #20251d;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.preview p {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #5e6658;
+}
+
+@media (max-width: 520px) {
+  .hero,
+  .two-col {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .status-grid {
+    text-align: left;
+  }
+}

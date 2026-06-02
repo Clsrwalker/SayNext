@@ -7,6 +7,7 @@
 
 import { MergeApp } from "./server/MergeApp";
 import { api } from "./server/routes/routes";
+import { evenHubWebSocket, tryUpgradeEvenHubWebSocket } from "./server/evenhub/ws";
 import { createMentraAuthRoutes } from "@mentra/sdk";
 import indexHtml from "./frontend/index.html";
 
@@ -82,7 +83,11 @@ Bun.serve({
     "/webview": indexHtml,
     "/webview/*": indexHtml,
   },
-  async fetch(request) {
+  websocket: evenHubWebSocket,
+  async fetch(request, server) {
+    const evenHubWsResponse = tryUpgradeEvenHubWebSocket(request, server);
+    if (evenHubWsResponse !== null) return evenHubWsResponse;
+
     const url = new URL(request.url);
 
     // Serve static assets from /assets/

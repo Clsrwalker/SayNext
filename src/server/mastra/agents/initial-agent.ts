@@ -10,6 +10,7 @@ import {
 } from "./openai-conversation-state";
 import { normalizeKnownProjectAsrAliases } from "../../text/asr-corrections";
 import { buildProcessTrace } from "../../saynext/process-router";
+import type { PromptMode } from "../../saynext/process-router";
 import {
   LLM_PROVIDER,
   MODEL_NAME,
@@ -92,6 +93,7 @@ export interface ProcessConversationOptions {
   openAiConversationSession?: OpenAiConversationSession;
   transcriptCommitReason?: TranscriptCommitReason;
   responseStyle?: "auto" | "manual";
+  promptModeOverride?: PromptMode;
 }
 
 export async function processConversation(
@@ -107,7 +109,7 @@ export async function processConversation(
   const currentTimestamp = Date.now();
   const rawLatestTranscript = getLatestTranscript(conversation);
   const latestTranscript = normalizeKnownProjectAsrAliases(rawLatestTranscript);
-  const promptMode = detectPromptMode(latestTranscript, eventMemory);
+  const promptMode = options.promptModeOverride || detectPromptMode(latestTranscript, eventMemory);
   const isClassroomMode = promptMode === "classroom";
   const latestTranscriptIndex = findLatestTranscriptIndex(conversation);
   const compactConversation = conversation
@@ -194,6 +196,12 @@ export async function processConversation(
   const manualResponseInstruction = options.responseStyle === "manual"
     ? "Manual G2 display: answer with 45-120 English words when useful. Still be natural, direct, and sayable. Do not use Markdown."
     : "";
+  const conversationStateTaskHint = [
+    isClassroomMode
+      ? "Classroom mode: if the transcript is a clear question, answer it directly using general knowledge; do not ask for repetition unless the transcript is genuinely unclear."
+      : "",
+    manualResponseInstruction,
+  ].filter(Boolean).join("\n");
   const dynamicPromptCore = [
     `Output language: ${outputLanguageText}`,
     manualResponseInstruction,
@@ -203,7 +211,7 @@ export async function processConversation(
     outputLanguage: outputLanguageText,
     promptMode,
     preparedNote: formattedPrenoteContext,
-    taskHint: manualResponseInstruction,
+    taskHint: conversationStateTaskHint,
   });
 
   const prompt = `${stablePromptPrefix}\n\n${dynamicPromptSuffix}`;
@@ -245,6 +253,7 @@ export async function processConversation(
           latestTranscript,
           outputLanguage: outputLanguageText,
           promptMode,
+          taskHint: conversationStateTaskHint,
           preparedNote: formattedPrenoteContext,
           timeoutMs: OPENAI_TIMEOUT_MS,
         });

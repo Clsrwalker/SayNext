@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { AppSession } from '@mentra/sdk';
 import { Action, AgentType, type AgentResponse, type AgentInsight, type Conversation, type AgentRoute } from "../types";
-import { generateOptionalContinuation, generateTelepromptScript, processConversation, type OutputLanguage } from "./initial-agent";
+import { generateOptionalContinuation, generateTelepromptScript, processConversation, type OutputLanguage, type PromptMode } from "./initial-agent";
 import { routeToSpecialist } from "./specialist-agents";
 import { INSIGHTS_HISTORY_LENGTH, TRANSCRIPT_HISTORY_LENGTH, INSIGHT_CACHE_SIZE, SIMILARITY_THRESHOLD, INSIGHT_DISPLAY_DURATION_MS, MANUAL_PAUSE_DISPLAY_DURATION_MS, TELEPROMPT_DISPLAY_DURATION_MS } from '../../config';
 import { findBestMatch } from 'string-similarity';
@@ -530,6 +530,7 @@ export class MergeResponseHandler {
   private currentManualAnswer: ManualAnswer | null = null;
   private manualStateVersion: number = 0;
   private manualActionResults: Map<string, { expiresAt: number; result: ManualActionResult }> = new Map();
+  private manualPromptModeOverride: PromptMode | null = null;
   public frequency: 'low' | 'medium' | 'high';
   public outputLanguage: OutputLanguage;
 
@@ -1327,6 +1328,12 @@ export class MergeResponseHandler {
     return this.sessionId;
   }
 
+  setManualPromptModeOverride(mode: PromptMode | null): void {
+    this.manualPromptModeOverride = mode;
+    this.bumpManualState();
+    this.onStatus?.({ type: "manual_status", reason: "prompt_mode_override_updated", state: this.getManualState() });
+  }
+
   getManualState(): ManualRuntimeState {
     return {
       mode: this.interactionMode,
@@ -1563,7 +1570,7 @@ export class MergeResponseHandler {
         timestamp,
         segments.map((segment) => segment.text),
       );
-      const promptMode = detectPromptMode(latestText, eventSnapshot);
+      const promptMode = this.manualPromptModeOverride || detectPromptMode(latestText, eventSnapshot);
       const isClassroomMode = promptMode === "classroom";
       const telepromptNeed = "none";
       const prenoteQuery = [
@@ -1593,6 +1600,7 @@ export class MergeResponseHandler {
           openAiConversationSession: this.openAiConversationSession,
           transcriptCommitReason: "final",
           responseStyle: "manual",
+          promptModeOverride: this.manualPromptModeOverride || undefined,
         },
       );
 
