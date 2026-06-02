@@ -14,6 +14,7 @@ import { OpenAiConversationSession, isOpenAiConversationStateEnabled } from './o
 import { normalizeKnownProjectAsrAliases } from '../../text/asr-corrections';
 import { detectPromptMode } from '../../saynext/context-builder';
 import { sayNextConversationStateInstructions } from '../../saynext/prompts';
+import { evenHubConversationStateInstructions } from '../../evenhub/prompts';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 const SUGGESTION_ECHO_WINDOW_MS = 45 * 1000;
@@ -125,6 +126,7 @@ type ReadbackContinuationPrefetch = {
 };
 
 export type InteractionMode = "g1_auto" | "g2_manual";
+type PromptPreset = "saynext" | "evenhub";
 
 type TranscriptSegment = {
   id: string;
@@ -531,6 +533,7 @@ export class MergeResponseHandler {
   private manualStateVersion: number = 0;
   private manualActionResults: Map<string, { expiresAt: number; result: ManualActionResult }> = new Map();
   private manualPromptModeOverride: PromptMode | null = null;
+  private promptPreset: PromptPreset;
   public frequency: 'low' | 'medium' | 'high';
   public outputLanguage: OutputLanguage;
 
@@ -545,6 +548,7 @@ export class MergeResponseHandler {
     initialFrequency: 'low' | 'medium' | 'high' = 'high',
     initialOutputLanguage: OutputLanguage = "english",
     initialInteractionMode: InteractionMode = "g1_auto",
+    promptPreset: PromptPreset = "saynext",
   ) {
     this.session = session;
     this.userId = userId;
@@ -552,8 +556,12 @@ export class MergeResponseHandler {
     this.locationManager = locationManager;
     this.conversation = [];
     this.openAiConversationSession = new OpenAiConversationSession({ userId, sessionId: this.sessionId });
+    this.promptPreset = promptPreset;
+    const seedInstructions = promptPreset === "evenhub"
+      ? evenHubConversationStateInstructions
+      : sayNextConversationStateInstructions;
     if (isOpenAiConversationStateEnabled(process.env.LLM_PROVIDER || "openai")) {
-      this.openAiConversationSession.warmup(Number(process.env.OPENAI_CONVERSATION_WARMUP_TIMEOUT_MS || 8000), sayNextConversationStateInstructions)
+      this.openAiConversationSession.warmup(Number(process.env.OPENAI_CONVERSATION_WARMUP_TIMEOUT_MS || 8000), seedInstructions)
         .then((conversationId) => this.session.logger.info(`OpenAI conversation state warmed up: ${conversationId}`))
         .catch((error) => this.session.logger.warn(`OpenAI conversation warmup skipped: ${error instanceof Error ? error.message : String(error)}`));
     }
@@ -1601,6 +1609,7 @@ export class MergeResponseHandler {
           transcriptCommitReason: "final",
           responseStyle: "manual",
           promptModeOverride: this.manualPromptModeOverride || undefined,
+          promptPreset: this.promptPreset,
         },
       );
 

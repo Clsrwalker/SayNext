@@ -3,6 +3,7 @@ import { connectBridge, type BridgeHandle, type BridgeLifecycleEvent } from "./b
 import { commandForGesture, normalizeGlassEvent, redactEventPayload, summarizeRawEvent } from "./events";
 import { formatGlassesText, INITIAL_DISPLAY_STATE, reduceServerMessage, type DisplayState } from "./display";
 import { DEFAULT_SETTINGS, defaultRelayToken, defaultWsUrl, makeClientSessionId, normalizeSavedWsUrl, type SayNextSettings, type ServerMessage } from "./protocol";
+import { startPhoneMic, type PhoneMicHandle } from "./phone-audio";
 import { SayNextWsClient } from "./ws-client";
 
 const STORAGE_KEY = "saynext-evenhub-settings";
@@ -55,6 +56,7 @@ export default function App() {
   const [display, setDisplay] = useState<DisplayState>(INITIAL_DISPLAY_STATE);
   const [bridgeStatus, setBridgeStatus] = useState("Bridge not connected");
   const [wsStatus, setWsStatus] = useState("Disconnected");
+  const [audioStatus, setAudioStatus] = useState("Audio idle");
   const [debugText, setDebugText] = useState("");
   const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
   const bridgeRef = useRef<BridgeHandle | null>(null);
@@ -63,6 +65,7 @@ export default function App() {
   const displayRef = useRef(display);
   const glassesTextRef = useRef("");
   const bridgeConnectingRef = useRef(false);
+  const phoneMicRef = useRef<PhoneMicHandle | null>(null);
   const pendingTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wantListeningRef = useRef(true);
 
@@ -134,6 +137,46 @@ export default function App() {
     sendControl(action);
   }, [clearPendingTap, sendControl]);
 
+  const stopPhoneMic = useCallback(async () => {
+    const handle = phoneMicRef.current;
+    phoneMicRef.current = null;
+    if (!handle) return;
+    await handle.stop().catch((error) => {
+      setAudioStatus(error instanceof Error ? error.message : String(error));
+    });
+  }, []);
+
+  const startSelectedAudio = useCallback(async () => {
+    wantListeningRef.current = true;
+    sendControl("start_listening");
+
+    if (configRef.current.settings.micSource === "phone") {
+      await bridgeRef.current?.setRecording(false).catch(() => undefined);
+      if (!phoneMicRef.current) {
+        phoneMicRef.current = await startPhoneMic({
+          onPcm: (pcm) => wsRef.current?.sendAudio(pcm),
+          onStatus: setAudioStatus,
+        });
+      }
+      setAudioStatus("Phone mic listening");
+    } else {
+      await stopPhoneMic();
+      await bridgeRef.current?.setRecording(true);
+      setAudioStatus("G2 mic listening");
+    }
+
+    setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
+  }, [sendControl, stopPhoneMic]);
+
+  const stopSelectedAudio = useCallback(async () => {
+    wantListeningRef.current = false;
+    await bridgeRef.current?.setRecording(false).catch(() => undefined);
+    await stopPhoneMic();
+    sendControl("stop_listening");
+    setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
+    setAudioStatus("Audio idle");
+  }, [sendControl, stopPhoneMic]);
+
   const connectWs = useCallback(() => {
     const activeConfig = configRef.current;
     wsRef.current?.close();
@@ -147,22 +190,23 @@ export default function App() {
       onStatus: setWsStatus,
       onOpen: () => {
         if (!wantListeningRef.current) return;
-        wsRef.current?.sendControl("start_listening");
-        void bridgeRef.current?.setRecording(true).catch(() => undefined);
-        setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
+        void startSelectedAudio().catch((error) => {
+          setAudioStatus(error instanceof Error ? error.message : String(error));
+        });
       },
     });
     wsRef.current = client;
     client.connect();
-  }, [handleServerMessage]);
+  }, [handleServerMessage, startSelectedAudio]);
 
   useEffect(() => {
     connectWs();
     return () => {
       clearPendingTap();
+      void stopPhoneMic();
       wsRef.current?.close();
     };
-  }, [connectWs]);
+  }, [clearPendingTap, connectWs, stopPhoneMic]);
 
   const connectGlasses = useCallback(async () => {
     if (bridgeRef.current || bridgeConnectingRef.current) return;
@@ -174,20 +218,23 @@ export default function App() {
         setBridgeStatus(`G2 ${event.replace(/_/g, " ")}`);
         if (event === "foreground_exit" || event === "abnormal_exit" || event === "system_exit") {
           clearPendingTap();
-          wantListeningRef.current = false;
-          void bridgeRef.current?.setRecording(false).catch(() => undefined);
-          sendControl("stop_listening");
-          setDisplay((current) => ({
-            ...current,
-            recording: false,
-            status: event.replace(/_/g, " "),
-          }));
+          void stopSelectedAudio().then(() => {
+            setDisplay((current) => ({
+              ...current,
+              recording: false,
+              status: event.replace(/_/g, " "),
+            }));
+          });
         }
       };
 
       bridgeRef.current = await connectBridge({
         onStatus: setBridgeStatus,
-        onAudio: (pcm) => wsRef.current?.sendAudio(pcm),
+        onAudio: (pcm) => {
+          if (configRef.current.settings.micSource === "g2") {
+            wsRef.current?.sendAudio(pcm);
+          }
+        },
         onLifecycle: handleLifecycle,
         onEvent: (event) => {
           pushEventLog(summarizeRawEvent(event), redactEventPayload(event));
@@ -195,32 +242,25 @@ export default function App() {
           const action = commandForGesture(gesture, Boolean(displayRef.current.transcript), displayRef.current.recording);
           if (!action) return;
           if (action === "start_listening") {
-            wantListeningRef.current = true;
-            void bridgeRef.current?.setRecording(true);
-            sendControl("start_listening");
-            setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
+            void startSelectedAudio().catch((error) => {
+              setAudioStatus(error instanceof Error ? error.message : String(error));
+            });
           } else if (action === "stop_listening") {
-            wantListeningRef.current = false;
-            void bridgeRef.current?.setRecording(false);
-            sendControl("stop_listening");
-            setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
+            void stopSelectedAudio();
           } else {
             dispatchGestureAction(action);
           }
         },
       });
       await bridgeRef.current.render(glassesTextRef.current);
-      wantListeningRef.current = true;
-      await bridgeRef.current.setRecording(true);
-      sendControl("start_listening");
-      setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
+      await startSelectedAudio();
       setBridgeStatus("Bridge connected; listening");
     } catch (error) {
       setBridgeStatus(error instanceof Error ? error.message : String(error));
     } finally {
       bridgeConnectingRef.current = false;
     }
-  }, [clearPendingTap, dispatchGestureAction, pushEventLog, sendControl]);
+  }, [clearPendingTap, dispatchGestureAction, pushEventLog, startSelectedAudio, stopSelectedAudio]);
 
   useEffect(() => {
     void connectGlasses();
@@ -235,18 +275,19 @@ export default function App() {
   };
 
   const startListening = async () => {
-    wantListeningRef.current = true;
-    await bridgeRef.current?.setRecording(true);
-    sendControl("start_listening");
-    setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
+    await startSelectedAudio();
   };
 
   const stopListening = async () => {
-    wantListeningRef.current = false;
-    await bridgeRef.current?.setRecording(false);
-    sendControl("stop_listening");
-    setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
+    await stopSelectedAudio();
   };
+
+  useEffect(() => {
+    if (!wantListeningRef.current || !display.recording) return;
+    void startSelectedAudio().catch((error) => {
+      setAudioStatus(error instanceof Error ? error.message : String(error));
+    });
+  }, [config.settings.micSource, display.recording, startSelectedAudio]);
 
   return (
     <main className="app-shell">
@@ -284,7 +325,6 @@ export default function App() {
           <button onClick={() => sendControl("page_next")}>Next</button>
           <button onClick={() => sendControl("clear")}>Clear</button>
         </div>
-        <p className="hint">G2/R1: tap generates from new speech, double tap retries, scroll pages.</p>
       </section>
 
       <section className="panel">
@@ -318,6 +358,13 @@ export default function App() {
               <option value="teleprompt">Teleprompt</option>
             </select>
           </label>
+          <label>
+            Mic
+            <select value={config.settings.micSource} onChange={(event) => updateSettings({ micSource: event.target.value as SayNextSettings["micSource"] })}>
+              <option value="g2">G2 glasses</option>
+              <option value="phone">Phone</option>
+            </select>
+          </label>
         </div>
       </section>
 
@@ -328,6 +375,7 @@ export default function App() {
           <button onClick={stopListening}>Stop</button>
           <button onClick={connectGlasses}>Reconnect G2</button>
         </div>
+        <p className="hint">{audioStatus}</p>
       </section>
 
       <section className="panel preview">
@@ -377,7 +425,7 @@ export default function App() {
           <button onClick={copyEventLog}>Copy JSON</button>
           <button onClick={() => setEventLog([])}>Clear log</button>
         </div>
-        <pre>{eventLog.length ? eventLog.map((entry) => `${entry.time} ${entry.summary}`).join("\n") : "No G2/R1 events yet."}</pre>
+        <pre>{eventLog.length ? eventLog.map((entry) => `${entry.time} ${entry.summary}`).join("\n") : "No raw events yet."}</pre>
       </details>
     </main>
   );

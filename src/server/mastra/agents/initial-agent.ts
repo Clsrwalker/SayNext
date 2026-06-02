@@ -16,6 +16,9 @@ import {
   MODEL_NAME,
   OLLAMA_MODEL,
   OPENAI_TIMEOUT_MS,
+  evenHubAgentHigh,
+  evenHubAgentLow,
+  evenHubAgentMedium,
   generateWithOllama,
   initialAgentHigh,
   initialAgentLow,
@@ -24,6 +27,12 @@ import {
   withModelTimeout,
 } from "../../saynext/model-runtime";
 import { buildSayNextLiveTaskPrompt, sayNextConversationStateInstructions, sayNextInstructions } from "../../saynext/prompts";
+import {
+  buildEvenHubLiveTaskPrompt,
+  evenHubConversationStateInstructions,
+  evenHubManualResponseInstruction,
+  evenHubSystemInstructions,
+} from "../../evenhub/prompts";
 import {
   buildLiveXiangProfile,
   compactRuntimeContextBlock,
@@ -94,6 +103,7 @@ export interface ProcessConversationOptions {
   transcriptCommitReason?: TranscriptCommitReason;
   responseStyle?: "auto" | "manual";
   promptModeOverride?: PromptMode;
+  promptPreset?: "saynext" | "evenhub";
 }
 
 export async function processConversation(
@@ -110,6 +120,9 @@ export async function processConversation(
   const rawLatestTranscript = getLatestTranscript(conversation);
   const latestTranscript = normalizeKnownProjectAsrAliases(rawLatestTranscript);
   const promptMode = options.promptModeOverride || detectPromptMode(latestTranscript, eventMemory);
+  const promptPreset = options.promptPreset === "evenhub" ? "evenhub" : "saynext";
+  const systemInstructions = promptPreset === "evenhub" ? evenHubSystemInstructions : sayNextInstructions;
+  const conversationStateInstructions = promptPreset === "evenhub" ? evenHubConversationStateInstructions : sayNextConversationStateInstructions;
   const isClassroomMode = promptMode === "classroom";
   const latestTranscriptIndex = findLatestTranscriptIndex(conversation);
   const compactConversation = conversation
@@ -183,7 +196,7 @@ export async function processConversation(
     }
   }
 
-  const stablePromptPrefix = buildSayNextLiveTaskPrompt({
+  const stablePromptPrefix = (promptPreset === "evenhub" ? buildEvenHubLiveTaskPrompt : buildSayNextLiveTaskPrompt)({
     formattedSceneProfile: isClassroomMode
       ? ""
       : compactRuntimeContextBlock(activeSceneProfilePrompt.trim(), 900),
@@ -194,7 +207,9 @@ export async function processConversation(
 
   const outputLanguageText = outputLanguage === "chinese" ? "Chinese" : "English";
   const manualResponseInstruction = options.responseStyle === "manual"
-    ? "Manual G2 display: write the exact words Xiang can say now, usually in first person. Prefer 25-80 English words; use more only for technical or interview depth. Do not use Markdown, labels, or advice about how to answer."
+    ? promptPreset === "evenhub"
+      ? evenHubManualResponseInstruction
+      : "Manual G2 display: write the exact words Xiang can say now, usually in first person. Prefer 25-80 English words; use more only for technical or interview depth. Do not use Markdown, labels, or advice about how to answer."
     : "";
   const conversationStateTaskHint = [
     isClassroomMode
@@ -215,27 +230,27 @@ export async function processConversation(
   });
 
   const prompt = `${stablePromptPrefix}\n\n${dynamicPromptSuffix}`;
-  const cacheablePrefix = `${sayNextInstructions}\n\n${stablePromptPrefix}`;
+  const cacheablePrefix = `${systemInstructions}\n\n${stablePromptPrefix}`;
   const openAiConversationReady = Boolean(options.openAiConversationSession)
     && isOpenAiConversationStateEnabled(LLM_PROVIDER)
     && shouldCommitTranscriptToOpenAiConversation(options.transcriptCommitReason ?? "final");
 
   console.log(
-    `[SayNext] Input approx tokens: system=${estimateTokens(sayNextInstructions)} prompt=${estimateTokens(prompt)} cacheablePrefix=${estimateTokens(cacheablePrefix)} dynamic=${estimateTokens(dynamicPromptSuffix)} total=${estimateTokens(`${sayNextInstructions}\n\n${prompt}`)} mode=${promptMode}${openAiConversationReady ? ` openaiConversation=enabled conversationSeed=${estimateTokens(sayNextConversationStateInstructions)} conversationInput=${estimateTokens(openAiConversationInput)}` : ""}`,
+    `[SayNext] Input approx tokens: preset=${promptPreset} system=${estimateTokens(systemInstructions)} prompt=${estimateTokens(prompt)} cacheablePrefix=${estimateTokens(cacheablePrefix)} dynamic=${estimateTokens(dynamicPromptSuffix)} total=${estimateTokens(`${systemInstructions}\n\n${prompt}`)} mode=${promptMode}${openAiConversationReady ? ` openaiConversation=enabled conversationSeed=${estimateTokens(conversationStateInstructions)} conversationInput=${estimateTokens(openAiConversationInput)}` : ""}`,
   );
 
   try {
     let agent: Agent<any, any>;
     switch (frequency) {
       case "low":
-        agent = initialAgentLow;
+        agent = promptPreset === "evenhub" ? evenHubAgentLow : initialAgentLow;
         break;
       case "medium":
-        agent = initialAgentMedium;
+        agent = promptPreset === "evenhub" ? evenHubAgentMedium : initialAgentMedium;
         break;
       case "high":
       default:
-        agent = initialAgentHigh;
+        agent = promptPreset === "evenhub" ? evenHubAgentHigh : initialAgentHigh;
         break;
     }
 
@@ -244,12 +259,12 @@ export async function processConversation(
     let openAiConversationMetadata: Record<string, unknown> | undefined;
     let responseText: string;
     if (LLM_PROVIDER === "ollama") {
-      responseText = await generateWithOllama(prompt);
+      responseText = await generateWithOllama(prompt, systemInstructions);
     } else if (openAiConversationReady && options.openAiConversationSession) {
       try {
         const result = await options.openAiConversationSession.generate({
           model: MODEL_NAME,
-          seedInstructions: sayNextConversationStateInstructions,
+          seedInstructions: conversationStateInstructions,
           latestTranscript,
           outputLanguage: outputLanguageText,
           promptMode,
@@ -267,7 +282,7 @@ export async function processConversation(
           transcriptCommitReason: options.transcriptCommitReason ?? "final",
           seededInstructionsInConversation: true,
           requestIncludedInstructions: false,
-          estimatedSeedInstructionTokens: estimateTokens(sayNextConversationStateInstructions),
+          estimatedSeedInstructionTokens: estimateTokens(conversationStateInstructions),
           estimatedUserInputTokens: estimateTokens(openAiConversationInput),
         };
       } catch (error) {

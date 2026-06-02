@@ -1,5 +1,6 @@
 import { openai } from "@ai-sdk/openai";
 import { Agent } from "@mastra/core/agent";
+import { evenHubSystemInstructions } from "../evenhub/prompts";
 import { sayNextInstructions, telepromptInstructions } from "./prompts";
 
 export function resolveOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): {
@@ -41,13 +42,31 @@ export const initialAgentLow = new Agent({
   instructions: sayNextInstructions,
 });
 
+export const evenHubAgentHigh = new Agent({
+  name: "EvenHubSayNextAgentHigh",
+  model: openai(MODEL_NAME),
+  instructions: evenHubSystemInstructions,
+});
+
+export const evenHubAgentMedium = new Agent({
+  name: "EvenHubSayNextAgentMedium",
+  model: openai(MODEL_NAME),
+  instructions: evenHubSystemInstructions,
+});
+
+export const evenHubAgentLow = new Agent({
+  name: "EvenHubSayNextAgentLow",
+  model: openai(MODEL_NAME),
+  instructions: evenHubSystemInstructions,
+});
+
 export const telepromptAgent = new Agent({
   name: "SayNextTelepromptAgent",
   model: openai(LONG_MODEL_NAME),
   instructions: telepromptInstructions,
 });
 
-export async function generateWithOllama(prompt: string): Promise<string> {
+export async function generateWithOllama(prompt: string, systemInstructions = sayNextInstructions): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
 
@@ -57,7 +76,7 @@ export async function generateWithOllama(prompt: string): Promise<string> {
     signal: controller.signal,
     body: JSON.stringify({
       model: OLLAMA_MODEL,
-      system: `${sayNextInstructions}\n\nDo not return JSON. Return only one short display sentence.`,
+      system: `${systemInstructions}\n\nDo not return JSON. Return only one short display sentence.`,
       prompt: `${prompt}\n\nReturn only one short answer. Obey the output language. No JSON. No labels. No reasoning.`,
       stream: false,
       options: {

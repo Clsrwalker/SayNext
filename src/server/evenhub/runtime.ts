@@ -115,6 +115,7 @@ function createMergeManualHandler(
     "high",
     "english",
     "g2_manual",
+    "evenhub",
   );
   return handler;
 }

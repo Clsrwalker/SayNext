@@ -102,11 +102,11 @@ export function formatGlassesText(state: DisplayState, settings: SayNextSettings
   const header = `${scene} | ${status}${page}`;
 
   if (state.error && !state.answerText) {
-    return `${header}\n\n${trimBody(state.error)}\n\nTap: retry  Hold: clear`;
+    return `${header}\n\n${trimBody(state.error)}`;
   }
 
   if (settings.displayMode === "transcript") {
-    return `${header}\n\n${tail(state.transcript, TRANSCRIPT_TAIL_CHARS) || "No transcript yet."}\n\nTap: answer  Scroll: page`;
+    return `${header}\n\n${tail(state.transcript, TRANSCRIPT_TAIL_CHARS) || "No transcript yet."}`;
   }
 
   if (settings.displayMode === "split" && state.transcript && state.answerText) {
@@ -119,16 +119,16 @@ export function formatGlassesText(state: DisplayState, settings: SayNextSettings
       : attentionStatus === "BUSY"
         ? "\n\nStill generating. Wait a moment."
         : "";
-    return `${header}\n\n${trimBody(state.answerText)}${notice}\n\nTap/R1: next answer  Double: retry  Scroll: page`;
+    return `${header}\n\n${trimBody(state.answerText)}${notice}`;
   }
 
   if (state.transcript) {
-    return `${header}\n\n${tail(state.transcript, TRANSCRIPT_TAIL_CHARS)}\n\nTap: answer`;
+    return `${header}\n\n${tail(state.transcript, TRANSCRIPT_TAIL_CHARS)}`;
   }
 
   if (state.recording) {
-    return `${header}\n\nListening...\n\nTap/R1 generates from new speech.`;
+    return `${header}\n\nListening...`;
   }
 
-  return `${header}\n\nConnect G2 to listen.\nTap/R1 generates from new speech.\nScroll changes pages.`;
+  return `${header}\n\nConnect audio to listen.`;
 }

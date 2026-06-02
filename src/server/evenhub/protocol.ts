@@ -3,11 +3,13 @@ export const EVENHUB_WS_PATH = "/api/evenhub/ws";
 export type EvenHubDisplayMode = "answer" | "transcript" | "split" | "teleprompt";
 export type EvenHubDepth = "short" | "normal" | "deep";
 export type EvenHubSceneMode = "auto" | "classroom" | "interview" | "discussion" | "daily" | "teleprompt";
+export type EvenHubMicSource = "g2" | "phone";
 
 export type EvenHubRuntimeSettings = {
   sceneMode: EvenHubSceneMode;
   depth: EvenHubDepth;
   displayMode: EvenHubDisplayMode;
+  micSource: EvenHubMicSource;
   manualFirst: boolean;
 };
 
@@ -88,6 +90,7 @@ export function defaultEvenHubSettings(): EvenHubRuntimeSettings {
     sceneMode: "auto",
     depth: "normal",
     displayMode: "answer",
+    micSource: "g2",
     manualFirst: true,
   };
 }
@@ -105,6 +108,9 @@ export function normalizeEvenHubSettings(
   }
   if (value?.displayMode && ["answer", "transcript", "split", "teleprompt"].includes(value.displayMode)) {
     next.displayMode = value.displayMode;
+  }
+  if (value?.micSource && ["g2", "phone"].includes(value.micSource)) {
+    next.micSource = value.micSource;
   }
   if (typeof value?.manualFirst === "boolean") {
     next.manualFirst = value.manualFirst;

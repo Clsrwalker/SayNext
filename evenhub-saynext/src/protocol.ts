@@ -1,11 +1,13 @@
 export type SceneMode = "auto" | "classroom" | "interview" | "discussion" | "daily" | "teleprompt";
 export type AnswerDepth = "short" | "normal" | "deep";
 export type DisplayMode = "answer" | "transcript" | "split" | "teleprompt";
+export type MicSource = "g2" | "phone";
 
 export type SayNextSettings = {
   sceneMode: SceneMode;
   depth: AnswerDepth;
   displayMode: DisplayMode;
+  micSource: MicSource;
   manualFirst: boolean;
 };
 
@@ -78,10 +80,11 @@ export const DEFAULT_SETTINGS: SayNextSettings = {
   sceneMode: "auto",
   depth: "normal",
   displayMode: "answer",
+  micSource: "g2",
   manualFirst: true,
 };
 
-export const APP_VERSION = "0.1.6";
+export const APP_VERSION = "0.1.8";
 export const REMOTE_SAYNEXT_WS_URL = "wss://saynext.167.172.153.109.sslip.io/api/evenhub/ws";
 
 type LocationLike = Pick<Location, "protocol" | "hostname" | "host" | "port">;

@@ -56,7 +56,8 @@ describe("formatGlassesText", () => {
     const text = formatGlassesText(state, { ...DEFAULT_SETTINGS, sceneMode: "classroom" });
     expect(text).toContain("CLASSROOM | ANSWER 2/3");
     expect(text).toContain("Use a GSI");
-    expect(text).toContain("Scroll: page");
+    expect(text).not.toContain("Tap");
+    expect(text).not.toContain("Scroll");
   });
 
   test("keeps a pinned answer visible while listening continues", () => {
@@ -95,6 +96,6 @@ describe("formatGlassesText", () => {
     };
     const text = formatGlassesText(state, { ...DEFAULT_SETTINGS, displayMode: "transcript" });
     expect(text).toContain("optimistic locking");
-    expect(text).toContain("Tap: answer");
+    expect(text).not.toContain("Tap");
   });
 });
