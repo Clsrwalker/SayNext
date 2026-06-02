@@ -1,9 +1,10 @@
-import type { ClientMessage, SayNextSettings, ServerMessage } from "./protocol";
+import { APP_VERSION, type ClientMessage, type SayNextSettings, type ServerMessage } from "./protocol";
 
 type WsClientOptions = {
   url: string;
   token: string;
   userId: string;
+  sessionId: string;
   settings: SayNextSettings;
   onMessage: (message: ServerMessage) => void;
   onStatus: (status: string) => void;
@@ -26,6 +27,7 @@ export class SayNextWsClient {
     const url = new URL(this.options.url);
     if (this.options.token.trim()) url.searchParams.set("token", this.options.token.trim());
     if (this.options.userId.trim()) url.searchParams.set("userId", this.options.userId.trim());
+    if (this.options.sessionId.trim()) url.searchParams.set("sessionId", this.options.sessionId.trim());
 
     this.options.onStatus("Connecting...");
     this.ws = new WebSocket(url.toString());
@@ -36,11 +38,12 @@ export class SayNextWsClient {
       this.send({
         type: "hello",
         userId: this.options.userId,
+        sessionId: this.options.sessionId,
         token: this.options.token,
         settings: this.options.settings,
         client: {
           name: "evenhub-saynext",
-          version: "0.1.0",
+          version: APP_VERSION,
         },
       });
     };

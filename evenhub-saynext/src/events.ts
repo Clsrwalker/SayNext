@@ -63,14 +63,10 @@ export function normalizeGlassEvent(event: unknown): GlassGesture {
 
 export function commandForGesture(
   gesture: GlassGesture,
-  hasTranscript: boolean,
-  isRecording: boolean,
+  _hasTranscript: boolean,
+  _isRecording: boolean,
 ): "generate" | "regenerate" | "page_next" | "page_previous" | "clear" | "start_listening" | "stop_listening" | null {
-  if (gesture === "tap") {
-    if (isRecording) return "stop_listening";
-    if (hasTranscript) return "generate";
-    return "start_listening";
-  }
+  if (gesture === "tap") return "generate";
   if (gesture === "double_tap") return "regenerate";
   if (gesture === "scroll_down") return "page_next";
   if (gesture === "scroll_up") return "page_previous";
@@ -86,6 +82,33 @@ function compact(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function redactValue(key: string, value: unknown): unknown {
+  const lower = key.toLowerCase();
+  if (lower.includes("token") || lower.includes("secret") || lower.includes("apikey") || lower.includes("api_key") || lower.includes("authorization")) {
+    return "<redacted>";
+  }
+  if (lower.includes("audio") || lower.includes("pcm") || lower.includes("buffer")) {
+    if (value instanceof Uint8Array || value instanceof ArrayBuffer || Array.isArray(value)) return "<binary>";
+  }
+  if (typeof value === "string" && value.length > 500) return `${value.slice(0, 500)}...`;
+  return value;
+}
+
+export function redactEventPayload(value: unknown, depth = 0): unknown {
+  if (depth > 5) return "<max-depth>";
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (value instanceof Uint8Array || value instanceof ArrayBuffer) return "<binary>";
+  if (Array.isArray(value)) return value.slice(0, 80).map((item) => redactEventPayload(item, depth + 1));
+  if (typeof value !== "object") return String(value);
+
+  const output: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    output[key] = redactEventPayload(redactValue(key, raw), depth + 1);
+  }
+  return output;
 }
 
 export function summarizeRawEvent(event: unknown): string {

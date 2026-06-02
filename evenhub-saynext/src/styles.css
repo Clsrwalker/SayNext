@@ -25,6 +25,8 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-width: 760px;
+  margin: 0 auto;
 }
 
 .panel {
@@ -60,6 +62,11 @@ h2 {
   font-size: 15px;
 }
 
+summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
 .status-grid {
   min-width: 118px;
   display: grid;
@@ -67,6 +74,11 @@ h2 {
   text-align: right;
   color: #4f5848;
   font-size: 12px;
+}
+
+.status-grid .ok {
+  color: #167247;
+  font-weight: 650;
 }
 
 label {
@@ -118,6 +130,46 @@ button:active {
   transform: translateY(1px);
 }
 
+.live-card {
+  background: #fffdf7;
+}
+
+.glance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.glance-grid div {
+  background: #f5f6f2;
+  border: 1px solid #e0e2dc;
+  border-radius: 7px;
+  padding: 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.glance-grid span {
+  font-size: 11px;
+  color: #68705f;
+}
+
+.glance-grid strong {
+  font-size: 15px;
+}
+
+.primary-controls button:first-child {
+  background: #1d241a;
+  color: #ffffff;
+  border-color: #1d241a;
+}
+
+.hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #68705f;
+}
+
 .segmented {
   display: flex;
   flex-wrap: wrap;
@@ -167,7 +219,8 @@ button:active {
 
 @media (max-width: 520px) {
   .hero,
-  .two-col {
+  .two-col,
+  .glance-grid {
     grid-template-columns: 1fr;
     display: grid;
   }

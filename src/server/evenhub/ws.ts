@@ -3,6 +3,7 @@ import { EVENHUB_WS_PATH, parseEvenHubClientMessage, type EvenHubServerMessage }
 
 type EvenHubSocketData = {
   userId: string;
+  clientSessionId: string;
   connId: string;
   runtime?: EvenHubRuntime;
 };
@@ -45,8 +46,58 @@ function getUserId(url: URL): string {
   return url.searchParams.get("userId")?.trim() || process.env.EVENHUB_DEFAULT_USER_ID || "evenhub-user";
 }
 
+function getClientSessionId(url: URL): string {
+  return url.searchParams.get("sessionId")?.trim() || makeId("evenhub_session");
+}
+
 function sendJson(ws: EvenHubWebSocket, message: EvenHubServerMessage): void {
   ws.send(JSON.stringify(message));
+}
+
+type RuntimeCacheEntry = {
+  runtime: EvenHubRuntime;
+  cleanupTimer: ReturnType<typeof setTimeout> | null;
+};
+
+const RUNTIME_RESUME_TTL_MS = Number(process.env.EVENHUB_SESSION_RESUME_TTL_MS || 10 * 60 * 1000);
+const runtimeCache = new Map<string, RuntimeCacheEntry>();
+
+function runtimeKey(userId: string, clientSessionId: string): string {
+  return `${userId}:${clientSessionId}`;
+}
+
+function getOrCreateRuntime(ws: EvenHubWebSocket): EvenHubRuntime {
+  const key = runtimeKey(ws.data.userId, ws.data.clientSessionId);
+  const cached = runtimeCache.get(key);
+  if (cached) {
+    if (cached.cleanupTimer) {
+      clearTimeout(cached.cleanupTimer);
+      cached.cleanupTimer = null;
+    }
+    cached.runtime.attachClient((message) => sendJson(ws, message));
+    return cached.runtime;
+  }
+
+  const runtime = createEvenHubRuntime({
+    userId: ws.data.userId,
+    clientSessionId: ws.data.clientSessionId,
+    send: (message) => sendJson(ws, message),
+  });
+  runtimeCache.set(key, { runtime, cleanupTimer: null });
+  return runtime;
+}
+
+function scheduleRuntimeCleanup(data: EvenHubSocketData): void {
+  const key = runtimeKey(data.userId, data.clientSessionId);
+  const cached = runtimeCache.get(key);
+  if (!cached) return;
+  if (cached.cleanupTimer) clearTimeout(cached.cleanupTimer);
+  cached.cleanupTimer = setTimeout(() => {
+    const entry = runtimeCache.get(key);
+    if (!entry) return;
+    void entry.runtime.close();
+    runtimeCache.delete(key);
+  }, RUNTIME_RESUME_TTL_MS);
 }
 
 export function tryUpgradeEvenHubWebSocket(request: Request, server: EvenHubServer): Response | null {
@@ -61,6 +112,7 @@ export function tryUpgradeEvenHubWebSocket(request: Request, server: EvenHubServ
   const upgraded = server.upgrade(request, {
     data: {
       userId: getUserId(url),
+      clientSessionId: getClientSessionId(url),
       connId: makeId("evenhub_conn"),
     },
   });
@@ -71,11 +123,8 @@ export function tryUpgradeEvenHubWebSocket(request: Request, server: EvenHubServ
 
 export const evenHubWebSocket = {
   open(ws: EvenHubWebSocket) {
-    console.log(`[EvenHub] open conn=${ws.data.connId} user=${ws.data.userId}`);
-    ws.data.runtime = createEvenHubRuntime({
-      userId: ws.data.userId,
-      send: (message) => sendJson(ws, message),
-    });
+    console.log(`[EvenHub] open conn=${ws.data.connId} user=${ws.data.userId} session=${ws.data.clientSessionId}`);
+    ws.data.runtime = getOrCreateRuntime(ws);
     ws.data.runtime.handleOpen();
   },
 
@@ -114,6 +163,7 @@ export const evenHubWebSocket = {
 
   close(ws: EvenHubWebSocket, code: number, reason: string) {
     console.log(`[EvenHub] close conn=${ws.data.connId} code=${code} reason=${reason || ""}`);
-    void ws.data.runtime?.close();
+    void ws.data.runtime?.detachClient();
+    scheduleRuntimeCleanup(ws.data);
   },
 };

@@ -49,6 +49,20 @@ describe("formatGlassesText", () => {
     expect(text).toContain("Scroll: page");
   });
 
+  test("keeps a pinned answer visible while listening continues", () => {
+    const state = {
+      ...INITIAL_DISPLAY_STATE,
+      status: "Listening",
+      recording: true,
+      answerText: "Use a GSI when the query access pattern does not match the table primary key.",
+      pageIndex: 0,
+      totalPages: 1,
+    };
+    const text = formatGlassesText(state, { ...DEFAULT_SETTINGS, sceneMode: "classroom" });
+    expect(text).toContain("CLASSROOM | ANSWER+LISTEN");
+    expect(text).toContain("Use a GSI");
+  });
+
   test("formats transcript mode without an answer", () => {
     const state = {
       ...INITIAL_DISPLAY_STATE,

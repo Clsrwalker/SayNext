@@ -42,6 +42,7 @@ type DisplaySink = {
 
 type EvenHubRuntimeOptions = {
   userId: string;
+  clientSessionId?: string;
   send: (message: EvenHubServerMessage) => void;
   manualHandler?: ManualHandlerLike;
   sttAdapterFactory?: (callbacks: EvenHubSttCallbacks) => EvenHubSttAdapter | null;
@@ -49,6 +50,7 @@ type EvenHubRuntimeOptions = {
 };
 
 const DEFAULT_USER_ID = "evenhub-user";
+const PARTIAL_COMMIT_MS = Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MS || 1200);
 
 function makeLogger(): RuntimeLogger {
   return {
@@ -126,7 +128,7 @@ function promptModeForEvenHubScene(sceneMode: EvenHubRuntimeSettings["sceneMode"
   return null;
 }
 
-function resultPage(result: ManualActionResult): EvenHubServerMessage | null {
+function resultPage(result: ManualActionResult): Extract<EvenHubServerMessage, { type: "answer_page" }> | null {
   if (!result.answer) return null;
   return {
     type: "answer_page",
@@ -140,24 +142,32 @@ function resultPage(result: ManualActionResult): EvenHubServerMessage | null {
 
 export class EvenHubRuntime {
   private readonly userId: string;
-  private readonly send: (message: EvenHubServerMessage) => void;
+  private readonly clientSessionId: string;
+  private sendToClient: ((message: EvenHubServerMessage) => void) | null;
   private readonly manualHandler: ManualHandlerLike;
   private readonly sttAdapter: EvenHubSttAdapter | null;
   private settings: EvenHubRuntimeSettings;
   private audioBytesReceived = 0;
   private listening = false;
   private lastAudioStatusAt = 0;
+  private lastTranscriptText = "";
+  private lastCommittedTranscriptText = "";
+  private lastPartialTranscriptText = "";
+  private lastPartialTranscriptAt = 0;
+  private partialCommitTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastAnswerPage: Extract<EvenHubServerMessage, { type: "answer_page" }> | null = null;
 
   constructor(options: EvenHubRuntimeOptions) {
     this.userId = options.userId.trim() || DEFAULT_USER_ID;
-    this.send = options.send;
+    this.clientSessionId = options.clientSessionId?.trim() || `server-${Date.now().toString(36)}`;
+    this.sendToClient = options.send;
     this.settings = normalizeEvenHubSettings(options.settings, defaultEvenHubSettings());
-    this.manualHandler = options.manualHandler || createMergeManualHandler(this.userId, this.send);
+    this.manualHandler = options.manualHandler || createMergeManualHandler(this.userId, (message) => this.sendMessage(message));
     this.applySceneModeOverride();
     this.sttAdapter = (options.sttAdapterFactory || createEvenHubSttAdapter)({
       onTranscript: (event) => this.handleSttTranscript(event.text, event.isFinal),
-      onStatus: (message) => this.send({ type: "status", status: "stt_status", sessionId: this.sessionId, message }),
-      onError: (error) => this.send({
+      onStatus: (message) => this.sendMessage({ type: "status", status: "stt_status", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message }),
+      onError: (error) => this.sendMessage({
         type: "error",
         code: "stt_error",
         message: error.message,
@@ -166,10 +176,11 @@ export class EvenHubRuntime {
     });
     this.manualHandler.onStatus = (event) => this.handleManualStatus(event);
     this.manualHandler.onInsight = (insight) => {
-      this.send({
+      this.sendMessage({
         type: "status",
         status: "insight",
         sessionId: this.sessionId,
+        clientSessionId: this.clientSessionId,
         message: insight.text,
       });
     };
@@ -179,24 +190,46 @@ export class EvenHubRuntime {
     return this.manualHandler.getRuntimeSessionId();
   }
 
+  get clientSessionKey(): string {
+    return this.clientSessionId;
+  }
+
+  attachClient(send: (message: EvenHubServerMessage) => void): void {
+    this.sendToClient = send;
+  }
+
   handleOpen(): void {
-    this.send({
+    this.sendMessage({
       type: "status",
       status: "connected",
       sessionId: this.sessionId,
+      clientSessionId: this.clientSessionId,
       settings: this.settings,
       message: "EvenHub connected",
     });
+    if (this.lastTranscriptText) {
+      this.sendMessage({ type: "transcript_final", text: this.lastTranscriptText, sessionId: this.sessionId });
+    }
+    if (this.lastAnswerPage) {
+      this.sendMessage(this.lastAnswerPage);
+      this.sendMessage({
+        type: "answer_done",
+        status: "resumed",
+        sessionId: this.sessionId,
+        stateVersion: this.manualHandler.getManualState().stateVersion,
+      });
+    }
   }
 
   async handleClientMessage(message: EvenHubClientMessage): Promise<void> {
     if (message.type === "hello") {
       this.settings = normalizeEvenHubSettings(message.settings, this.settings);
       this.applySceneModeOverride();
-      this.send({
+      this.sendMessage({
         type: "status",
         status: "ready",
         sessionId: this.sessionId,
+        clientSessionId: this.clientSessionId,
         settings: this.settings,
         message: "Ready",
       });
@@ -206,10 +239,11 @@ export class EvenHubRuntime {
     if (message.type === "settings") {
       this.settings = normalizeEvenHubSettings(message.settings, this.settings);
       this.applySceneModeOverride();
-      this.send({
+      this.sendMessage({
         type: "status",
         status: "settings_updated",
         sessionId: this.sessionId,
+        clientSessionId: this.clientSessionId,
         settings: this.settings,
       });
       return;
@@ -240,27 +274,44 @@ export class EvenHubRuntime {
   }
 
   async close(): Promise<void> {
+    this.clearPartialCommitTimer();
     await this.sttAdapter?.close();
+  }
+
+  async detachClient(): Promise<void> {
+    this.listening = false;
+    this.clearPartialCommitTimer();
+    await this.sttAdapter?.stop().catch(() => undefined);
+    this.sendToClient = null;
   }
 
   private emitAudioStatus(message: string, force = false): void {
     const now = Date.now();
     if (!force && now - this.lastAudioStatusAt < 1000) return;
     this.lastAudioStatusAt = now;
-    this.send({
+    this.sendMessage({
       type: "status",
       status: "audio_received",
       sessionId: this.sessionId,
+      clientSessionId: this.clientSessionId,
       audioBytesReceived: this.audioBytesReceived,
       message,
     });
   }
 
   private async commitTranscript(text: string, reason: "isFinal" | "timeout"): Promise<void> {
-    await this.manualHandler.processTranscript(text, Date.now(), reason);
-    this.send({
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (!normalized || normalized === this.lastCommittedTranscriptText) return;
+    this.lastCommittedTranscriptText = normalized;
+    this.lastTranscriptText = normalized;
+    if (normalized === this.lastPartialTranscriptText) {
+      this.lastPartialTranscriptText = "";
+      this.lastPartialTranscriptAt = 0;
+    }
+    await this.manualHandler.processTranscript(normalized, Date.now(), reason);
+    this.sendMessage({
       type: reason === "isFinal" ? "transcript_final" : "transcript_partial",
-      text,
+      text: normalized,
       sessionId: this.sessionId,
     });
   }
@@ -271,18 +322,20 @@ export class EvenHubRuntime {
       if (this.sttAdapter) {
         await this.sttAdapter.start();
       }
-      this.send({
+      this.sendMessage({
         type: "status",
         status: "listening",
         sessionId: this.sessionId,
+        clientSessionId: this.clientSessionId,
         message: this.sttAdapter ? "Listening" : "Listening; STT adapter not configured.",
       });
       return;
     }
     if (action === "stop_listening") {
       this.listening = false;
+      await this.commitPendingPartialTranscript();
       await this.sttAdapter?.stop();
-      this.send({ type: "status", status: "ready", sessionId: this.sessionId, message: "Stopped" });
+      this.sendMessage({ type: "status", status: "ready", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message: "Stopped" });
       return;
     }
     if (action === "generate") {
@@ -299,18 +352,20 @@ export class EvenHubRuntime {
     }
     if (action === "clear") {
       const result = this.manualHandler.clearManualAnswer(clientEventId);
-      this.send({ type: "answer_done", status: result.status, sessionId: result.sessionId, stateVersion: result.state.stateVersion });
+      this.lastAnswerPage = null;
+      this.sendMessage({ type: "answer_done", status: result.status, sessionId: result.sessionId, stateVersion: result.state.stateVersion });
     }
   }
 
   private async generate(clientEventId?: string): Promise<void> {
-    this.send({ type: "status", status: "generating", sessionId: this.sessionId, message: "Generating" });
+    await this.commitPendingPartialTranscript();
+    this.sendMessage({ type: "status", status: "generating", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message: "Generating" });
     const result = await this.manualHandler.generateManualAnswer(clientEventId);
     this.emitManualResult(result);
   }
 
   private async regenerate(clientEventId?: string): Promise<void> {
-    this.send({ type: "status", status: "generating", sessionId: this.sessionId, message: "Regenerating" });
+    this.sendMessage({ type: "status", status: "generating", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message: "Regenerating" });
     const result = await this.manualHandler.regenerateManualAnswer(clientEventId);
     this.emitManualResult(result);
   }
@@ -322,16 +377,19 @@ export class EvenHubRuntime {
 
   private emitManualResult(result: ManualActionResult): void {
     const page = resultPage(result);
-    if (page) this.send(page);
+    if (page) {
+      this.lastAnswerPage = page;
+      this.sendMessage(page);
+    }
     if (result.error) {
-      this.send({
+      this.sendMessage({
         type: "error",
         code: "manual_runtime_error",
         message: result.error,
         sessionId: result.sessionId || this.sessionId,
       });
     }
-    this.send({
+    this.sendMessage({
       type: "answer_done",
       status: result.status,
       sessionId: result.sessionId || this.sessionId,
@@ -341,15 +399,16 @@ export class EvenHubRuntime {
 
   private handleManualStatus(event: { type: string; [key: string]: unknown }): void {
     if (event.type === "manual_generating") {
-      this.send({ type: "status", status: "generating", sessionId: this.sessionId, message: "Generating" });
+      this.sendMessage({ type: "status", status: "generating", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message: "Generating" });
       return;
     }
     if (event.type === "manual_cleared") {
-      this.send({ type: "status", status: "cleared", sessionId: this.sessionId, message: "Cleared" });
+      this.lastAnswerPage = null;
+      this.sendMessage({ type: "status", status: "cleared", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message: "Cleared" });
       return;
     }
     if (event.type === "manual_status") {
-      this.send({ type: "status", status: "transcript", sessionId: this.sessionId });
+      this.sendMessage({ type: "status", status: "transcript", sessionId: this.sessionId, clientSessionId: this.clientSessionId });
     }
   }
 
@@ -357,18 +416,49 @@ export class EvenHubRuntime {
     const trimmed = text.trim();
     if (!trimmed) return;
     if (!isFinal) {
-      this.send({
+      this.lastPartialTranscriptText = trimmed;
+      this.lastPartialTranscriptAt = Date.now();
+      this.schedulePartialCommit();
+      this.sendMessage({
         type: "transcript_partial",
         text: trimmed,
         sessionId: this.sessionId,
       });
       return;
     }
+    this.clearPartialCommitTimer();
     await this.commitTranscript(trimmed, "isFinal");
   }
 
   private applySceneModeOverride(): void {
     this.manualHandler.setManualPromptModeOverride?.(promptModeForEvenHubScene(this.settings.sceneMode));
+  }
+
+  private sendMessage(message: EvenHubServerMessage): void {
+    this.sendToClient?.(message);
+  }
+
+  private schedulePartialCommit(): void {
+    this.clearPartialCommitTimer();
+    if (!this.lastPartialTranscriptText) return;
+    this.partialCommitTimer = setTimeout(() => {
+      void this.commitPendingPartialTranscript();
+    }, PARTIAL_COMMIT_MS);
+  }
+
+  private clearPartialCommitTimer(): void {
+    if (!this.partialCommitTimer) return;
+    clearTimeout(this.partialCommitTimer);
+    this.partialCommitTimer = null;
+  }
+
+  private async commitPendingPartialTranscript(): Promise<void> {
+    const text = this.lastPartialTranscriptText.trim();
+    if (!text) return;
+    this.clearPartialCommitTimer();
+    this.lastPartialTranscriptText = "";
+    this.lastPartialTranscriptAt = 0;
+    await this.commitTranscript(text, "timeout");
   }
 }
 

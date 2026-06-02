@@ -15,6 +15,7 @@ export type EvenHubClientMessage =
   | {
       type: "hello";
       userId?: string;
+      sessionId?: string;
       token?: string;
       settings?: Partial<EvenHubRuntimeSettings>;
       client?: {
@@ -46,6 +47,7 @@ export type EvenHubServerMessage =
       type: "status";
       status: string;
       sessionId: string;
+      clientSessionId?: string;
       message?: string;
       settings?: EvenHubRuntimeSettings;
       audioBytesReceived?: number;
@@ -125,6 +127,7 @@ export function parseEvenHubClientMessage(raw: string): EvenHubClientMessage | n
     return {
       type,
       userId: typeof value.userId === "string" ? value.userId : undefined,
+      sessionId: typeof value.sessionId === "string" ? value.sessionId : undefined,
       token: typeof value.token === "string" ? value.token : undefined,
       settings: typeof value.settings === "object" && value.settings !== null
         ? value.settings as Partial<EvenHubRuntimeSettings>

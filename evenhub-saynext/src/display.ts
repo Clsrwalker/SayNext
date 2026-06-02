@@ -88,10 +88,16 @@ export function reduceServerMessage(state: DisplayState, message: ServerMessage)
 export function formatGlassesText(state: DisplayState, settings: SayNextSettings): string {
   const scene = settings.sceneMode.toUpperCase();
   const page = state.totalPages > 1 ? ` ${state.pageIndex + 1}/${state.totalPages}` : "";
-  const status = state.recording ? "LISTENING" : state.status.toUpperCase();
+  const status = state.answerText && !state.recording
+    ? "ANSWER"
+    : state.recording && state.answerText
+      ? "ANSWER+LISTEN"
+      : state.recording
+        ? "LISTENING"
+        : state.status.toUpperCase();
   const header = `${scene} | ${status}${page}`;
 
-  if (state.error) {
+  if (state.error && !state.answerText) {
     return `${header}\n\n${trimBody(state.error)}\n\nTap: retry  Hold: clear`;
   }
 
@@ -104,7 +110,7 @@ export function formatGlassesText(state: DisplayState, settings: SayNextSettings
   }
 
   if (state.answerText) {
-    return `${header}\n\n${trimBody(state.answerText)}\n\nTap: new  Double: retry  Scroll: page`;
+    return `${header}\n\n${trimBody(state.answerText)}\n\nTap/R1: next answer  Double: retry  Scroll: page`;
   }
 
   if (state.transcript) {
@@ -112,8 +118,8 @@ export function formatGlassesText(state: DisplayState, settings: SayNextSettings
   }
 
   if (state.recording) {
-    return `${header}\n\nListening...\n\nTap R1 when ready.`;
+    return `${header}\n\nListening...\n\nTap/R1 generates from new speech.`;
   }
 
-  return `${header}\n\nTap R1 to listen.\nDouble tap retries the last answer.\nScroll changes pages.`;
+  return `${header}\n\nConnect G2 to listen.\nTap/R1 generates from new speech.\nScroll changes pages.`;
 }

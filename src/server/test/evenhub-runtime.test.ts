@@ -116,13 +116,13 @@ test("EvenHubRuntime reports audio chunk receipt before STT adapter is enabled",
 
   runtime.handleAudioChunk(new Uint8Array([1, 2, 3, 4]));
 
-  expect(sent).toContainEqual({
+  expect(sent).toContainEqual(expect.objectContaining({
     type: "status",
     status: "audio_received",
     sessionId: "evenhub-test-session",
     audioBytesReceived: 4,
     message: "Audio received while not listening; STT idle.",
-  });
+  }));
 });
 
 test("EvenHubRuntime streams listening audio into STT and commits final transcripts", async () => {
@@ -153,4 +153,47 @@ test("EvenHubRuntime streams listening audio into STT and commits final transcri
   expect(transcripts).toEqual(["what is a database index"]);
   expect(sent.some((message) => message.type === "transcript_partial" && message.text.includes("database index"))).toBe(true);
   expect(sent.some((message) => message.type === "transcript_final" && message.text.includes("database index"))).toBe(true);
+});
+
+test("EvenHubRuntime commits the latest partial transcript before manual generate", async () => {
+  const sent: EvenHubServerMessage[] = [];
+  const transcripts: string[] = [];
+  const adapter = { current: null as FakeSttAdapter | null };
+  const runtime = new EvenHubRuntime({
+    userId: "test-user",
+    send: (message) => sent.push(message),
+    manualHandler: makeManualHandler(transcripts),
+    sttAdapterFactory: (callbacks) => {
+      adapter.current = new FakeSttAdapter(callbacks);
+      return adapter.current;
+    },
+  });
+
+  await runtime.handleClientMessage({ type: "control", action: "start_listening" });
+  await adapter.current?.emit("what is a database index", false);
+  await runtime.handleClientMessage({ type: "control", action: "generate", clientEventId: "generate-from-partial" });
+
+  expect(transcripts).toEqual(["what is a database index"]);
+  expect(sent.some((message) => message.type === "transcript_partial" && message.text.includes("database index"))).toBe(true);
+  expect(sent.some((message) => message.type === "answer_page")).toBe(true);
+});
+
+test("EvenHubRuntime can reattach a client and replay pinned answer", async () => {
+  const firstClient: EvenHubServerMessage[] = [];
+  const secondClient: EvenHubServerMessage[] = [];
+  const runtime = new EvenHubRuntime({
+    userId: "test-user",
+    clientSessionId: "client-session-1",
+    send: (message) => firstClient.push(message),
+    manualHandler: makeManualHandler(),
+  });
+
+  await runtime.handleClientMessage({ type: "debug_transcript", text: "What is a database index?", autoGenerate: true });
+  await runtime.detachClient();
+  runtime.attachClient((message) => secondClient.push(message));
+  runtime.handleOpen();
+
+  expect(firstClient.some((message) => message.type === "answer_page" && message.text.includes("find rows faster"))).toBe(true);
+  expect(secondClient.some((message) => message.type === "status" && message.status === "connected")).toBe(true);
+  expect(secondClient.some((message) => message.type === "answer_page" && message.text.includes("find rows faster"))).toBe(true);
 });

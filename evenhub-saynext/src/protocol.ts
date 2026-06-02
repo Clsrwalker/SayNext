@@ -13,6 +13,7 @@ export type ClientMessage =
   | {
       type: "hello";
       userId?: string;
+      sessionId?: string;
       token?: string;
       settings: SayNextSettings;
       client: {
@@ -42,6 +43,7 @@ export type ServerMessage =
       type: "status";
       status: string;
       sessionId: string;
+      clientSessionId?: string;
       message?: string;
       settings?: SayNextSettings;
       audioBytesReceived?: number;
@@ -79,11 +81,58 @@ export const DEFAULT_SETTINGS: SayNextSettings = {
   manualFirst: true,
 };
 
+export const APP_VERSION = "0.1.4";
+export const REMOTE_SAYNEXT_WS_URL = "wss://saynext.167.172.153.109.sslip.io/api/evenhub/ws";
+
+type LocationLike = Pick<Location, "protocol" | "hostname" | "host" | "port">;
+
+export function defaultWsUrlForLocation(currentLocation: LocationLike | undefined): string {
+  if (!currentLocation) return REMOTE_SAYNEXT_WS_URL;
+
+  const { protocol, hostname, host, port } = currentLocation;
+  if (protocol !== "https:" && protocol !== "http:") return REMOTE_SAYNEXT_WS_URL;
+
+  const wsProtocol = protocol === "https:" ? "wss" : "ws";
+  const isKnownSayNextHost = hostname === "saynext.167.172.153.109.sslip.io";
+  const isLocalBackend = port === "3000";
+
+  if (isKnownSayNextHost || isLocalBackend) {
+    return `${wsProtocol}://${host}/api/evenhub/ws`;
+  }
+
+  return REMOTE_SAYNEXT_WS_URL;
+}
+
+export function normalizeSavedWsUrl(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return defaultWsUrl();
+  const trimmed = value.trim();
+
+  try {
+    const parsed = new URL(trimmed);
+    const isOldViteProxy = parsed.port === "5173" && parsed.pathname === "/api/evenhub/ws";
+    if (isOldViteProxy) return REMOTE_SAYNEXT_WS_URL;
+  } catch {
+    return defaultWsUrl();
+  }
+
+  return trimmed;
+}
+
 export function defaultWsUrl(): string {
   const configured = import.meta.env.VITE_SAYNEXT_WS_URL;
   if (typeof configured === "string" && configured.trim()) return configured.trim();
 
-  if (location.protocol === "https:") return `wss://${location.host}/api/evenhub/ws`;
-  if (location.protocol === "http:") return `ws://${location.host}/api/evenhub/ws`;
-  return "wss://saynext.167.172.153.109.sslip.io/api/evenhub/ws";
+  return defaultWsUrlForLocation(globalThis.location);
+}
+
+export function defaultRelayToken(): string {
+  const configured = import.meta.env.VITE_SAYNEXT_RELAY_TOKEN;
+  return typeof configured === "string" ? configured.trim() : "";
+}
+
+export function makeClientSessionId(): string {
+  const random = typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `evenhub-${random}`;
 }

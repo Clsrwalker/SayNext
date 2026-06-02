@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { connectBridge, type BridgeHandle, type BridgeLifecycleEvent } from "./bridge";
-import { commandForGesture, normalizeGlassEvent, summarizeRawEvent } from "./events";
+import { commandForGesture, normalizeGlassEvent, redactEventPayload, summarizeRawEvent } from "./events";
 import { formatGlassesText, INITIAL_DISPLAY_STATE, reduceServerMessage, type DisplayState } from "./display";
-import { DEFAULT_SETTINGS, defaultWsUrl, type SayNextSettings, type ServerMessage } from "./protocol";
+import { DEFAULT_SETTINGS, defaultRelayToken, defaultWsUrl, makeClientSessionId, normalizeSavedWsUrl, type SayNextSettings, type ServerMessage } from "./protocol";
 import { SayNextWsClient } from "./ws-client";
 
 const STORAGE_KEY = "saynext-evenhub-settings";
+const SINGLE_TAP_DELAY_MS = 280;
 
 type SavedConfig = {
   wsUrl: string;
   token: string;
   userId: string;
+  sessionId: string;
   settings: SayNextSettings;
+};
+
+type EventLogEntry = {
+  time: string;
+  summary: string;
+  payload?: unknown;
 };
 
 function readSavedConfig(): SavedConfig {
@@ -20,9 +28,10 @@ function readSavedConfig(): SavedConfig {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SavedConfig>;
       return {
-        wsUrl: parsed.wsUrl || defaultWsUrl(),
-        token: parsed.token || "",
+        wsUrl: normalizeSavedWsUrl(parsed.wsUrl),
+        token: parsed.token || defaultRelayToken(),
         userId: parsed.userId || "xiang",
+        sessionId: parsed.sessionId || makeClientSessionId(),
         settings: {
           ...DEFAULT_SETTINGS,
           ...(parsed.settings || {}),
@@ -34,8 +43,9 @@ function readSavedConfig(): SavedConfig {
   }
   return {
     wsUrl: defaultWsUrl(),
-    token: "",
+    token: defaultRelayToken(),
     userId: "xiang",
+    sessionId: makeClientSessionId(),
     settings: DEFAULT_SETTINGS,
   };
 }
@@ -46,16 +56,28 @@ export default function App() {
   const [bridgeStatus, setBridgeStatus] = useState("Bridge not connected");
   const [wsStatus, setWsStatus] = useState("Disconnected");
   const [debugText, setDebugText] = useState("");
-  const [eventLog, setEventLog] = useState<string[]>([]);
+  const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
   const bridgeRef = useRef<BridgeHandle | null>(null);
   const wsRef = useRef<SayNextWsClient | null>(null);
+  const configRef = useRef(config);
   const displayRef = useRef(display);
+  const glassesTextRef = useRef("");
+  const bridgeConnectingRef = useRef(false);
+  const pendingTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const glassesText = useMemo(() => formatGlassesText(display, config.settings), [display, config.settings]);
 
   useEffect(() => {
     displayRef.current = display;
   }, [display]);
+
+  useEffect(() => {
+    glassesTextRef.current = glassesText;
+  }, [glassesText]);
+
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
@@ -71,34 +93,82 @@ export default function App() {
     setDisplay((current) => reduceServerMessage(current, message));
   }, []);
 
-  const pushEventLog = useCallback((message: string) => {
+  const pushEventLog = useCallback((summary: string, payload?: unknown) => {
     const time = new Date().toLocaleTimeString();
-    setEventLog((current) => [`${time} ${message}`, ...current].slice(0, 24));
+    setEventLog((current) => [{ time, summary, payload }, ...current].slice(0, 40));
   }, []);
 
+  const copyEventLog = useCallback(() => {
+    const text = JSON.stringify(eventLog, null, 2);
+    void navigator.clipboard?.writeText(text);
+  }, [eventLog]);
+
+  const sendControl = useCallback((action: Parameters<SayNextWsClient["sendControl"]>[0]) => {
+    wsRef.current?.sendControl(action);
+  }, []);
+
+  const clearPendingTap = useCallback(() => {
+    if (!pendingTapTimerRef.current) return false;
+    clearTimeout(pendingTapTimerRef.current);
+    pendingTapTimerRef.current = null;
+    return true;
+  }, []);
+
+  const dispatchGestureAction = useCallback((action: Parameters<SayNextWsClient["sendControl"]>[0]) => {
+    if (action === "generate") {
+      if (clearPendingTap()) {
+        sendControl("regenerate");
+        return;
+      }
+      pendingTapTimerRef.current = setTimeout(() => {
+        pendingTapTimerRef.current = null;
+        sendControl("generate");
+      }, SINGLE_TAP_DELAY_MS);
+      return;
+    }
+
+    if (action === "regenerate" || action === "clear") {
+      clearPendingTap();
+    }
+    sendControl(action);
+  }, [clearPendingTap, sendControl]);
+
   const connectWs = useCallback(() => {
+    const activeConfig = configRef.current;
     wsRef.current?.close();
     const client = new SayNextWsClient({
-      url: config.wsUrl,
-      token: config.token,
-      userId: config.userId,
-      settings: config.settings,
+      url: activeConfig.wsUrl,
+      token: activeConfig.token,
+      userId: activeConfig.userId,
+      sessionId: activeConfig.sessionId,
+      settings: activeConfig.settings,
       onMessage: handleServerMessage,
       onStatus: setWsStatus,
     });
     wsRef.current = client;
     client.connect();
-  }, [config, handleServerMessage]);
+  }, [handleServerMessage]);
+
+  useEffect(() => {
+    connectWs();
+    return () => {
+      clearPendingTap();
+      wsRef.current?.close();
+    };
+  }, [connectWs]);
 
   const connectGlasses = useCallback(async () => {
+    if (bridgeRef.current || bridgeConnectingRef.current) return;
+    bridgeConnectingRef.current = true;
     setBridgeStatus("Connecting bridge...");
     try {
       const handleLifecycle = (event: BridgeLifecycleEvent) => {
         pushEventLog(`lifecycle=${event}`);
         setBridgeStatus(`G2 ${event.replace(/_/g, " ")}`);
         if (event === "foreground_exit" || event === "abnormal_exit" || event === "system_exit") {
+          clearPendingTap();
           void bridgeRef.current?.setRecording(false).catch(() => undefined);
-          wsRef.current?.sendControl("stop_listening");
+          sendControl("stop_listening");
           setDisplay((current) => ({
             ...current,
             recording: false,
@@ -112,31 +182,38 @@ export default function App() {
         onAudio: (pcm) => wsRef.current?.sendAudio(pcm),
         onLifecycle: handleLifecycle,
         onEvent: (event) => {
-          pushEventLog(summarizeRawEvent(event));
+          pushEventLog(summarizeRawEvent(event), redactEventPayload(event));
           const gesture = normalizeGlassEvent(event);
-          const currentDisplay = displayRef.current;
-          const action = commandForGesture(gesture, Boolean(currentDisplay.transcript), currentDisplay.recording);
+          const action = commandForGesture(gesture, Boolean(displayRef.current.transcript), displayRef.current.recording);
           if (!action) return;
           if (action === "start_listening") {
             void bridgeRef.current?.setRecording(true);
-            wsRef.current?.sendControl("start_listening");
+            sendControl("start_listening");
             setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
           } else if (action === "stop_listening") {
             void bridgeRef.current?.setRecording(false);
-            wsRef.current?.sendControl("stop_listening");
+            sendControl("stop_listening");
             setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
-            wsRef.current?.sendControl("generate");
           } else {
-            wsRef.current?.sendControl(action);
+            dispatchGestureAction(action);
           }
         },
       });
-      await bridgeRef.current.render(glassesText);
-      setBridgeStatus("Bridge connected");
+      await bridgeRef.current.render(glassesTextRef.current);
+      await bridgeRef.current.setRecording(true);
+      sendControl("start_listening");
+      setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
+      setBridgeStatus("Bridge connected; listening");
     } catch (error) {
       setBridgeStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      bridgeConnectingRef.current = false;
     }
-  }, [glassesText, pushEventLog]);
+  }, [clearPendingTap, dispatchGestureAction, pushEventLog, sendControl]);
+
+  useEffect(() => {
+    void connectGlasses();
+  }, [connectGlasses]);
 
   const updateSettings = (settings: Partial<SayNextSettings>) => {
     setConfig((current) => {
@@ -148,13 +225,13 @@ export default function App() {
 
   const startListening = async () => {
     await bridgeRef.current?.setRecording(true);
-    wsRef.current?.sendControl("start_listening");
+    sendControl("start_listening");
     setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
   };
 
   const stopListening = async () => {
     await bridgeRef.current?.setRecording(false);
-    wsRef.current?.sendControl("stop_listening");
+    sendControl("stop_listening");
     setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
   };
 
@@ -166,35 +243,39 @@ export default function App() {
           <h1>Manual-first G2 control</h1>
         </div>
         <div className="status-grid">
-          <span>{wsStatus}</span>
-          <span>{bridgeStatus}</span>
+          <span className={wsStatus === "Connected" ? "ok" : ""}>{wsStatus}</span>
+          <span className={display.recording ? "ok" : ""}>{display.recording ? "Listening" : bridgeStatus}</span>
         </div>
       </section>
 
-      <section className="panel">
-        <h2>Connection</h2>
-        <label>
-          VPS WebSocket
-          <input value={config.wsUrl} onChange={(event) => setConfig({ ...config, wsUrl: event.target.value })} />
-        </label>
-        <div className="two-col">
-          <label>
-            User
-            <input value={config.userId} onChange={(event) => setConfig({ ...config, userId: event.target.value })} />
-          </label>
-          <label>
-            Token
-            <input value={config.token} onChange={(event) => setConfig({ ...config, token: event.target.value })} />
-          </label>
+      <section className="panel live-card">
+        <h2>Live</h2>
+        <div className="glance-grid">
+          <div>
+            <span>Transcript</span>
+            <strong>{display.transcript ? "Ready" : "Waiting"}</strong>
+          </div>
+          <div>
+            <span>Answer</span>
+            <strong>{display.answerText ? `${display.pageIndex + 1}/${Math.max(display.totalPages, 1)}` : "None"}</strong>
+          </div>
+          <div>
+            <span>Audio</span>
+            <strong>{display.audioBytesReceived ? `${Math.round(display.audioBytesReceived / 1024)} KB` : "0 KB"}</strong>
+          </div>
         </div>
-        <div className="button-row">
-          <button onClick={connectWs}>Connect VPS</button>
-          <button onClick={connectGlasses}>Connect G2</button>
+        <div className="button-row primary-controls">
+          <button onClick={() => sendControl("generate")}>Generate</button>
+          <button onClick={() => sendControl("regenerate")}>Retry</button>
+          <button onClick={() => sendControl("page_previous")}>Prev</button>
+          <button onClick={() => sendControl("page_next")}>Next</button>
+          <button onClick={() => sendControl("clear")}>Clear</button>
         </div>
+        <p className="hint">G2/R1: tap generates from new speech, double tap retries, scroll pages.</p>
       </section>
 
       <section className="panel">
-        <h2>Mode</h2>
+        <h2>Quick Settings</h2>
         <div className="segmented">
           {(["auto", "classroom", "interview", "discussion", "daily", "teleprompt"] as const).map((mode) => (
             <button
@@ -228,34 +309,11 @@ export default function App() {
       </section>
 
       <section className="panel">
-        <h2>Controls</h2>
+        <h2>Audio</h2>
         <div className="button-row">
           <button onClick={startListening}>Start listening</button>
           <button onClick={stopListening}>Stop</button>
-          <button onClick={() => wsRef.current?.sendControl("generate")}>Generate</button>
-          <button onClick={() => wsRef.current?.sendControl("regenerate")}>Retry</button>
-          <button onClick={() => wsRef.current?.sendControl("clear")}>Clear</button>
-        </div>
-        <div className="button-row">
-          <button onClick={() => wsRef.current?.sendControl("page_previous")}>Prev page</button>
-          <button onClick={() => wsRef.current?.sendControl("page_next")}>Next page</button>
-        </div>
-      </section>
-
-      <section className="panel event-log">
-        <h2>Event Log</h2>
-        <div className="button-row">
-          <button onClick={() => setEventLog([])}>Clear log</button>
-        </div>
-        <pre>{eventLog.length ? eventLog.join("\n") : "No G2/R1 events yet."}</pre>
-      </section>
-
-      <section className="panel">
-        <h2>Debug Transcript</h2>
-        <textarea value={debugText} onChange={(event) => setDebugText(event.target.value)} placeholder="Type transcript text for no-glasses testing." />
-        <div className="button-row">
-          <button onClick={() => wsRef.current?.sendDebugTranscript(debugText, false)}>Send transcript</button>
-          <button onClick={() => wsRef.current?.sendDebugTranscript(debugText, true)}>Send + generate</button>
+          <button onClick={connectGlasses}>Reconnect G2</button>
         </div>
       </section>
 
@@ -264,6 +322,50 @@ export default function App() {
         <pre>{glassesText}</pre>
         <p>Audio bytes: {display.audioBytesReceived}</p>
       </section>
+
+      <details className="panel">
+        <summary>Connection</summary>
+        <label>
+          VPS WebSocket
+          <input value={config.wsUrl} onChange={(event) => setConfig({ ...config, wsUrl: event.target.value })} />
+        </label>
+        <div className="two-col">
+          <label>
+            User
+            <input value={config.userId} onChange={(event) => setConfig({ ...config, userId: event.target.value })} />
+          </label>
+          <label>
+            Session
+            <input value={config.sessionId} onChange={(event) => setConfig({ ...config, sessionId: event.target.value || makeClientSessionId() })} />
+          </label>
+        </div>
+        <label>
+          Token
+          <input value={config.token} onChange={(event) => setConfig({ ...config, token: event.target.value })} />
+        </label>
+        <div className="button-row">
+          <button onClick={connectWs}>Reconnect VPS</button>
+          <button onClick={() => setConfig((current) => ({ ...current, sessionId: makeClientSessionId() }))}>New session</button>
+        </div>
+      </details>
+
+      <details className="panel">
+        <summary>Debug Transcript</summary>
+        <textarea value={debugText} onChange={(event) => setDebugText(event.target.value)} placeholder="Type transcript text for no-glasses testing." />
+        <div className="button-row">
+          <button onClick={() => wsRef.current?.sendDebugTranscript(debugText, false)}>Send transcript</button>
+          <button onClick={() => wsRef.current?.sendDebugTranscript(debugText, true)}>Send + generate</button>
+        </div>
+      </details>
+
+      <details className="panel event-log">
+        <summary>Raw Event Log</summary>
+        <div className="button-row">
+          <button onClick={copyEventLog}>Copy JSON</button>
+          <button onClick={() => setEventLog([])}>Clear log</button>
+        </div>
+        <pre>{eventLog.length ? eventLog.map((entry) => `${entry.time} ${entry.summary}`).join("\n") : "No G2/R1 events yet."}</pre>
+      </details>
     </main>
   );
 }

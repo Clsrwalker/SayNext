@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { commandForGesture, normalizeGlassEvent, summarizeRawEvent } from "./events";
+import { commandForGesture, normalizeGlassEvent, redactEventPayload, summarizeRawEvent } from "./events";
 
 describe("normalizeGlassEvent", () => {
   test("normalizes numeric EvenHub event types", () => {
@@ -27,10 +27,10 @@ describe("normalizeGlassEvent", () => {
 });
 
 describe("commandForGesture", () => {
-  test("maps tap based on recording and transcript state", () => {
-    expect(commandForGesture("tap", false, false)).toBe("start_listening");
+  test("maps tap to manual generate regardless of recording state", () => {
+    expect(commandForGesture("tap", false, false)).toBe("generate");
     expect(commandForGesture("tap", true, false)).toBe("generate");
-    expect(commandForGesture("tap", true, true)).toBe("stop_listening");
+    expect(commandForGesture("tap", true, true)).toBe("generate");
   });
 
   test("maps direct control gestures", () => {
@@ -48,5 +48,19 @@ describe("summarizeRawEvent", () => {
       sysEvent: { eventType: 3, eventSource: 2 },
       jsonData: { source: "ring" },
     })).toContain("kind=sys type=3 gesture=double_tap source=2");
+  });
+});
+
+describe("redactEventPayload", () => {
+  test("redacts tokens and binary audio payloads", () => {
+    expect(redactEventPayload({
+      token: "secret",
+      audioEvent: { audioPcm: [1, 2, 3] },
+      sysEvent: { eventType: 1 },
+    })).toEqual({
+      token: "<redacted>",
+      audioEvent: { audioPcm: "<binary>" },
+      sysEvent: { eventType: 1 },
+    });
   });
 });

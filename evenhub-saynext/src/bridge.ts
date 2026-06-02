@@ -58,6 +58,8 @@ export async function connectBridge(params: {
 }): Promise<BridgeHandle> {
   const bridge = await waitForEvenAppBridge();
   let startupRendered = false;
+  let startupPromise: Promise<void> | null = null;
+  let latestRenderId = 0;
   let lastHeader = "";
   let lastBody = "";
 
@@ -77,6 +79,7 @@ export async function connectBridge(params: {
   });
 
   async function render(text: string): Promise<void> {
+    const renderId = ++latestRenderId;
     const { header, body } = splitDisplay(text);
     const headerText = new TextContainerProperty({
       containerID: HEADER_ID,
@@ -110,16 +113,25 @@ export async function connectBridge(params: {
       listObject: [],
     };
 
+    if (!startupPromise) {
+      startupPromise = bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
+        .then(() => {
+          startupRendered = true;
+          params.onStatus("G2 page ready.");
+        });
+    }
+
+    await startupPromise;
+    if (renderId !== latestRenderId) {
+      return;
+    }
+
     if (!startupRendered) {
-      await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config));
-      startupRendered = true;
-      lastHeader = header;
-      lastBody = body;
-      params.onStatus("G2 page ready.");
       return;
     }
 
     if (header !== lastHeader) {
+      if (renderId !== latestRenderId) return;
       await bridge.textContainerUpgrade(new TextContainerUpgrade({
         containerID: HEADER_ID,
         containerName: "saynext-header",
@@ -127,10 +139,12 @@ export async function connectBridge(params: {
         contentLength: header.length,
         content: header,
       }));
+      if (renderId !== latestRenderId) return;
       lastHeader = header;
     }
 
     if (body !== lastBody) {
+      if (renderId !== latestRenderId) return;
       await bridge.textContainerUpgrade(new TextContainerUpgrade({
         containerID: BODY_ID,
         containerName: "saynext-body",
@@ -138,6 +152,7 @@ export async function connectBridge(params: {
         contentLength: body.length,
         content: body,
       }));
+      if (renderId !== latestRenderId) return;
       lastBody = body;
     }
   }
