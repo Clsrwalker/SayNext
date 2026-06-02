@@ -156,6 +156,7 @@ export class EvenHubRuntime {
   private lastPartialTranscriptAt = 0;
   private partialCommitTimer: ReturnType<typeof setTimeout> | null = null;
   private lastAnswerPage: Extract<EvenHubServerMessage, { type: "answer_page" }> | null = null;
+  private readonly logger = makeLogger();
 
   constructor(options: EvenHubRuntimeOptions) {
     this.userId = options.userId.trim() || DEFAULT_USER_ID;
@@ -199,6 +200,7 @@ export class EvenHubRuntime {
   }
 
   handleOpen(): void {
+    this.logger.info(`runtime open user=${this.userId} clientSession=${this.clientSessionId} runtimeSession=${this.sessionId} hasPinnedAnswer=${Boolean(this.lastAnswerPage)}`);
     this.sendMessage({
       type: "status",
       status: "connected",
@@ -250,6 +252,7 @@ export class EvenHubRuntime {
     }
 
     if (message.type === "debug_transcript") {
+      this.logger.info(`debug transcript user=${this.userId} clientSession=${this.clientSessionId} len=${message.text.length} autoGenerate=${Boolean(message.autoGenerate)}`);
       await this.commitTranscript(message.text, message.isFinal === false ? "timeout" : "isFinal");
       if (message.autoGenerate) {
         await this.generate(message.clientEventId);
@@ -308,6 +311,7 @@ export class EvenHubRuntime {
       this.lastPartialTranscriptText = "";
       this.lastPartialTranscriptAt = 0;
     }
+    this.logger.info(`transcript commit user=${this.userId} clientSession=${this.clientSessionId} reason=${reason} len=${normalized.length}`);
     await this.manualHandler.processTranscript(normalized, Date.now(), reason);
     this.sendMessage({
       type: reason === "isFinal" ? "transcript_final" : "transcript_partial",
@@ -359,15 +363,31 @@ export class EvenHubRuntime {
 
   private async generate(clientEventId?: string): Promise<void> {
     await this.commitPendingPartialTranscript();
+    const startedAt = Date.now();
+    this.logger.info(`generate start user=${this.userId} clientSession=${this.clientSessionId} event=${clientEventId || "-"} mode=${this.settings.sceneMode}`);
     this.sendMessage({ type: "status", status: "generating", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message: "Generating" });
-    const result = await this.manualHandler.generateManualAnswer(clientEventId);
-    this.emitManualResult(result);
+    try {
+      const result = await this.manualHandler.generateManualAnswer(clientEventId);
+      this.logger.info(`generate done user=${this.userId} clientSession=${this.clientSessionId} event=${clientEventId || "-"} status=${result.status} hasAnswer=${Boolean(result.answer)} ms=${Date.now() - startedAt}`);
+      this.emitManualResult(result);
+    } catch (error) {
+      this.logger.error(`generate error user=${this.userId} clientSession=${this.clientSessionId} event=${clientEventId || "-"} ms=${Date.now() - startedAt} error=${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 
   private async regenerate(clientEventId?: string): Promise<void> {
+    const startedAt = Date.now();
+    this.logger.info(`regenerate start user=${this.userId} clientSession=${this.clientSessionId} event=${clientEventId || "-"} mode=${this.settings.sceneMode}`);
     this.sendMessage({ type: "status", status: "generating", sessionId: this.sessionId, clientSessionId: this.clientSessionId, message: "Regenerating" });
-    const result = await this.manualHandler.regenerateManualAnswer(clientEventId);
-    this.emitManualResult(result);
+    try {
+      const result = await this.manualHandler.regenerateManualAnswer(clientEventId);
+      this.logger.info(`regenerate done user=${this.userId} clientSession=${this.clientSessionId} event=${clientEventId || "-"} status=${result.status} hasAnswer=${Boolean(result.answer)} ms=${Date.now() - startedAt}`);
+      this.emitManualResult(result);
+    } catch (error) {
+      this.logger.error(`regenerate error user=${this.userId} clientSession=${this.clientSessionId} event=${clientEventId || "-"} ms=${Date.now() - startedAt} error=${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 
   private page(direction: "next" | "previous", clientEventId?: string): void {

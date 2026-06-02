@@ -50,7 +50,44 @@ function getClientSessionId(url: URL): string {
   return url.searchParams.get("sessionId")?.trim() || makeId("evenhub_session");
 }
 
+function summarizeServerMessage(message: EvenHubServerMessage): string {
+  if (message.type === "status") {
+    const bytes = typeof message.audioBytesReceived === "number" ? ` audioBytes=${message.audioBytesReceived}` : "";
+    return `send type=status status=${message.status}${bytes}`;
+  }
+  if (message.type === "transcript_partial" || message.type === "transcript_final") {
+    return `send type=${message.type} len=${message.text.length}`;
+  }
+  if (message.type === "answer_page") {
+    return `send type=answer_page page=${message.pageIndex + 1}/${message.totalPages} len=${message.text.length}`;
+  }
+  if (message.type === "answer_done") {
+    const version = typeof message.stateVersion === "number" ? ` stateVersion=${message.stateVersion}` : "";
+    return `send type=answer_done status=${message.status}${version}`;
+  }
+  return `send type=error code=${message.code}`;
+}
+
+function summarizeClientMessage(message: ReturnType<typeof parseEvenHubClientMessage>): string {
+  if (!message) return "recv type=invalid";
+  if (message.type === "hello") {
+    const client = message.client?.version ? ` client=${message.client.name || "unknown"}@${message.client.version}` : "";
+    const scene = message.settings?.sceneMode ? ` scene=${message.settings.sceneMode}` : "";
+    return `recv type=hello${client}${scene}`;
+  }
+  if (message.type === "settings") {
+    const scene = message.settings.sceneMode ? ` scene=${message.settings.sceneMode}` : "";
+    const depth = message.settings.depth ? ` depth=${message.settings.depth}` : "";
+    return `recv type=settings${scene}${depth}`;
+  }
+  if (message.type === "debug_transcript") {
+    return `recv type=debug_transcript len=${message.text.length} autoGenerate=${Boolean(message.autoGenerate)}`;
+  }
+  return `recv type=control action=${message.action} event=${message.clientEventId || "-"}`;
+}
+
 function sendJson(ws: EvenHubWebSocket, message: EvenHubServerMessage): void {
+  console.log(`[EvenHub] ${summarizeServerMessage(message)} conn=${ws.data.connId} session=${ws.data.clientSessionId}`);
   ws.send(JSON.stringify(message));
 }
 
@@ -141,6 +178,7 @@ export const evenHubWebSocket = {
     }
 
     const parsed = parseEvenHubClientMessage(message);
+    console.log(`[EvenHub] ${summarizeClientMessage(parsed)} conn=${ws.data.connId} session=${ws.data.clientSessionId}`);
     if (!parsed) {
       sendJson(ws, {
         type: "error",
