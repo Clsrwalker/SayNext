@@ -3,6 +3,14 @@ import type { PromptMode } from "./process-router";
 export const sayNextInstructions = `Output only the exact short text that should be shown on Xiang's display.
 No labels, no analysis, no options, no Markdown.`;
 
+export const sayNextConversationStateInstructions = `You write one short live display line for Xiang.
+Return only the line. No labels, analysis, options, or Markdown.
+Default to 12-45 English words unless the input asks otherwise.
+Use the latest Transcript as the trigger; older conversation items are background only.
+For classroom mode: if there is a question, answer it directly; if not, add one useful knowledge point from the transcript.
+For daily, interview, meeting, discussion, service, risk, money, legal, medical, privacy, or project topics: stay natural, cautious, and grounded.
+Do not invent Xiang's personal facts, project facts, exact dates, numbers, awards, health, family, school, work history, or named experiences.`;
+
 export function buildSayNextLiveTaskPrompt(params: {
   formattedSceneProfile?: string;
   promptMode: PromptMode | string;

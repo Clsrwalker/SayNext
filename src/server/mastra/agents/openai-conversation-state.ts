@@ -7,8 +7,11 @@ export type TranscriptCommitReason = "final" | "timeout";
 
 export interface OpenAiConversationGenerateOptions {
   model: string;
-  instructions: string;
+  seedInstructions: string;
   latestTranscript: string;
+  outputLanguage?: string;
+  promptMode?: string;
+  preparedNote?: string;
   timeoutMs: number;
 }
 
@@ -22,7 +25,6 @@ export interface OpenAiConversationGenerateResult {
 export interface OpenAiConversationPayload {
   model: string;
   conversation: string;
-  instructions: string;
   input: Array<{
     role: "user";
     content: Array<{
@@ -31,6 +33,21 @@ export interface OpenAiConversationPayload {
     }>;
   }>;
   temperature: number;
+}
+
+export interface OpenAiConversationCreatePayload {
+  metadata: Record<string, string>;
+  items?: Array<{
+    type: "message";
+    role: "developer";
+    content: string;
+  }>;
+}
+
+export interface OpenAiConversationInputOptions {
+  outputLanguage?: string;
+  promptMode?: string;
+  preparedNote?: string;
 }
 
 export function isOpenAiConversationStateEnabled(provider: string): boolean {
@@ -47,27 +64,57 @@ export function shouldCommitTranscriptToOpenAiConversation(reason: TranscriptCom
   return reason === "final";
 }
 
-export function buildOpenAiConversationInput(latestTranscript: string): string {
-  return `Current transcript: ${latestTranscript.trim()}`;
+export function buildOpenAiConversationInput(latestTranscript: string, options: OpenAiConversationInputOptions = {}): string {
+  const lines = [
+    options.outputLanguage?.trim() ? `Language: ${options.outputLanguage.trim()}` : "",
+    options.promptMode?.trim() ? `Mode: ${options.promptMode.trim()}` : "",
+    options.preparedNote?.trim() ? `Prepared note:\n${options.preparedNote.trim()}` : "",
+    `Transcript: ${latestTranscript.trim()}`,
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+export function buildOpenAiConversationCreatePayload(options: {
+  userId: string;
+  sessionId: string;
+  seedInstructions?: string;
+}): OpenAiConversationCreatePayload {
+  const payload: OpenAiConversationCreatePayload = {
+    metadata: {
+      userHash: metadataHash(options.userId),
+      sessionHash: metadataHash(options.sessionId),
+      purpose: "session_clean_transcript_state",
+    },
+  };
+  const seedInstructions = options.seedInstructions?.trim();
+  if (seedInstructions) {
+    payload.items = [
+      {
+        type: "message",
+        role: "developer",
+        content: seedInstructions,
+      },
+    ];
+  }
+  return payload;
 }
 
 export function buildOpenAiConversationPayload(options: {
   model: string;
   conversationId: string;
-  instructions: string;
   latestTranscript: string;
+  inputOptions?: OpenAiConversationInputOptions;
 }): OpenAiConversationPayload {
   return {
     model: options.model,
     conversation: options.conversationId,
-    instructions: options.instructions,
     input: [
       {
         role: "user",
         content: [
           {
             type: "input_text",
-            text: buildOpenAiConversationInput(options.latestTranscript),
+            text: buildOpenAiConversationInput(options.latestTranscript, options.inputOptions),
           },
         ],
       },
@@ -137,13 +184,17 @@ export class OpenAiConversationSession {
 
   async generate(options: OpenAiConversationGenerateOptions): Promise<OpenAiConversationGenerateResult> {
     await this.waitForCleanup();
-    const conversationId = await this.ensureConversation(options.timeoutMs);
+    const conversationId = await this.ensureConversation(options.timeoutMs, options.seedInstructions);
     const apiKey = getOpenAiApiKey();
     const payload = buildOpenAiConversationPayload({
       model: options.model,
       conversationId,
-      instructions: options.instructions,
       latestTranscript: options.latestTranscript,
+      inputOptions: {
+        outputLanguage: options.outputLanguage,
+        promptMode: options.promptMode,
+        preparedNote: options.preparedNote,
+      },
     });
 
     const response = await fetchWithTimeout(
@@ -181,15 +232,15 @@ export class OpenAiConversationSession {
     this.cleanupQueue = Promise.resolve();
   }
 
-  async warmup(timeoutMs: number): Promise<string> {
-    return this.ensureConversation(timeoutMs);
+  async warmup(timeoutMs: number, seedInstructions?: string): Promise<string> {
+    return this.ensureConversation(timeoutMs, seedInstructions);
   }
 
-  private async ensureConversation(timeoutMs: number): Promise<string> {
+  private async ensureConversation(timeoutMs: number, seedInstructions?: string): Promise<string> {
     if (this.conversationId) return this.conversationId;
     if (this.conversationCreatePromise) return this.conversationCreatePromise;
 
-    this.conversationCreatePromise = this.createConversation(timeoutMs)
+    this.conversationCreatePromise = this.createConversation(timeoutMs, seedInstructions)
       .then((conversationId) => {
         this.conversationId = conversationId;
         return conversationId;
@@ -201,7 +252,7 @@ export class OpenAiConversationSession {
     return this.conversationCreatePromise;
   }
 
-  private async createConversation(timeoutMs: number): Promise<string> {
+  private async createConversation(timeoutMs: number, seedInstructions?: string): Promise<string> {
     const apiKey = getOpenAiApiKey();
     const response = await fetchWithTimeout(
       OPENAI_CONVERSATIONS_URL,
@@ -211,13 +262,11 @@ export class OpenAiConversationSession {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-          metadata: {
-            userHash: metadataHash(this.metadata.userId),
-            sessionHash: metadataHash(this.metadata.sessionId),
-            purpose: "session_clean_transcript_state",
-          },
-        }),
+        body: JSON.stringify(buildOpenAiConversationCreatePayload({
+          userId: this.metadata.userId,
+          sessionId: this.metadata.sessionId,
+          seedInstructions,
+        })),
       },
       timeoutMs,
     );

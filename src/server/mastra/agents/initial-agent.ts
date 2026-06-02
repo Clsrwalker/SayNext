@@ -2,6 +2,7 @@ import type { Agent } from "@mastra/core/agent";
 import { Action, AgentType, type AgentResponse, type Conversation } from "../types";
 import type { EventMemorySnapshot } from "../../memory/event-memory";
 import {
+  buildOpenAiConversationInput,
   type OpenAiConversationSession,
   type TranscriptCommitReason,
   isOpenAiConversationStateEnabled,
@@ -21,7 +22,7 @@ import {
   resolveOpenAiModelConfig,
   withModelTimeout,
 } from "../../saynext/model-runtime";
-import { buildSayNextLiveTaskPrompt, sayNextInstructions } from "../../saynext/prompts";
+import { buildSayNextLiveTaskPrompt, sayNextConversationStateInstructions, sayNextInstructions } from "../../saynext/prompts";
 import {
   buildLiveXiangProfile,
   compactRuntimeContextBlock,
@@ -191,7 +192,11 @@ export async function processConversation(
   const outputLanguageText = outputLanguage === "chinese" ? "Chinese" : "English";
   const dynamicPromptCore = `Output language: ${outputLanguageText}`;
   const dynamicPromptSuffix = `${dynamicPromptCore}\n\nCurrent transcript: ${latestTranscript}`;
-  const openAiConversationInstructions = `${sayNextInstructions}\n\n${stablePromptPrefix}\n\n${dynamicPromptCore}`;
+  const openAiConversationInput = buildOpenAiConversationInput(latestTranscript, {
+    outputLanguage: outputLanguageText,
+    promptMode,
+    preparedNote: formattedPrenoteContext,
+  });
 
   const prompt = `${stablePromptPrefix}\n\n${dynamicPromptSuffix}`;
   const cacheablePrefix = `${sayNextInstructions}\n\n${stablePromptPrefix}`;
@@ -200,7 +205,7 @@ export async function processConversation(
     && shouldCommitTranscriptToOpenAiConversation(options.transcriptCommitReason ?? "final");
 
   console.log(
-    `[SayNext] Input approx tokens: system=${estimateTokens(sayNextInstructions)} prompt=${estimateTokens(prompt)} cacheablePrefix=${estimateTokens(cacheablePrefix)} dynamic=${estimateTokens(dynamicPromptSuffix)} total=${estimateTokens(`${sayNextInstructions}\n\n${prompt}`)} mode=${promptMode}${openAiConversationReady ? ` openaiConversation=enabled conversationRequest=${estimateTokens(openAiConversationInstructions) + estimateTokens(latestTranscript)}` : ""}`,
+    `[SayNext] Input approx tokens: system=${estimateTokens(sayNextInstructions)} prompt=${estimateTokens(prompt)} cacheablePrefix=${estimateTokens(cacheablePrefix)} dynamic=${estimateTokens(dynamicPromptSuffix)} total=${estimateTokens(`${sayNextInstructions}\n\n${prompt}`)} mode=${promptMode}${openAiConversationReady ? ` openaiConversation=enabled conversationSeed=${estimateTokens(sayNextConversationStateInstructions)} conversationInput=${estimateTokens(openAiConversationInput)}` : ""}`,
   );
 
   try {
@@ -228,8 +233,11 @@ export async function processConversation(
       try {
         const result = await options.openAiConversationSession.generate({
           model: MODEL_NAME,
-          instructions: openAiConversationInstructions,
+          seedInstructions: sayNextConversationStateInstructions,
           latestTranscript,
+          outputLanguage: outputLanguageText,
+          promptMode,
+          preparedNote: formattedPrenoteContext,
           timeoutMs: OPENAI_TIMEOUT_MS,
         });
         responseText = result.text;
@@ -240,8 +248,10 @@ export async function processConversation(
           deletedAssistantOutputItemIds: result.deletedOutputItemIds,
           omittedRecentHistoryFromPrompt: true,
           transcriptCommitReason: options.transcriptCommitReason ?? "final",
-          estimatedInstructionTokens: estimateTokens(openAiConversationInstructions),
-          estimatedUserInputTokens: estimateTokens(latestTranscript),
+          seededInstructionsInConversation: true,
+          requestIncludedInstructions: false,
+          estimatedSeedInstructionTokens: estimateTokens(sayNextConversationStateInstructions),
+          estimatedUserInputTokens: estimateTokens(openAiConversationInput),
         };
       } catch (error) {
         console.warn(`OpenAI conversation-state request failed; falling back to normal OpenAI prompt: ${error instanceof Error ? error.message : String(error)}`);

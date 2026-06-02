@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  buildOpenAiConversationCreatePayload,
   buildOpenAiConversationInput,
   buildOpenAiConversationPayload,
   extractOutputItemIds,
@@ -46,20 +47,59 @@ test("explicit flag can disable conversation state in travel mode", () => {
 
 test("conversation input stores only the latest clean transcript", () => {
   expect(buildOpenAiConversationInput("  Could you explain Kubernetes?  "))
-    .toBe("Current transcript: Could you explain Kubernetes?");
+    .toBe("Transcript: Could you explain Kubernetes?");
 });
 
-test("conversation payload keeps history out of the request input", () => {
+test("conversation input carries only compact dynamic fields", () => {
+  expect(buildOpenAiConversationInput("  Could you explain Kubernetes?  ", {
+    outputLanguage: "English",
+    promptMode: "classroom",
+    preparedNote: "Exam focus: CAP theorem",
+  })).toBe([
+    "Language: English",
+    "Mode: classroom",
+    "Prepared note:",
+    "Exam focus: CAP theorem",
+    "Transcript: Could you explain Kubernetes?",
+  ].join("\n"));
+});
+
+test("conversation create payload seeds fixed instructions once", () => {
+  const payload = buildOpenAiConversationCreatePayload({
+    userId: "xiang@example.com",
+    sessionId: "session_1",
+    seedInstructions: "Canonical live display rules.",
+  });
+
+  expect(payload.items).toEqual([
+    {
+      type: "message",
+      role: "developer",
+      content: "Canonical live display rules.",
+    },
+  ]);
+  expect(payload.metadata.purpose).toBe("session_clean_transcript_state");
+});
+
+test("conversation payload keeps history and fixed instructions out of the per-turn request", () => {
   const payload = buildOpenAiConversationPayload({
     model: "gpt-4.1-mini",
     conversationId: "conv_test",
-    instructions: "Canonical rules.\n\n--- RECENT CONVERSATION ---\nThis should be in instructions only when explicitly supplied.",
     latestTranscript: "What project are you proud of?",
+    inputOptions: {
+      outputLanguage: "English",
+      promptMode: "interview",
+    },
   });
 
   expect(payload.conversation).toBe("conv_test");
+  expect("instructions" in payload).toBe(false);
   expect(payload.input).toHaveLength(1);
-  expect(payload.input[0].content[0].text).toBe("Current transcript: What project are you proud of?");
+  expect(payload.input[0].content[0].text).toBe([
+    "Language: English",
+    "Mode: interview",
+    "Transcript: What project are you proud of?",
+  ].join("\n"));
   expect(payload.input[0].content[0].text).not.toContain("RECENT CONVERSATION");
   expect(payload.input[0].content[0].text).not.toContain("Previous suggestion");
 });

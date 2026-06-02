@@ -63,6 +63,8 @@ export function normalizeSpokenDisplayPunctuation(text: string): string {
     .replace(/\bA\^T\b/g, "A transpose")
     .replace(/`([^`\n]{1,80})`/g, "$1")
     .replace(/"([^"\n]{1,80})"/g, "$1")
+    .replace(/\b([A-Za-z]+)\(s\)(?=\W|$)/g, "$1s")
+    .replace(/\b([A-Za-z]+)\(es\)(?=\W|$)/g, "$1es")
     .replace(/\(\s*e\.g\.,?\s*([^()]{1,60})\s*\)/gi, ", for example $1,")
     .replace(/\(\s*for example,?\s*([^()]{1,60})\s*\)/gi, ", for example $1,")
     .replace(/\(\s*([^()]{1,45})\s*\)/g, ", $1,")

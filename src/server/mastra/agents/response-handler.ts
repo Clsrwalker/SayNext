@@ -12,6 +12,7 @@ import { makeTelepromptOpeningLine, shouldStartTeleprompt, TelepromptRuntime, ty
 import { OpenAiConversationSession, isOpenAiConversationStateEnabled } from './openai-conversation-state';
 import { normalizeKnownProjectAsrAliases } from '../../text/asr-corrections';
 import { detectPromptMode } from '../../saynext/context-builder';
+import { sayNextConversationStateInstructions } from '../../saynext/prompts';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 const SUGGESTION_ECHO_WINDOW_MS = 45 * 1000;
@@ -416,7 +417,7 @@ export class MergeResponseHandler {
     this.conversation = [];
     this.openAiConversationSession = new OpenAiConversationSession({ userId, sessionId: this.sessionId });
     if (isOpenAiConversationStateEnabled(process.env.LLM_PROVIDER || "openai")) {
-      this.openAiConversationSession.warmup(Number(process.env.OPENAI_CONVERSATION_WARMUP_TIMEOUT_MS || 8000))
+      this.openAiConversationSession.warmup(Number(process.env.OPENAI_CONVERSATION_WARMUP_TIMEOUT_MS || 8000), sayNextConversationStateInstructions)
         .then((conversationId) => this.session.logger.info(`OpenAI conversation state warmed up: ${conversationId}`))
         .catch((error) => this.session.logger.warn(`OpenAI conversation warmup skipped: ${error instanceof Error ? error.message : String(error)}`));
     }

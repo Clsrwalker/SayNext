@@ -22,9 +22,9 @@ import {
   getPrenoteExactAnswerImmediateResponse,
   getUnsupportedPremiseImmediateResponse,
 } from "../src/server/saynext/immediate-response";
-import { buildSayNextLiveTaskPrompt, sayNextInstructions } from "../src/server/saynext/prompts";
+import { buildSayNextLiveTaskPrompt, sayNextConversationStateInstructions, sayNextInstructions } from "../src/server/saynext/prompts";
 import { type OutputLanguage } from "../src/server/saynext/output-postprocess";
-import { buildOpenAiConversationInput } from "../src/server/mastra/agents/openai-conversation-state";
+import { buildOpenAiConversationCreatePayload, buildOpenAiConversationInput } from "../src/server/mastra/agents/openai-conversation-state";
 
 type SampleRow = {
   id: number;
@@ -61,23 +61,28 @@ type PromptSnapshot = {
       combinedPrompt: string;
     };
     conversationStateRequest: {
-      endpoint: "POST /v1/responses";
-      payload: {
-        model: string;
-        conversation: string;
-        instructions: string;
-        input: Array<{
-          role: "user";
-          content: Array<{ type: "input_text"; text: string }>;
-        }>;
-        temperature: number;
+      createConversationOnce: {
+        endpoint: "POST /v1/conversations";
+        payload: ReturnType<typeof buildOpenAiConversationCreatePayload>;
+      };
+      responseEveryTurn: {
+        endpoint: "POST /v1/responses";
+        payload: {
+          model: string;
+          conversation: string;
+          input: Array<{
+            role: "user";
+            content: Array<{ type: "input_text"; text: string }>;
+          }>;
+          temperature: number;
+        };
       };
     };
     tokenEstimate: {
       system: number;
       prompt: number;
       combined: number;
-      conversationStateInstructions: number;
+      conversationStateSeedInstructions: number;
       conversationStateInput: number;
     };
   };
@@ -371,11 +376,14 @@ function buildPromptSnapshot(params: {
   const liveOutputLanguageText = params.outputLanguage === "chinese" ? "Chinese" : "English";
   const liveDynamicPromptCore = `Output language: ${liveOutputLanguageText}`;
   const liveDynamicPromptSuffix = `${liveDynamicPromptCore}\n\nCurrent transcript: ${latestTranscript}`;
-  const openAiConversationInstructions = `${sayNextInstructions}\n\n${stablePromptPrefix}\n\n${liveDynamicPromptCore}`;
 
   const prompt = `${stablePromptPrefix}\n\n${liveDynamicPromptSuffix}`;
   const combinedPrompt = `${sayNextInstructions}\n\n${prompt}`;
-  const conversationStateInput = buildOpenAiConversationInput(latestTranscript);
+  const conversationStateInput = buildOpenAiConversationInput(latestTranscript, {
+    outputLanguage: liveOutputLanguageText,
+    promptMode,
+    preparedNote: formattedPrenoteContext,
+  });
 
   return {
     status: "api_prompt",
@@ -391,30 +399,39 @@ function buildPromptSnapshot(params: {
         combinedPrompt,
       },
       conversationStateRequest: {
-        endpoint: "POST /v1/responses",
-        payload: {
-          model: params.model,
-          conversation: "<runtime OpenAI conversation id>",
-          instructions: openAiConversationInstructions,
-          input: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "input_text",
-                  text: conversationStateInput,
-                },
-              ],
-            },
-          ],
-          temperature: 0.35,
+        createConversationOnce: {
+          endpoint: "POST /v1/conversations",
+          payload: buildOpenAiConversationCreatePayload({
+            userId: params.userId,
+            sessionId: "<runtime session id>",
+            seedInstructions: sayNextConversationStateInstructions,
+          }),
+        },
+        responseEveryTurn: {
+          endpoint: "POST /v1/responses",
+          payload: {
+            model: params.model,
+            conversation: "<runtime OpenAI conversation id>",
+            input: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "input_text",
+                    text: conversationStateInput,
+                  },
+                ],
+              },
+            ],
+            temperature: 0.35,
+          },
         },
       },
       tokenEstimate: {
         system: estimateTokens(sayNextInstructions),
         prompt: estimateTokens(prompt),
         combined: estimateTokens(combinedPrompt),
-        conversationStateInstructions: estimateTokens(openAiConversationInstructions),
+        conversationStateSeedInstructions: estimateTokens(sayNextConversationStateInstructions),
         conversationStateInput: estimateTokens(conversationStateInput),
       },
     },
@@ -536,7 +553,7 @@ function writeMarkdown(params: {
     `No-API turns: ${noApiCount}`,
     `Historical teleprompt rows: ${telepromptCount}`,
     "",
-    "This file reconstructs the prompt payload from the local copy of the VPS database and current local code. For normal SayNext generation, use `normalAgentRequest.combinedPrompt`. For VPS travel mode with OpenAI conversation state, the actual Responses API shape is `conversationStateRequest.payload.instructions` plus `conversationStateRequest.payload.input`.",
+    "This file reconstructs the prompt payload from the local copy of the VPS database and current local code. For normal SayNext generation, use `normalAgentRequest.combinedPrompt`. For VPS travel mode with OpenAI conversation state, fixed rules are seeded once when creating the OpenAI conversation, then each Responses request sends only the compact per-turn input.",
     "",
     "## Session Index",
     "",
@@ -581,7 +598,7 @@ function writeMarkdown(params: {
       }
 
       const api = report.prompt.api!;
-      lines.push(`- token_estimate: system=${api.tokenEstimate.system}, prompt=${api.tokenEstimate.prompt}, combined=${api.tokenEstimate.combined}, conversation_state_instructions=${api.tokenEstimate.conversationStateInstructions}, conversation_state_input=${api.tokenEstimate.conversationStateInput}`);
+      lines.push(`- token_estimate: system=${api.tokenEstimate.system}, prompt=${api.tokenEstimate.prompt}, combined=${api.tokenEstimate.combined}, conversation_state_seed_instructions=${api.tokenEstimate.conversationStateSeedInstructions}, conversation_state_input=${api.tokenEstimate.conversationStateInput}`);
       lines.push("");
       lines.push("<details><summary>Normal Agent Request: combined prompt sent through Agent.generate</summary>");
       lines.push("");
@@ -591,18 +608,18 @@ function writeMarkdown(params: {
       lines.push("");
       lines.push("</details>");
       lines.push("");
-      lines.push("<details><summary>VPS Conversation-State Request: payload.instructions</summary>");
+      lines.push("<details><summary>VPS Conversation-State Create: seed developer item</summary>");
       lines.push("");
-      lines.push("```text");
-      lines.push(api.conversationStateRequest.payload.instructions);
+      lines.push("```json");
+      lines.push(JSON.stringify(api.conversationStateRequest.createConversationOnce.payload.items ?? [], null, 2));
       lines.push("```");
       lines.push("");
       lines.push("</details>");
       lines.push("");
-      lines.push("<details><summary>VPS Conversation-State Request: payload.input</summary>");
+      lines.push("<details><summary>VPS Conversation-State Response: per-turn payload.input</summary>");
       lines.push("");
       lines.push("```json");
-      lines.push(JSON.stringify(api.conversationStateRequest.payload.input, null, 2));
+      lines.push(JSON.stringify(api.conversationStateRequest.responseEveryTurn.payload.input, null, 2));
       lines.push("```");
       lines.push("");
       lines.push("</details>");

@@ -288,6 +288,11 @@ test("normalizes latex-like classroom notation", () => {
     .toBe("A transpose A and u-hat can be sensitive depending on the condition number.");
 });
 
+test("normalizes optional plural technical text without comma artifacts", () => {
+  expect(sanitizeSayNextOutput("A composite index works when queries use the leftmost column(s)."))
+    .toBe("A composite index works when queries use the leftmost columns.");
+});
+
 test("removes unnecessary cooking follow-up question", () => {
   expect(finalizeSayNextOutput(
     "Sure thing! I'll wash the veggies and prep the chicken while you cook. Any specific way you want the chicken cut?",
