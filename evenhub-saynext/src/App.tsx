@@ -176,36 +176,45 @@ export default function App() {
 
   const startSelectedAudio = useCallback(async () => {
     wantListeningRef.current = true;
-    sendControl("start_listening");
+    clearSignalCheck();
+    const micSource = configRef.current.settings.micSource;
+    setAudioStatus(micSource === "phone" ? "Opening phone mic..." : "Opening G2 mic...");
 
-    if (configRef.current.settings.micSource === "phone") {
-      clearSignalCheck();
-      await bridgeRef.current?.setRecording(false).catch(() => undefined);
-      if (!phoneMicRef.current) {
-        phoneMicRef.current = await startPhoneMic({
-          onPcm: noteAudioSent,
-          onStatus: setAudioStatus,
-        });
-      }
-      setAudioStatus("Phone mic listening");
-    } else {
-      await stopPhoneMic();
-      if (!bridgeRef.current) {
-        setAudioStatus("Waiting for G2 bridge before opening the mic.");
+    try {
+      if (micSource === "phone") {
+        await bridgeRef.current?.setRecording(false).catch(() => undefined);
+        if (!phoneMicRef.current) {
+          phoneMicRef.current = await startPhoneMic({
+            onPcm: noteAudioSent,
+            onStatus: setAudioStatus,
+          });
+        }
+        setAudioStatus("Phone mic listening");
       } else {
+        await stopPhoneMic();
+        if (!bridgeRef.current) {
+          throw new Error("G2 bridge is not connected yet.");
+        }
+
         const baselineBytes = localAudioBytesSentRef.current;
         const opened = await bridgeRef.current.setRecording(true);
-        if (opened) {
-          setAudioStatus("G2 mic listening; waiting for signal.");
-          scheduleG2SignalCheck(baselineBytes);
-        } else {
-          clearSignalCheck();
-          setAudioStatus("G2 mic did not open. Switch to Phone mic.");
+        if (!opened) {
+          throw new Error("G2 mic did not open. Switch to Phone mic.");
         }
+        setAudioStatus("G2 mic listening; waiting for signal.");
+        scheduleG2SignalCheck(baselineBytes);
       }
-    }
 
-    setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
+      sendControl("start_listening");
+      setDisplay((current) => ({ ...current, recording: true, status: "Listening", error: "" }));
+    } catch (error) {
+      wantListeningRef.current = false;
+      clearSignalCheck();
+      const message = error instanceof Error ? error.message : String(error);
+      setAudioStatus(message);
+      sendControl("stop_listening");
+      setDisplay((current) => ({ ...current, recording: false, status: "Mic unavailable", error: message }));
+    }
   }, [clearSignalCheck, noteAudioSent, scheduleG2SignalCheck, sendControl, stopPhoneMic]);
 
   const stopSelectedAudio = useCallback(async () => {
