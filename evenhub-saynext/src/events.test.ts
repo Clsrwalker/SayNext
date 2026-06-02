@@ -1,12 +1,22 @@
 import { describe, expect, test } from "vitest";
+import { EventSourceType, OsEventTypeList } from "@evenrealities/even_hub_sdk";
 import { commandForGesture, normalizeGlassEvent, redactEventPayload, summarizeRawEvent } from "./events";
 
 describe("normalizeGlassEvent", () => {
-  test("normalizes numeric EvenHub event types", () => {
-    expect(normalizeGlassEvent({ sysEvent: { eventType: 0 } })).toBe("tap");
-    expect(normalizeGlassEvent({ textEvent: { eventType: 1 } })).toBe("scroll_up");
-    expect(normalizeGlassEvent({ textEvent: { eventType: 2 } })).toBe("scroll_down");
-    expect(normalizeGlassEvent({ sysEvent: { eventType: 3 } })).toBe("double_tap");
+  test("normalizes official EvenHub click event types", () => {
+    expect(normalizeGlassEvent({
+      sysEvent: {
+        eventType: OsEventTypeList.CLICK_EVENT,
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_RING,
+      },
+    })).toBe("tap");
+    expect(normalizeGlassEvent({ textEvent: { eventType: OsEventTypeList.CLICK_EVENT } })).toBe("tap");
+    expect(normalizeGlassEvent({ sysEvent: { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT } })).toBe("double_tap");
+  });
+
+  test("normalizes official scroll events", () => {
+    expect(normalizeGlassEvent({ textEvent: { eventType: OsEventTypeList.SCROLL_TOP_EVENT } })).toBe("scroll_up");
+    expect(normalizeGlassEvent({ textEvent: { eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } })).toBe("scroll_down");
   });
 
   test("normalizes string and jsonData event types", () => {
@@ -20,9 +30,9 @@ describe("normalizeGlassEvent", () => {
     expect(normalizeGlassEvent({ type: "foreground_enter" })).toBe("unknown");
   });
 
-  test("treats incomplete captured container events as tap", () => {
-    expect(normalizeGlassEvent({ textEvent: { containerName: "saynext-body" } })).toBe("tap");
-    expect(normalizeGlassEvent({ listEvent: { currentSelectItemIndex: 0 } })).toBe("tap");
+  test("does not fire controls from incomplete captured container events", () => {
+    expect(normalizeGlassEvent({ textEvent: { containerName: "saynext-body" } })).toBe("unknown");
+    expect(normalizeGlassEvent({ listEvent: { currentSelectItemIndex: 0 } })).toBe("unknown");
   });
 });
 

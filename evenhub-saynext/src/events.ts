@@ -1,3 +1,5 @@
+import { OsEventTypeList } from "@evenrealities/even_hub_sdk";
+
 export type GlassGesture = "tap" | "double_tap" | "scroll_up" | "scroll_down" | "hold" | "unknown";
 
 type EventLike = {
@@ -34,30 +36,48 @@ function readRawEventType(event: EventLike): unknown {
   );
 }
 
+function readOfficialEventType(raw: unknown): OsEventTypeList | null {
+  if (typeof raw === "number") {
+    if (raw >= OsEventTypeList.CLICK_EVENT && raw <= OsEventTypeList.IMU_DATA_REPORT) {
+      return raw as OsEventTypeList;
+    }
+    return null;
+  }
+
+  if (typeof raw !== "string") return null;
+  const normalized = raw.trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (!normalized) return null;
+
+  const numeric = Number(normalized);
+  if (Number.isInteger(numeric) && numeric >= OsEventTypeList.CLICK_EVENT && numeric <= OsEventTypeList.IMU_DATA_REPORT) {
+    return numeric as OsEventTypeList;
+  }
+
+  if (normalized === "CLICK" || normalized === "CLICK_EVENT" || normalized === "TAP") return OsEventTypeList.CLICK_EVENT;
+  if (normalized === "DOUBLE_CLICK" || normalized === "DOUBLE_CLICK_EVENT" || normalized === "DOUBLE_TAP") return OsEventTypeList.DOUBLE_CLICK_EVENT;
+  if (normalized === "SCROLL_TOP" || normalized === "SCROLL_TOP_EVENT" || normalized === "SCROLL_UP") return OsEventTypeList.SCROLL_TOP_EVENT;
+  if (normalized === "SCROLL_BOTTOM" || normalized === "SCROLL_BOTTOM_EVENT" || normalized === "SCROLL_DOWN") return OsEventTypeList.SCROLL_BOTTOM_EVENT;
+  return null;
+}
+
 export function normalizeGlassEvent(event: unknown): GlassGesture {
   if (!event || typeof event !== "object") return "unknown";
   const eventLike = event as EventLike;
   const raw = readRawEventType(eventLike);
+  const officialType = readOfficialEventType(raw);
 
-  if (typeof raw === "number") {
-    if (raw === 0) return "tap";
-    if (raw === 1) return "scroll_up";
-    if (raw === 2) return "scroll_down";
-    if (raw === 3) return "double_tap";
-    return "unknown";
-  }
+  if (officialType === OsEventTypeList.CLICK_EVENT) return "tap";
+  if (officialType === OsEventTypeList.DOUBLE_CLICK_EVENT) return "double_tap";
+  if (officialType === OsEventTypeList.SCROLL_TOP_EVENT) return "scroll_up";
+  if (officialType === OsEventTypeList.SCROLL_BOTTOM_EVENT) return "scroll_down";
+  if (officialType !== null) return "unknown";
 
   if (typeof raw !== "string") {
-    if (eventLike.textEvent || eventLike.listEvent || eventLike.sysEvent) return "tap";
     return "unknown";
   }
 
   const value = raw.toLowerCase();
-  if (value.includes("double")) return "double_tap";
   if (value.includes("hold") || value.includes("long")) return "hold";
-  if (value.includes("scroll_top") || value.includes("scroll-up") || value.includes("up")) return "scroll_up";
-  if (value.includes("scroll_bottom") || value.includes("scroll-down") || value.includes("down")) return "scroll_down";
-  if (value.includes("click") || value.includes("tap")) return "tap";
   return "unknown";
 }
 

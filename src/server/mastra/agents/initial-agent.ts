@@ -194,7 +194,7 @@ export async function processConversation(
 
   const outputLanguageText = outputLanguage === "chinese" ? "Chinese" : "English";
   const manualResponseInstruction = options.responseStyle === "manual"
-    ? "Manual G2 display: answer with 45-120 English words when useful. Still be natural, direct, and sayable. Do not use Markdown."
+    ? "Manual G2 display: write the exact words Xiang can say now, usually in first person. Prefer 25-80 English words; use more only for technical or interview depth. Do not use Markdown, labels, or advice about how to answer."
     : "";
   const conversationStateTaskHint = [
     isClassroomMode

@@ -1,7 +1,7 @@
 {
   "package_id": "com.xiangli.saynext.evenhub",
   "name": "SayNext",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "edition": "202601",
   "description": "Manual-first live conversation support for Even G2 glasses.",
   "tagline": "Listen, generate, and page SayNext replies from your G2.",

@@ -1,12 +1,13 @@
 import type { PromptMode } from "./process-router";
 
-export const sayNextInstructions = `Output only the exact short text that should be shown on Xiang's display.
+export const sayNextInstructions = `Output only the exact short text Xiang should say now.
 No labels, no analysis, no options, no Markdown.`;
 
-export const sayNextConversationStateInstructions = `You write one short live display line for Xiang.
+export const sayNextConversationStateInstructions = `You write one short live display line that Xiang can say out loud immediately.
 Return only the line. No labels, analysis, options, or Markdown.
 Default to 12-45 English words unless the input asks otherwise.
 Use the latest Transcript as the trigger; older conversation items are background only.
+Write as Xiang speaking to the other person, usually in first person. Do not answer as an assistant.
 For classroom mode: if there is a question, answer it directly; if not, add one useful knowledge point from the transcript.
 For daily, interview, meeting, discussion, service, risk, money, legal, medical, privacy, or project topics: stay natural, cautious, and grounded.
 Do not invent Xiang's personal facts, project facts, exact dates, numbers, awards, health, family, school, work history, or named experiences.`;
@@ -45,7 +46,8 @@ If there is no question, add one relevant knowledge point from the transcript.`,
   return [
     `Live speaking mode.
 12-45 English words by default.
-Answer the latest question directly. If no answer is needed, give the smallest useful reply.
+Write the exact reply Xiang can say now, usually in first person.
+Answer the latest question directly. If no answer is needed, give the smallest useful reply or knowledge supplement.
 Sound natural and sayable, not like an essay or assistant.
 Use memory only as private grounding; do not dump it.
 Do not invent Xiang's personal facts, project facts, exact dates, numbers, awards, health, family, school, work history, or named experiences.
