@@ -18,15 +18,23 @@ type SavedConfig = {
   settings: SayNextSettings;
 };
 
+function canUsePhoneMic(): boolean {
+  return typeof window === "undefined" || window.isSecureContext;
+}
+
+function normalizeMicForRuntime(settings: SayNextSettings): SayNextSettings {
+  if (settings.micSource === "phone" && !canUsePhoneMic()) {
+    return { ...settings, micSource: "g2" };
+  }
+  return settings;
+}
+
 function readSavedConfig(): SavedConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SavedConfig>;
-      const settings = normalizeSettings(parsed.settings);
-      if (!parsed.settings?.micSource || parsed.settings.micSource === "g2") {
-        settings.micSource = "phone";
-      }
+      const settings = normalizeMicForRuntime(normalizeSettings(parsed.settings));
       return {
         wsUrl: normalizeSavedWsUrl(parsed.wsUrl),
         token: parsed.token || defaultRelayToken(),
@@ -43,7 +51,7 @@ function readSavedConfig(): SavedConfig {
     token: defaultRelayToken(),
     userId: "xiang",
     sessionId: makeClientSessionId(),
-    settings: DEFAULT_SETTINGS,
+    settings: normalizeMicForRuntime(DEFAULT_SETTINGS),
   };
 }
 
@@ -53,12 +61,40 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function summarizeServerStatus(message: ServerMessage): string | null {
+  if (message.type === "error") {
+    return `Server error: ${message.message}`;
+  }
+  if (message.type === "transcript_partial" || message.type === "transcript_final") {
+    return message.type === "transcript_final" ? "Server transcript finalized." : "Server transcript streaming.";
+  }
+  if (message.type !== "status") return null;
+  if (message.status === "stt_status") {
+    return `STT: ${message.message || "status updated"}`;
+  }
+  if (message.status === "audio_received") {
+    const bytes = typeof message.audioBytesReceived === "number" ? ` ${formatBytes(message.audioBytesReceived)}` : "";
+    return `Server received audio${bytes}${message.message ? `: ${message.message}` : "."}`;
+  }
+  if (message.status === "listening" && message.message?.includes("STT adapter not configured")) {
+    return "Server is listening, but STT is not configured.";
+  }
+  if (message.status === "listening") {
+    return "Server listening.";
+  }
+  if (message.status === "connected" || message.status === "ready") {
+    return message.message || "Server ready.";
+  }
+  return null;
+}
+
 export default function App() {
   const [config, setConfig] = useState<SavedConfig>(() => readSavedConfig());
   const [display, setDisplay] = useState<DisplayState>(INITIAL_DISPLAY_STATE);
   const [bridgeStatus, setBridgeStatus] = useState("Bridge not connected");
   const [wsStatus, setWsStatus] = useState("Disconnected");
   const [audioStatus, setAudioStatus] = useState("Audio idle. Tap Start to open the microphone.");
+  const [serverStatus, setServerStatus] = useState("Server idle.");
   const [localAudioBytesSent, setLocalAudioBytesSent] = useState(0);
   const bridgeRef = useRef<BridgeHandle | null>(null);
   const wsRef = useRef<SayNextWsClient | null>(null);
@@ -99,6 +135,8 @@ export default function App() {
   }, [glassesText]);
 
   const handleServerMessage = useCallback((message: ServerMessage) => {
+    const nextServerStatus = summarizeServerStatus(message);
+    if (nextServerStatus) setServerStatus(nextServerStatus);
     setDisplay((current) => reduceServerMessage(current, message));
   }, []);
 
@@ -368,6 +406,7 @@ export default function App() {
   const answerLabel = display.answerText
     ? `Pinned answer ${currentPage}/${pageCount}`
     : "Pinned answer";
+  const phoneMicAvailable = canUsePhoneMic();
 
   return (
     <main className="app-shell product-app">
@@ -436,6 +475,7 @@ export default function App() {
           {display.transcript || "No speech captured yet."}
         </p>
         <p className="audio-status">{audioStatus}</p>
+        <p className="audio-status">{serverStatus}</p>
       </section>
 
       <section className="settings-card">
@@ -455,8 +495,15 @@ export default function App() {
             {(["g2", "phone"] as const).map((source) => (
               <button
                 key={source}
+                disabled={source === "phone" && !phoneMicAvailable}
                 className={config.settings.micSource === source ? "active" : ""}
-                onClick={() => updateSettings({ micSource: source })}
+                onClick={() => {
+                  if (source === "phone" && !phoneMicAvailable) {
+                    setAudioStatus("Phone mic requires the packaged app or HTTPS. HTTP QR dev uses G2 mic.");
+                    return;
+                  }
+                  updateSettings({ micSource: source });
+                }}
               >
                 {source === "g2" ? "G2 glasses" : "Phone"}
               </button>

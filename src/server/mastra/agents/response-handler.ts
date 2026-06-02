@@ -35,9 +35,10 @@ const MAX_DISPLAYED_SUGGESTIONS = 12;
 const MIN_ECHO_WORDS = 3;
 const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
-const MANUAL_PAGE_TARGET_WORDS = 95;
-const MANUAL_PAGE_MAX_CHARS = 620;
+const MANUAL_PAGE_TARGET_WORDS = Number(process.env.MANUAL_PAGE_TARGET_WORDS || 42);
+const MANUAL_PAGE_MAX_CHARS = Number(process.env.MANUAL_PAGE_MAX_CHARS || 300);
 const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
+const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
 const MANUAL_NO_NEW_SPEECH_TEXT = "No new speech yet.";
 const MANUAL_NO_ANSWER_TEXT = "No answer yet. Single tap after speech.";
 const STRONG_ECHO_SIMILARITY = 0.82;
@@ -363,6 +364,42 @@ function makeRuntimeId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function formatManualDisplay(status: string, body: string, pageIndex?: number, totalPages?: number): string {
+  const page = totalPages && totalPages > 1 && pageIndex !== undefined
+    ? ` ${pageIndex + 1}/${totalPages}`
+    : "";
+  const normalizedBody = String(body || "")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return `SAYNEXT | ${status}${page}\n\n${normalizedBody || "Ready."}`;
+}
+
+function splitManualChunk(chunk: string): string[] {
+  const normalized = chunk.replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+  if (normalized.length <= MANUAL_PAGE_MAX_CHARS && wordCountForEcho(normalized) <= MANUAL_PAGE_TARGET_WORDS) {
+    return [normalized];
+  }
+
+  const pages: string[] = [];
+  let current = "";
+  let currentWords = 0;
+  for (const word of normalized.split(/\s+/)) {
+    const next = current ? `${current} ${word}` : word;
+    if (current && (next.length > MANUAL_PAGE_MAX_CHARS || currentWords + 1 > MANUAL_PAGE_TARGET_WORDS)) {
+      pages.push(current);
+      current = word;
+      currentWords = 1;
+    } else {
+      current = next;
+      currentWords += 1;
+    }
+  }
+  if (current) pages.push(current);
+  return pages;
+}
+
 function paginateManualAnswer(text: string): string[] {
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
   if (!cleaned) return [];
@@ -375,15 +412,15 @@ function paginateManualAnswer(text: string): string[] {
   let current = "";
   let currentWords = 0;
 
-  for (const sentence of sentences) {
-    const words = wordCountForEcho(sentence);
-    const next = current ? `${current} ${sentence}` : sentence;
+  for (const chunk of sentences.flatMap(splitManualChunk)) {
+    const words = wordCountForEcho(chunk);
+    const next = current ? `${current} ${chunk}` : chunk;
     if (
       current
       && (currentWords + words > MANUAL_PAGE_TARGET_WORDS || next.length > MANUAL_PAGE_MAX_CHARS)
     ) {
       pages.push(current.trim());
-      current = sentence;
+      current = chunk;
       currentWords = words;
     } else {
       current = next;
@@ -1296,10 +1333,11 @@ export class MergeResponseHandler {
   showManualListeningStatus(): void {
     if (this.interactionMode !== "g2_manual" || this.currentManualAnswer) return;
     this.isDisplaying = true;
-    this.currentDisplayText = MANUAL_LISTENING_TEXT;
+    const displayText = formatManualDisplay("LISTENING", MANUAL_LISTENING_TEXT);
+    this.currentDisplayText = displayText;
     this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
-    this.lastInsightText = MANUAL_LISTENING_TEXT;
-    this.session.layouts.showTextWall(MANUAL_LISTENING_TEXT);
+    this.lastInsightText = displayText;
+    this.session.layouts.showTextWall(displayText);
   }
 
   setInteractionMode(mode: InteractionMode): void {
@@ -1497,11 +1535,12 @@ export class MergeResponseHandler {
       clearTimeout(this.displayTimer);
       this.displayTimer = null;
     }
+    const displayText = formatManualDisplay("READY", text);
     this.isDisplaying = true;
-    this.currentDisplayText = text;
+    this.currentDisplayText = displayText;
     this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
-    this.lastInsightText = text;
-    this.session.layouts.showTextWall(text);
+    this.lastInsightText = displayText;
+    this.session.layouts.showTextWall(displayText);
   }
 
   private buildNewManualSourceRange(): SourceRange | null {
@@ -1547,7 +1586,7 @@ export class MergeResponseHandler {
     this.bumpManualState();
     this.onStatus?.({ type: "manual_generating", requestId, kind, sourceRange, state: this.getManualState() });
     if (!this.currentManualAnswer) {
-      this.session.layouts.showTextWall("Generating...");
+      this.session.layouts.showTextWall(formatManualDisplay("GENERATING", MANUAL_GENERATING_TEXT));
     }
 
     try {
@@ -1701,9 +1740,7 @@ export class MergeResponseHandler {
     }
     const answer = this.currentManualAnswer;
     const pageText = answer.pages[answer.pageIndex] || answer.output;
-    const displayText = answer.pages.length > 1
-      ? `${pageText}\n${answer.pageIndex + 1}/${answer.pages.length}`
-      : pageText;
+    const displayText = formatManualDisplay("ANSWER", pageText, answer.pageIndex, answer.pages.length);
     this.isDisplaying = true;
     this.currentDisplayText = displayText;
     this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
@@ -1712,7 +1749,7 @@ export class MergeResponseHandler {
     this.session.layouts.showTextWall(displayText);
     if (this.onInsight) {
       this.onInsight({
-        text: displayText,
+        text: pageText,
         timestamp: Date.now(),
         agentType: "Manual",
         reasoning: eventType,

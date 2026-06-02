@@ -22,9 +22,11 @@ import {
   advanceTeleprompt,
   cancelTeleprompt,
   displayInsightForReading,
+  pageManualAnswer,
   pauseForReading,
   resumeAutomatic,
   rewindTeleprompt,
+  runManualAction,
 } from '../api/settings.api';
 
 interface Insight {
@@ -43,6 +45,13 @@ type TelepromptUiState = {
   status: 'pending' | 'ready';
   currentIndex: number;
   total: number;
+};
+
+type ManualUiSummary = {
+  transcriptCount: number;
+  pageLabel: string;
+  pendingLabel: string;
+  hasAnswer: boolean;
 };
 
 const THINKING_WORDS = [
@@ -101,6 +110,18 @@ function dedupeInsightsById(items: Insight[]): Insight[] {
   }
 
   return output;
+}
+
+function summarizeManualState(state: any): ManualUiSummary {
+  const currentAnswer = state?.currentAnswer;
+  const pageIndex = Number(currentAnswer?.pageIndex ?? 0);
+  const totalPages = Number(currentAnswer?.totalPages ?? 0);
+  return {
+    transcriptCount: Number(state?.transcriptCount ?? 0),
+    pageLabel: currentAnswer && totalPages > 0 ? `${pageIndex + 1}/${totalPages}` : 'None',
+    pendingLabel: state?.pending?.kind ? String(state.pending.kind) : 'None',
+    hasAnswer: Boolean(currentAnswer),
+  };
 }
 
 /**
@@ -207,6 +228,14 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPausedForReading, setIsPausedForReading] = useState(false);
   const [telepromptState, setTelepromptState] = useState<TelepromptUiState | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState('Connecting');
+  const [statusDetail, setStatusDetail] = useState('Waiting for the Mentra session.');
+  const [manualSummary, setManualSummary] = useState<ManualUiSummary>({
+    transcriptCount: 0,
+    pageLabel: 'None',
+    pendingLabel: 'None',
+    hasAnswer: false,
+  });
   const [thinkingWord, setThinkingWord] = useState(() =>
     THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)]
   );
@@ -226,10 +255,18 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     setIsProcessing(false);
     setIsPausedForReading(false);
     setTelepromptState(null);
+    setRuntimeStatus('Ready');
+    setStatusDetail('Screen cleared. Listening continues if glasses are connected.');
+    setManualSummary({ transcriptCount: 0, pageLabel: 'None', pendingLabel: 'None', hasAnswer: false });
     setIsLoadingHistory(false);
     setHasConnectedBefore(false);
     renderedIdsRef.current.clear();
     sessionStorage.removeItem('merge-session-connected');
+  };
+
+  const applyManualState = (state: any) => {
+    if (!state) return;
+    setManualSummary(summarizeManualState(state));
   };
 
   // Scroll to bottom of insights
@@ -269,6 +306,8 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
 
       eventSource.onopen = () => {
         reconnectAttempts = 0;
+        setRuntimeStatus('Connected');
+        setStatusDetail('Live status stream connected.');
         setIsLoadingHistory(true);
         sessionStorage.setItem('merge-session-connected', 'true');
         setHasConnectedBefore(true);
@@ -285,6 +324,8 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             const randomWord = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)];
             setThinkingWord(randomWord);
             setIsProcessing(false);
+            setRuntimeStatus('Answer ready');
+            setStatusDetail('New display cue received.');
 
             const nextInsight = {
               id: data.id || Date.now().toString(),
@@ -298,13 +339,24 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             const randomWord = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)];
             setThinkingWord(randomWord);
             setIsProcessing(true);
+            setRuntimeStatus('Generating');
+            setStatusDetail('SayNext is generating a cue.');
           } else if (data.type === 'processing_done') {
             setIsProcessing(false);
+            const reason = String(data.reason || '');
+            if (reason === 'manual_ok') setRuntimeStatus('Answer ready');
+            else if (reason.includes('manual_transcript_committed')) setRuntimeStatus('Speech captured');
+            else if (reason.includes('manual_no_') || reason.includes('manual_clear_')) setRuntimeStatus('Listening');
+            setStatusDetail(data.reason ? `Last event: ${data.reason}` : 'Processing finished.');
           } else if (data.type === 'manual_pause') {
             setIsPausedForReading(Boolean(data.paused));
             setIsProcessing(false);
+            setRuntimeStatus(data.paused ? 'Paused' : 'Listening');
+            setStatusDetail(data.paused ? 'Pinned answer stays on display.' : 'Listening resumed.');
           } else if (data.type === 'teleprompt') {
             setIsProcessing(false);
+            setRuntimeStatus(data.status === 'ready' ? 'Teleprompt ready' : 'Preparing teleprompt');
+            setStatusDetail(data.status === 'ready' ? 'Use Next or Back to page the script.' : 'Building a longer script.');
             const currentIndex = Number(data.currentIndex ?? 0);
             const total = Number(data.total ?? 0);
             const isFinished = data.status === 'ready' && total > 0 && currentIndex >= total;
@@ -327,8 +379,12 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           } else if (data.type === 'teleprompt_cancelled') {
             setIsProcessing(false);
             setTelepromptState(null);
+            setRuntimeStatus('Listening');
+            setStatusDetail('Teleprompt cancelled.');
             setInsights((prev) => prev.filter((insight) => insight.id !== 'teleprompt-live'));
           } else if (data.type === 'connected') {
+            setRuntimeStatus('Connected');
+            setStatusDetail('Connected to the live event stream.');
             setIsLoadingHistory(true);
           } else if (data.type === 'history') {
             // Instant scroll, no animation — mark all IDs as already rendered
@@ -347,15 +403,23 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             setIsLoadingHistory(false);
           } else if (data.type === 'session_started') {
             setSessionActive(true);
+            setRuntimeStatus('Listening');
+            setStatusDetail('Glasses session started.');
           } else if (data.type === 'session_reconnecting') {
             setSessionActive(false);
             setIsProcessing(false);
+            setRuntimeStatus('Disconnected');
+            setStatusDetail('Glasses disconnected. Reconnecting...');
           } else if (data.type === 'session_reconnected') {
             setSessionActive(true);
+            setRuntimeStatus('Listening');
+            setStatusDetail('Glasses reconnected.');
           } else if (data.type === 'session_ended') {
             setSessionActive(false);
             setIsProcessing(false);
             setTelepromptState(null);
+            setRuntimeStatus('Disconnected');
+            setStatusDetail('Session ended.');
             setInsights([]);
             renderedIdsRef.current.clear();
             setHasConnectedBefore(false);
@@ -368,7 +432,38 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             if (!data.active) {
               setIsProcessing(false);
               setTelepromptState(null);
+              setRuntimeStatus('Disconnected');
+              setStatusDetail('Waiting for glasses connection.');
             }
+          } else if (data.type === 'manual_status') {
+            applyManualState(data.state);
+            setRuntimeStatus(data.reason === 'transcript_committed' ? 'Speech captured' : 'Listening');
+            setStatusDetail(data.reason ? `Manual state: ${data.reason}` : 'Manual state updated.');
+          } else if (data.type === 'manual_generating') {
+            applyManualState(data.state);
+            setIsProcessing(true);
+            setRuntimeStatus('Generating');
+            setStatusDetail(data.kind === 'regenerate' ? 'Regenerating current answer.' : 'Generating from new speech.');
+          } else if (data.type === 'manual_answer') {
+            applyManualState(data.state);
+            setIsProcessing(false);
+            setRuntimeStatus('Answer ready');
+            setStatusDetail(data.answer?.totalPages > 1 ? `Answer page ${data.answer.pageIndex + 1}/${data.answer.totalPages}.` : 'Answer is pinned on display.');
+          } else if (data.type === 'manual_page') {
+            applyManualState(data.state);
+            setRuntimeStatus('Answer page');
+            setStatusDetail(data.answer?.totalPages > 1 ? `Showing page ${data.answer.pageIndex + 1}/${data.answer.totalPages}.` : 'Only one page.');
+          } else if (data.type === 'manual_cleared') {
+            applyManualState(data.state);
+            setIsProcessing(false);
+            setRuntimeStatus('Listening');
+            setStatusDetail('Display cleared. Listening continues.');
+          } else if (data.type === 'manual_gesture_ignored') {
+            setStatusDetail('Long press ignored by SayNext; it may be reserved by the glasses system.');
+          } else if (data.type === 'manual_gesture_pending') {
+            setStatusDetail('Tap received. Waiting briefly to detect double tap.');
+          } else if (data.type === 'manual_gesture') {
+            setStatusDetail(`Gesture: ${data.gesture}`);
           }
         } catch (error) {
           console.error('[InsightsInterface] Error parsing SSE message:', error);
@@ -379,6 +474,8 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
         eventSource.close();
         setSessionActive(false);
         setIsProcessing(false);
+        setRuntimeStatus('Disconnected');
+        setStatusDetail('Live status stream disconnected.');
         const delay = Math.min(1000 * 2 ** reconnectAttempts, MAX_RECONNECT_DELAY);
         reconnectAttempts++;
         console.log(`[InsightsInterface] SSE disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
@@ -468,8 +565,68 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     }
   };
 
+  const handleManualAction = async (action: 'generate' | 'regenerate' | 'clear') => {
+    if (!userId) return;
+
+    try {
+      if (action === 'generate' || action === 'regenerate') {
+        setIsProcessing(true);
+        setRuntimeStatus(action === 'regenerate' ? 'Regenerating' : 'Generating');
+        setStatusDetail(action === 'regenerate' ? 'Requesting another answer.' : 'Generating from captured speech.');
+      } else {
+        setRuntimeStatus('Clearing');
+        setStatusDetail('Clearing pinned display.');
+      }
+      const result = await runManualAction(userId, action);
+      applyManualState(result.state);
+      if (result.status === 'ok' && result.answer) {
+        setRuntimeStatus('Answer ready');
+        setStatusDetail(result.answer.totalPages > 1 ? `Answer page ${result.answer.pageIndex + 1}/${result.answer.totalPages}.` : 'Answer is pinned on display.');
+      } else if (result.status === 'cleared') {
+        setRuntimeStatus('Listening');
+        setStatusDetail('Display cleared. Listening continues.');
+        setInsights([]);
+        renderedIdsRef.current.clear();
+      } else if (result.status === 'busy') {
+        setRuntimeStatus('Generating');
+        setStatusDetail('A generation is already running.');
+      } else {
+        setRuntimeStatus('Listening');
+        setStatusDetail(result.error || `Manual action returned ${result.status}.`);
+      }
+    } catch (error) {
+      setIsProcessing(false);
+      setRuntimeStatus('Error');
+      setStatusDetail(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleManualPage = async (direction: 'next' | 'previous') => {
+    if (!userId) return;
+
+    try {
+      const result = await pageManualAnswer(userId, direction);
+      applyManualState(result.state);
+      if (result.answer) {
+        setRuntimeStatus('Answer page');
+        setStatusDetail(result.answer.totalPages > 1 ? `Showing page ${result.answer.pageIndex + 1}/${result.answer.totalPages}.` : 'Only one page.');
+      } else {
+        setStatusDetail(result.error || `Page action returned ${result.status}.`);
+      }
+    } catch (error) {
+      setRuntimeStatus('Error');
+      setStatusDetail(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const canAdvanceTeleprompt = telepromptState?.status === 'ready';
   const canRewindTeleprompt = canAdvanceTeleprompt && (telepromptState?.currentIndex ?? 0) > 0;
+  const statusTone = sessionActive === false || runtimeStatus === 'Disconnected'
+    ? 'bg-red-500/10 text-red-500 border-red-500/20'
+    : isProcessing || runtimeStatus.includes('Generating') || runtimeStatus.includes('Regenerating') || runtimeStatus.includes('Preparing') || runtimeStatus === 'Clearing'
+      ? 'bg-amber-500/10 text-amber-500 border-amber-500/20'
+      : 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20';
+  const showManualControls = sessionActive !== false || insights.length > 0 || hasConnectedBefore;
 
   // Render Settings page if on settings
   if (currentPage === 'settings') {
@@ -578,6 +735,61 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
       >
         {/* Header */}
         <Header onSettingsClick={() => setCurrentPage('settings')} />
+
+        <section className="px-4 pb-3 relative z-20">
+          <div
+            className="rounded-[28px] border px-4 py-3 shadow-sm"
+            style={{
+              backgroundColor: 'color-mix(in srgb, var(--primary-foreground) 92%, transparent)',
+              borderColor: 'var(--border)',
+            }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[12px] font-semibold ${statusTone}`}>
+                    {runtimeStatus}
+                  </span>
+                  {isPausedForReading && (
+                    <span className="rounded-full border border-[var(--border)] px-2.5 py-1 text-[12px] font-semibold text-muted-foreground">
+                      Paused
+                    </span>
+                  )}
+                </div>
+                <p className="mt-2 text-[14px] leading-snug text-muted-foreground">
+                  {statusDetail}
+                </p>
+              </div>
+              <div className="text-right text-[12px] text-muted-foreground shrink-0">
+                <div>{sessionActive === false ? 'Offline' : 'Session'}</div>
+                <div className="font-semibold" style={{ color: 'var(--secondary-foreground)' }}>
+                  {sessionActive === false ? 'Waiting' : 'Active'}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <div className="rounded-[18px] px-3 py-2" style={{ backgroundColor: 'var(--background)' }}>
+                <div className="text-[11px] text-muted-foreground">Speech</div>
+                <div className="text-[16px] font-bold" style={{ color: 'var(--secondary-foreground)' }}>
+                  {manualSummary.transcriptCount}
+                </div>
+              </div>
+              <div className="rounded-[18px] px-3 py-2" style={{ backgroundColor: 'var(--background)' }}>
+                <div className="text-[11px] text-muted-foreground">Answer</div>
+                <div className="text-[16px] font-bold" style={{ color: 'var(--secondary-foreground)' }}>
+                  {manualSummary.pageLabel}
+                </div>
+              </div>
+              <div className="rounded-[18px] px-3 py-2" style={{ backgroundColor: 'var(--background)' }}>
+                <div className="text-[11px] text-muted-foreground">Pending</div>
+                <div className="text-[16px] font-bold truncate" style={{ color: 'var(--secondary-foreground)' }}>
+                  {manualSummary.pendingLabel}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
 
         {/* Main Content Area */}
         <div
@@ -752,7 +964,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
         </div>
 
         {/* Manual Controls */}
-        {insights.length > 0 && (
+        {showManualControls && (
           <div className="fixed left-0 right-0 bottom-0 z-[240] px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2 backdrop-blur-[8px]"
             style={{ backgroundColor: 'color-mix(in srgb, var(--background) 88%, transparent)' }}
           >
@@ -806,10 +1018,10 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                 </button>
               </div>
             ) : (
-              <div className="flex items-stretch">
+              <div className="grid grid-cols-3 gap-2">
                 <button
                   onClick={handlePauseToggle}
-                  className="w-full min-h-[132px] px-6 rounded-[24px] text-[30px] font-bold shadow-sm transition active:scale-[0.99]"
+                  className="min-h-[64px] px-2 rounded-[20px] text-[18px] font-bold shadow-sm transition active:scale-[0.99]"
                   style={{
                     backgroundColor: isPausedForReading ? 'var(--secondary-foreground)' : 'var(--primary-foreground)',
                     color: isPausedForReading ? 'var(--primary-foreground)' : 'var(--secondary-foreground)',
@@ -818,6 +1030,65 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                 >
                   {isPausedForReading ? 'Continue' : 'Pause'}
                 </button>
+                <button
+                  onClick={() => handleManualAction('generate')}
+                  className="col-span-2 min-h-[64px] px-4 rounded-[20px] text-[22px] font-bold shadow-sm transition active:scale-[0.99]"
+                  style={{
+                    backgroundColor: 'var(--secondary-foreground)',
+                    color: 'var(--primary-foreground)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  Generate
+                </button>
+                <button
+                  onClick={() => handleManualPage('previous')}
+                  disabled={!manualSummary.hasAnswer}
+                  className="min-h-[54px] px-2 rounded-[18px] text-[17px] font-bold shadow-sm transition active:scale-[0.99] disabled:opacity-45"
+                  style={{
+                    backgroundColor: 'var(--primary-foreground)',
+                    color: 'var(--secondary-foreground)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  Back
+                </button>
+                <button
+                  onClick={() => handleManualPage('next')}
+                  disabled={!manualSummary.hasAnswer}
+                  className="min-h-[54px] px-2 rounded-[18px] text-[17px] font-bold shadow-sm transition active:scale-[0.99] disabled:opacity-45"
+                  style={{
+                    backgroundColor: 'var(--primary-foreground)',
+                    color: 'var(--secondary-foreground)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  Next
+                </button>
+                <button
+                  onClick={() => handleManualAction(manualSummary.hasAnswer ? 'regenerate' : 'clear')}
+                  className="min-h-[54px] px-2 rounded-[18px] text-[17px] font-bold shadow-sm transition active:scale-[0.99]"
+                  style={{
+                    backgroundColor: 'var(--primary-foreground)',
+                    color: 'var(--secondary-foreground)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  {manualSummary.hasAnswer ? 'Retry' : 'Clear'}
+                </button>
+                {manualSummary.hasAnswer && (
+                  <button
+                    onClick={() => handleManualAction('clear')}
+                    className="col-span-3 min-h-[46px] px-4 rounded-[16px] text-[16px] font-bold shadow-sm transition active:scale-[0.99]"
+                    style={{
+                      backgroundColor: 'var(--primary-foreground)',
+                      color: '#b91c1c',
+                      border: '1px solid var(--border)',
+                    }}
+                  >
+                    Clear display
+                  </button>
+                )}
               </div>
             )}
           </div>

@@ -338,8 +338,7 @@ export class User {
 
     if (gesture.includes("hold") || gesture.includes("long")) {
       this.cancelPendingSingleTap();
-      const result = this.clearManualAnswer(eventId);
-      this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_clear_${result.status}` });
+      this.broadcastInsightEvent({ type: 'manual_gesture_ignored', gesture, reason: 'long_press_reserved' });
       return;
     }
 

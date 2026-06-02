@@ -8,6 +8,31 @@ type AudioContextLike = AudioContext & {
 
 const TARGET_SAMPLE_RATE = 16000;
 
+function describeCurrentOrigin(): string {
+  if (typeof window === "undefined") return "unknown origin";
+  return window.location.origin || window.location.href || "unknown origin";
+}
+
+function micOpenError(error: unknown): Error {
+  if (!(error instanceof DOMException)) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+
+  if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+    return new Error("Phone microphone permission was denied. Enable microphone permission for Even Realities, then restart this SayNext session.");
+  }
+
+  if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
+    return new Error("No phone microphone was found by this WebView.");
+  }
+
+  if (error.name === "NotReadableError" || error.name === "TrackStartError") {
+    return new Error("Phone microphone is busy or unavailable. Close other recording apps, then tap Pause and Start again.");
+  }
+
+  return new Error(`Phone microphone failed: ${error.name}${error.message ? ` - ${error.message}` : ""}`);
+}
+
 function resampleTo16k(input: Float32Array, inputSampleRate: number): Float32Array {
   if (inputSampleRate === TARGET_SAMPLE_RATE) return new Float32Array(input);
   const ratio = inputSampleRate / TARGET_SAMPLE_RATE;
@@ -39,19 +64,28 @@ export async function startPhoneMic(params: {
   onPcm: (pcm: Uint8Array) => void;
   onStatus?: (message: string) => void;
 }): Promise<PhoneMicHandle> {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error("Phone microphone is not available in this WebView.");
+  if (typeof window !== "undefined" && !window.isSecureContext) {
+    throw new Error(`Phone microphone requires a secure WebView. Current origin is ${describeCurrentOrigin()}; install the packaged EvenHub app or use HTTPS instead of HTTP QR dev.`);
   }
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-    video: false,
-  });
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(`Phone microphone is not available in this WebView. Current origin is ${describeCurrentOrigin()}; install the packaged EvenHub app or use HTTPS.`);
+  }
+
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+  } catch (error) {
+    throw micOpenError(error);
+  }
 
   const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!AudioContextCtor) {

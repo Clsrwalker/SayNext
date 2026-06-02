@@ -145,7 +145,7 @@ test("g2 single tap delays manual generation through gesture arbitration", async
   user.addSSEClient((data) => events.push(JSON.parse(data)));
 
   await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
-  expect(session.displays.at(-1)?.text).toBe("Listening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | LISTENING\n\nListening. Tap R1 after speech.");
   session.touchHandler?.({ gesture: "single_tap" });
 
   expect(events.some((event) => event.type === "manual_gesture_pending")).toBe(true);
@@ -171,6 +171,21 @@ test("g2 double tap cancels pending single tap generation", async () => {
   expect(events.some((event) => event.type === "manual_gesture_cancelled")).toBe(true);
   expect(events.some((event) => event.reason === "manual_no_current_answer")).toBe(true);
   expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(false);
+  user.cleanup();
+});
+
+test("g2 long press is ignored by SayNext because the system may reserve it", async () => {
+  const session = new MockUserSession();
+  const user = new User("manual-long-gesture-user");
+  const events: any[] = [];
+  user.addSSEClient((data) => events.push(JSON.parse(data)));
+
+  await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  session.touchHandler?.({ gesture: "long_press" });
+  await sleep(20);
+
+  expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "long_press_reserved")).toBe(true);
+  expect(session.clearCount).toBe(0);
   user.cleanup();
 });
 

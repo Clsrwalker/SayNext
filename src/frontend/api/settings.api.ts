@@ -101,6 +101,45 @@ export const displayInsightForReading = async (userId: string, displayText: stri
   return response.json();
 };
 
+type ManualAction = 'generate' | 'regenerate' | 'clear';
+
+export const runManualAction = async (userId: string, action: ManualAction): Promise<any> => {
+  const apiUrl = getApiUrl();
+  const response = await fetch(`${apiUrl}/api/manual/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId,
+      clientEventId: `web-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    }),
+  });
+
+  if (!response.ok && response.status !== 409 && response.status !== 404) {
+    throw new Error(`Failed to run manual action: ${action}`);
+  }
+
+  return response.json();
+};
+
+export const pageManualAnswer = async (userId: string, direction: 'next' | 'previous'): Promise<any> => {
+  const apiUrl = getApiUrl();
+  const response = await fetch(`${apiUrl}/api/manual/page`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId,
+      direction,
+      clientEventId: `web-page-${direction}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    }),
+  });
+
+  if (!response.ok && response.status !== 409 && response.status !== 404) {
+    throw new Error(`Failed to page manual answer: ${direction}`);
+  }
+
+  return response.json();
+};
+
 export const resetCurrentSession = async (userId: string): Promise<{ ok: boolean; active: boolean }> => {
   const apiUrl = getApiUrl();
   const response = await fetch(`${apiUrl}/api/session/reset`, {
