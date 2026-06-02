@@ -1,9 +1,13 @@
 import type { Context } from "hono";
 import { Action, type Conversation } from "../mastra/types";
 import { processConversation, type OutputLanguage } from "../mastra/agents/initial-agent";
+import { OpenAiConversationSession } from "../mastra/agents/openai-conversation-state";
 import { conversationLogger } from "../data/conversation-logger";
+import { EventMemoryManager } from "../memory/event-memory";
 import { buildContextSignals } from "../saynext/context-signals";
 import { getImmediateDecision } from "../saynext/immediate-rules";
+
+const replayConversationSessions = new Map<string, OpenAiConversationSession>();
 
 function isReplayApiEnabled(): boolean {
   return process.env.SAYNEXT_REPLAY_API_ENABLED === "true";
@@ -41,6 +45,9 @@ export const replaySayNextApi = async (c: Context) => {
     const outputLanguage = asOutputLanguage(body.outputLanguage);
     const frequency = body.frequency === "low" || body.frequency === "medium" ? body.frequency : "high";
     const timestamp = Number(body.timestamp || Date.now());
+    const sessionId = String(body.sessionId || `debug-replay-${timestamp}`);
+    const useOpenAiConversationState = body.useOpenAiConversationState === true
+      || body.useOpenAiConversationState === "true";
 
     if (!transcript) {
       return c.json({ error: "transcript is required" }, 400);
@@ -52,6 +59,13 @@ export const replaySayNextApi = async (c: Context) => {
       text,
       timestamp: timestamp - (transcripts.length - index) * 1000,
     }));
+    const replayEventMemory = new EventMemoryManager(userId, sessionId, false);
+    let eventSnapshot = replayEventMemory.getSnapshot();
+    for (const item of conversation) {
+      if (item.type === "transcript") {
+        eventSnapshot = replayEventMemory.addTranscript(item.text, item.timestamp);
+      }
+    }
 
     const relevantPersonalMemoryContext =
       typeof body.relevantPersonalMemoryContext === "string"
@@ -63,15 +77,31 @@ export const replaySayNextApi = async (c: Context) => {
       hasPriorTranscript: previousTranscriptTexts.length > 0,
     });
     const signals = buildContextSignals({ latestTranscript: transcript, previousTranscriptTexts });
+    const openAiConversationSession = useOpenAiConversationState
+      ? (() => {
+        const key = `${userId}:${sessionId}`;
+        const existing = replayConversationSessions.get(key);
+        if (existing) return existing;
+        const created = new OpenAiConversationSession({ userId, sessionId });
+        replayConversationSessions.set(key, created);
+        return created;
+      })()
+      : undefined;
 
     const response = await processConversation(
       conversation,
       frequency,
-      undefined,
+      eventSnapshot,
       outputLanguage,
       String(body.activePrenoteContext || ""),
       String(body.activeSceneProfilePrompt || ""),
       relevantPersonalMemoryContext,
+      openAiConversationSession
+        ? {
+          openAiConversationSession,
+          transcriptCommitReason: "final",
+        }
+        : {},
     );
 
     const processTrace = response.type === Action.INSIGHT
@@ -82,6 +112,9 @@ export const replaySayNextApi = async (c: Context) => {
       userId,
       transcript,
       previousTranscriptTexts,
+      sessionId,
+      useOpenAiConversationState,
+      openAiConversationId: openAiConversationSession?.id || undefined,
       response: {
         type: response.type,
         reasoning: response.reasoning,

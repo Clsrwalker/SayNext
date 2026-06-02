@@ -69,6 +69,11 @@ function argValue(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+function asBool(value: string | undefined, fallback = false): boolean {
+  if (value === undefined) return fallback;
+  return /^(1|true|yes|on)$/i.test(value);
+}
+
 function compact(value: string): string {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
@@ -178,6 +183,7 @@ async function callCurrentApi(params: {
   apiUrl: string;
   row: SampleRow;
   previousTranscriptTexts: string[];
+  useOpenAiConversationState: boolean;
 }): Promise<CurrentApiResult> {
   try {
     const response = await fetch(params.apiUrl, {
@@ -185,11 +191,13 @@ async function callCurrentApi(params: {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         userId: params.row.userId,
+        sessionId: params.row.sessionId,
         transcript: params.row.transcript,
         previousTranscriptTexts: params.previousTranscriptTexts,
         outputLanguage: "english",
         frequency: "high",
         timestamp: new Date(params.row.timestamp).getTime(),
+        useOpenAiConversationState: params.useOpenAiConversationState,
         // Keep this replay focused on transcript/context behavior, not personal memory retrieval.
         relevantPersonalMemoryContext: "",
       }),
@@ -472,6 +480,7 @@ async function main(): Promise<void> {
   const dbPath = argValue("--db") || "data/saynext.sqlite";
   const apiUrl = argValue("--api") || "http://localhost:3107/api/debug/saynext-replay";
   const model = argValue("--model") || process.env.OPENAI_MODEL || "gpt-5.4-nano";
+  const useOpenAiConversationState = asBool(argValue("--conversation-state"), false);
   const randomCount = Number(argValue("--random") || "0");
   const scanLimit = Number(argValue("--scan-limit") || "500");
   const seed = argValue("--seed") || "gpt-first-random";
@@ -501,7 +510,7 @@ async function main(): Promise<void> {
   for (const [index, row] of rows.entries()) {
     const previousTranscriptTexts = getPreviousTranscriptTexts(db, row, 4);
     const [current, gptFirst, xiangVoice] = await Promise.all([
-      callCurrentApi({ apiUrl, row, previousTranscriptTexts }),
+      callCurrentApi({ apiUrl, row, previousTranscriptTexts, useOpenAiConversationState }),
       callGptFirst(agent, row, previousTranscriptTexts),
       callXiangVoice(agent, row, previousTranscriptTexts),
     ]);
@@ -536,6 +545,7 @@ async function main(): Promise<void> {
     `Generated: ${new Date().toISOString()}`,
     `Database: ${dbPath}`,
     `Current API: ${apiUrl}`,
+    `Current API conversation state: ${useOpenAiConversationState ? "enabled" : "disabled"}`,
     `GPT-first model: ${model}`,
     randomCount > 0 ? `Selection: random count=${randomCount} scanLimit=${scanLimit} seed=${seed}${userId ? ` user=${userId}` : ""}` : `Selection: ids=${rows.map((row) => row.id).join(",")}`,
     `Rows: ${results.length}`,
