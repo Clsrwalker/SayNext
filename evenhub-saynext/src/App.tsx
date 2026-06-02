@@ -144,6 +144,11 @@ export default function App() {
       settings: activeConfig.settings,
       onMessage: handleServerMessage,
       onStatus: setWsStatus,
+      onOpen: () => {
+        if (displayRef.current.recording) {
+          wsRef.current?.sendControl("start_listening");
+        }
+      },
     });
     wsRef.current = client;
     client.connect();

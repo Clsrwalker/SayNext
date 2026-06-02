@@ -44,7 +44,7 @@ export function reduceServerMessage(state: DisplayState, message: ServerMessage)
     return {
       ...state,
       status: message.message || message.status,
-      recording: message.status === "listening" ? true : message.status === "ready" || message.status === "cleared" ? false : state.recording,
+      recording: message.status === "listening" ? true : message.status === "cleared" ? false : state.recording,
       audioBytesReceived: message.audioBytesReceived ?? state.audioBytesReceived,
       error: "",
     };
@@ -88,13 +88,17 @@ export function reduceServerMessage(state: DisplayState, message: ServerMessage)
 export function formatGlassesText(state: DisplayState, settings: SayNextSettings): string {
   const scene = settings.sceneMode.toUpperCase();
   const page = state.totalPages > 1 ? ` ${state.pageIndex + 1}/${state.totalPages}` : "";
-  const status = state.answerText && !state.recording
+  const normalizedStatus = state.status.toLowerCase().replace(/\s+/g, "_");
+  const attentionStatus = ["generating", "regenerating", "busy", "no_new_speech", "no_current_answer", "error"].includes(normalizedStatus)
+    ? normalizedStatus.replace(/_/g, " ").toUpperCase()
+    : "";
+  const status = attentionStatus || (state.answerText && !state.recording
     ? "ANSWER"
     : state.recording && state.answerText
       ? "ANSWER+LISTEN"
       : state.recording
         ? "LISTENING"
-        : state.status.toUpperCase();
+        : state.status.toUpperCase());
   const header = `${scene} | ${status}${page}`;
 
   if (state.error && !state.answerText) {
@@ -110,7 +114,12 @@ export function formatGlassesText(state: DisplayState, settings: SayNextSettings
   }
 
   if (state.answerText) {
-    return `${header}\n\n${trimBody(state.answerText)}\n\nTap/R1: next answer  Double: retry  Scroll: page`;
+    const notice = attentionStatus === "NO NEW SPEECH"
+      ? "\n\nNo new speech committed yet."
+      : attentionStatus === "BUSY"
+        ? "\n\nStill generating. Wait a moment."
+        : "";
+    return `${header}\n\n${trimBody(state.answerText)}${notice}\n\nTap/R1: next answer  Double: retry  Scroll: page`;
   }
 
   if (state.transcript) {

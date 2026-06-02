@@ -8,11 +8,15 @@ type WsClientOptions = {
   settings: SayNextSettings;
   onMessage: (message: ServerMessage) => void;
   onStatus: (status: string) => void;
+  onOpen?: () => void;
 };
 
 export class SayNextWsClient {
   private ws: WebSocket | null = null;
   private readonly options: WsClientOptions;
+  private manualClose = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
 
   constructor(options: WsClientOptions) {
     this.options = options;
@@ -24,6 +28,8 @@ export class SayNextWsClient {
 
   connect(): void {
     this.close();
+    this.manualClose = false;
+    this.clearReconnectTimer();
     const url = new URL(this.options.url);
     if (this.options.token.trim()) url.searchParams.set("token", this.options.token.trim());
     if (this.options.userId.trim()) url.searchParams.set("userId", this.options.userId.trim());
@@ -34,6 +40,7 @@ export class SayNextWsClient {
     this.ws.binaryType = "arraybuffer";
 
     this.ws.onopen = () => {
+      this.reconnectAttempt = 0;
       this.options.onStatus("Connected");
       this.send({
         type: "hello",
@@ -46,6 +53,7 @@ export class SayNextWsClient {
           version: APP_VERSION,
         },
       });
+      this.options.onOpen?.();
     };
 
     this.ws.onmessage = (event) => {
@@ -58,10 +66,15 @@ export class SayNextWsClient {
     };
 
     this.ws.onerror = () => this.options.onStatus("WebSocket error");
-    this.ws.onclose = () => this.options.onStatus("Disconnected");
+    this.ws.onclose = () => {
+      this.options.onStatus("Disconnected");
+      if (!this.manualClose) this.scheduleReconnect();
+    };
   }
 
   close(): void {
+    this.manualClose = true;
+    this.clearReconnectTimer();
     if (!this.ws) return;
     this.ws.close();
     this.ws = null;
@@ -103,5 +116,22 @@ export class SayNextWsClient {
       autoGenerate,
       clientEventId: `debug-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     });
+  }
+
+  private scheduleReconnect(): void {
+    this.clearReconnectTimer();
+    const delayMs = Math.min(8000, 750 * 2 ** this.reconnectAttempt);
+    this.reconnectAttempt += 1;
+    this.options.onStatus(`Reconnecting in ${Math.round(delayMs / 1000)}s...`);
+    this.reconnectTimer = setTimeout(() => {
+      this.ws = null;
+      this.connect();
+    }, delayMs);
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 }
