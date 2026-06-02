@@ -149,10 +149,11 @@ export class User {
     // Set up transcription listener — responseHandler is guaranteed to exist
     this.setupTranscriptionListener(session);
 
-    session.layouts.showTextWall(
-      interactionMode === "g2_manual" ? "SayNext manual mode. Listening." : "SayNext is listening.",
-      { durationMs: 2000 },
-    );
+    if (interactionMode === "g2_manual") {
+      this.responseHandler.showManualListeningStatus();
+    } else {
+      session.layouts.showTextWall("SayNext is listening.", { durationMs: 2000 });
+    }
 
     // Broadcast session started
     this.broadcastInsightEvent({ type: 'session_started' });
@@ -302,24 +303,30 @@ export class User {
   /** Wire G2/R1 touch gestures to manual-first controls when available. */
   private setupManualGestureListener(session: AppSession): void {
     const events = session.events as any;
-    if (typeof events.onTouchEvent !== "function") return;
+    if (typeof events.onTouchEvent === "function") {
+      const unsubscribe = events.onTouchEvent((event: any) => {
+        const gesture = this.normalizeManualGesture(event, "touch");
+        this.logManualGesturePayload("touch", gesture, event);
+        if (!gesture) return;
+        void this.handleManualGesture(gesture);
+      });
 
-    const unsubscribe = events.onTouchEvent((event: any) => {
-      const gesture = String(
-        event?.gesture
-        || event?.type
-        || event?.touchType
-        || event?.action
-        || event?.eventType
-        || "",
-      ).toLowerCase();
+      if (typeof unsubscribe === "function") {
+        this.eventUnsubscribers.push(unsubscribe);
+      }
+    }
 
-      if (!gesture) return;
-      void this.handleManualGesture(gesture);
-    });
+    if (typeof events.onButtonPress === "function") {
+      const unsubscribe = events.onButtonPress((event: any) => {
+        const gesture = this.normalizeManualGesture(event, "button");
+        this.logManualGesturePayload("button", gesture, event);
+        if (!gesture) return;
+        void this.handleManualGesture(gesture);
+      });
 
-    if (typeof unsubscribe === "function") {
-      this.eventUnsubscribers.push(unsubscribe);
+      if (typeof unsubscribe === "function") {
+        this.eventUnsubscribers.push(unsubscribe);
+      }
     }
   }
 
@@ -345,6 +352,14 @@ export class User {
     }
 
     if (gesture.includes("single") || gesture.includes("tap")) {
+      if (this.pendingSingleTapTimer) {
+        this.cancelPendingSingleTap();
+        this.broadcastInsightEvent({ type: 'processing' });
+        const result = await this.regenerateManualAnswer(eventId);
+        this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_${result.status}` });
+        return;
+      }
+
       this.cancelPendingSingleTap();
       this.pendingSingleTapTimer = setTimeout(() => {
         this.pendingSingleTapTimer = null;
@@ -369,6 +384,39 @@ export class User {
       return;
     }
 
+  }
+
+  private normalizeManualGesture(event: any, source: "touch" | "button"): string {
+    if (source === "button") {
+      const pressType = String(event?.pressType || event?.press_type || "").toLowerCase();
+      if (pressType.includes("long")) return "hold";
+      if (pressType.includes("short")) return "single_tap";
+    }
+
+    return String(
+      event?.gesture_name
+      || event?.gestureName
+      || event?.gesture
+      || event?.touchType
+      || event?.action
+      || event?.eventType
+      || "",
+    ).toLowerCase();
+  }
+
+  private logManualGesturePayload(source: "touch" | "button", gesture: string, event: any): void {
+    const payload = {
+      source,
+      gesture,
+      rawType: event?.type,
+      gesture_name: event?.gesture_name,
+      gestureName: event?.gestureName,
+      pressType: event?.pressType,
+      buttonId: event?.buttonId,
+      device_model: event?.device_model,
+    };
+    console.log(`[SayNext] Manual gesture payload: ${JSON.stringify(payload)}`);
+    this.broadcastInsightEvent({ type: 'manual_gesture_payload', ...payload });
   }
 
   private cancelPendingSingleTap(): void {

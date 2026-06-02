@@ -36,6 +36,9 @@ const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
 const MANUAL_PAGE_TARGET_WORDS = 95;
 const MANUAL_PAGE_MAX_CHARS = 620;
+const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
+const MANUAL_NO_NEW_SPEECH_TEXT = "No new speech yet.";
+const MANUAL_NO_ANSWER_TEXT = "No answer yet. Single tap after speech.";
 const STRONG_ECHO_SIMILARITY = 0.82;
 const MEDIUM_ECHO_SIMILARITY = 0.68;
 const STRONG_ECHO_TRANSCRIPT_COVERAGE = 0.75;
@@ -1281,6 +1284,15 @@ export class MergeResponseHandler {
     return this.interactionMode;
   }
 
+  showManualListeningStatus(): void {
+    if (this.interactionMode !== "g2_manual" || this.currentManualAnswer) return;
+    this.isDisplaying = true;
+    this.currentDisplayText = MANUAL_LISTENING_TEXT;
+    this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
+    this.lastInsightText = MANUAL_LISTENING_TEXT;
+    this.session.layouts.showTextWall(MANUAL_LISTENING_TEXT);
+  }
+
   setInteractionMode(mode: InteractionMode): void {
     if (this.interactionMode === mode) return;
     this.interactionMode = mode;
@@ -1298,7 +1310,7 @@ export class MergeResponseHandler {
       this.isDisplaying = false;
       this.currentDisplayText = null;
       this.currentDisplayExpiresAt = 0;
-      this.session.layouts.showTextWall("SayNext manual mode. Listening.", { durationMs: 2000 });
+      this.showManualListeningStatus();
     } else {
       this.pendingManualRequest = null;
       this.currentManualAnswer = null;
@@ -1356,6 +1368,7 @@ export class MergeResponseHandler {
 
     const sourceRange = this.buildNewManualSourceRange();
     if (!sourceRange) {
+      this.showManualStatusIfNoAnswer(MANUAL_NO_NEW_SPEECH_TEXT);
       return this.cacheManualAction(clientEventId, {
         status: "no_new_speech",
         sessionId: this.sessionId,
@@ -1379,6 +1392,7 @@ export class MergeResponseHandler {
     }
 
     if (!this.currentManualAnswer) {
+      this.showManualStatusIfNoAnswer(MANUAL_NO_ANSWER_TEXT);
       return this.cacheManualAction(clientEventId, {
         status: "no_current_answer",
         sessionId: this.sessionId,
@@ -1394,6 +1408,7 @@ export class MergeResponseHandler {
     if (cached) return cached;
 
     if (!this.currentManualAnswer) {
+      this.showManualStatusIfNoAnswer(MANUAL_NO_ANSWER_TEXT);
       return this.cacheManualAction(clientEventId, {
         status: "no_current_answer",
         sessionId: this.sessionId,
@@ -1459,6 +1474,19 @@ export class MergeResponseHandler {
 
   isTelepromptActive(): boolean {
     return this.teleprompt.isActive();
+  }
+
+  private showManualStatusIfNoAnswer(text: string): void {
+    if (this.currentManualAnswer) return;
+    if (this.displayTimer) {
+      clearTimeout(this.displayTimer);
+      this.displayTimer = null;
+    }
+    this.isDisplaying = true;
+    this.currentDisplayText = text;
+    this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
+    this.lastInsightText = text;
+    this.session.layouts.showTextWall(text);
   }
 
   private buildNewManualSourceRange(): SourceRange | null {
@@ -1795,10 +1823,11 @@ export class MergeResponseHandler {
     this.cancelReadbackContinuation("runtime_reset");
 
     this.onStatus?.({ type: "processing_done", reason: "manual_reset" });
-    this.session.layouts.showTextWall(
-      this.interactionMode === "g2_manual" ? "SayNext manual mode. Listening." : "SayNext is listening.",
-      { durationMs: 1500 },
-    );
+    if (this.interactionMode === "g2_manual") {
+      this.showManualListeningStatus();
+    } else {
+      this.session.layouts.showTextWall("SayNext is listening.", { durationMs: 1500 });
+    }
     this.session.logger.info("Current SayNext runtime state reset");
   }
 

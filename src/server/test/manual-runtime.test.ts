@@ -31,6 +31,7 @@ class MockSession {
 
 class MockUserSession extends MockSession {
   touchHandler: ((event: unknown) => void) | null = null;
+  buttonHandler: ((event: unknown) => void) | null = null;
 
   simpleStorage = {
     get: async (key: string) => key === "interaction_mode" ? "g2_manual" : undefined,
@@ -46,6 +47,12 @@ class MockUserSession extends MockSession {
       this.touchHandler = handler;
       return () => {
         this.touchHandler = null;
+      };
+    },
+    onButtonPress: (handler: (event: unknown) => void) => {
+      this.buttonHandler = handler;
+      return () => {
+        this.buttonHandler = null;
       };
     },
   };
@@ -138,6 +145,7 @@ test("g2 single tap delays manual generation through gesture arbitration", async
   user.addSSEClient((data) => events.push(JSON.parse(data)));
 
   await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  expect(session.displays.at(-1)?.text).toBe("Listening. Tap R1 after speech.");
   session.touchHandler?.({ gesture: "single_tap" });
 
   expect(events.some((event) => event.type === "manual_gesture_pending")).toBe(true);
@@ -161,6 +169,23 @@ test("g2 double tap cancels pending single tap generation", async () => {
   await sleep(330);
 
   expect(events.some((event) => event.type === "manual_gesture_cancelled")).toBe(true);
+  expect(events.some((event) => event.reason === "manual_no_current_answer")).toBe(true);
+  expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(false);
+  user.cleanup();
+});
+
+test("g2 two short button presses are treated as double tap", async () => {
+  const session = new MockUserSession();
+  const user = new User("manual-button-user");
+  const events: any[] = [];
+  user.addSSEClient((data) => events.push(JSON.parse(data)));
+
+  await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  session.buttonHandler?.({ type: "button_press", buttonId: "r1", pressType: "short" });
+  session.buttonHandler?.({ type: "button_press", buttonId: "r1", pressType: "short" });
+  await sleep(330);
+
+  expect(events.some((event) => event.type === "manual_gesture_payload" && event.source === "button")).toBe(true);
   expect(events.some((event) => event.reason === "manual_no_current_answer")).toBe(true);
   expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(false);
   user.cleanup();
