@@ -35,8 +35,6 @@ const MAX_DISPLAYED_SUGGESTIONS = 12;
 const MIN_ECHO_WORDS = 3;
 const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
-const MANUAL_PAGE_TARGET_WORDS = Number(process.env.MANUAL_PAGE_TARGET_WORDS || 42);
-const MANUAL_PAGE_MAX_CHARS = Number(process.env.MANUAL_PAGE_MAX_CHARS || 300);
 const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
 const MANUAL_NO_NEW_SPEECH_TEXT = "No new speech yet.";
@@ -375,61 +373,9 @@ function formatManualDisplay(status: string, body: string, pageIndex?: number, t
   return `SAYNEXT | ${status}${page}\n\n${normalizedBody || "Ready."}`;
 }
 
-function splitManualChunk(chunk: string): string[] {
-  const normalized = chunk.replace(/\s+/g, " ").trim();
-  if (!normalized) return [];
-  if (normalized.length <= MANUAL_PAGE_MAX_CHARS && wordCountForEcho(normalized) <= MANUAL_PAGE_TARGET_WORDS) {
-    return [normalized];
-  }
-
-  const pages: string[] = [];
-  let current = "";
-  let currentWords = 0;
-  for (const word of normalized.split(/\s+/)) {
-    const next = current ? `${current} ${word}` : word;
-    if (current && (next.length > MANUAL_PAGE_MAX_CHARS || currentWords + 1 > MANUAL_PAGE_TARGET_WORDS)) {
-      pages.push(current);
-      current = word;
-      currentWords = 1;
-    } else {
-      current = next;
-      currentWords += 1;
-    }
-  }
-  if (current) pages.push(current);
-  return pages;
-}
-
 function paginateManualAnswer(text: string): string[] {
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
-  if (!cleaned) return [];
-
-  const sentences = cleaned.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g)
-    ?.map((item) => item.trim())
-    .filter(Boolean) ?? [cleaned];
-
-  const pages: string[] = [];
-  let current = "";
-  let currentWords = 0;
-
-  for (const chunk of sentences.flatMap(splitManualChunk)) {
-    const words = wordCountForEcho(chunk);
-    const next = current ? `${current} ${chunk}` : chunk;
-    if (
-      current
-      && (currentWords + words > MANUAL_PAGE_TARGET_WORDS || next.length > MANUAL_PAGE_MAX_CHARS)
-    ) {
-      pages.push(current.trim());
-      current = chunk;
-      currentWords = words;
-    } else {
-      current = next;
-      currentWords += words;
-    }
-  }
-
-  if (current.trim()) pages.push(current.trim());
-  return pages.length ? pages : [cleaned];
+  return cleaned ? [cleaned] : [];
 }
 
 function isLikelyQuestionSuggestionPartialEcho(transcript: string, candidate: string, transcriptCoverage: number, candidateCoverage: number): boolean {

@@ -372,14 +372,12 @@ export class User {
     }
 
     if (gesture.includes("down") || gesture.includes("next")) {
-      const result = this.pageManualAnswer("next", eventId);
-      this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_page_${result.status}` });
+      this.broadcastInsightEvent({ type: 'manual_gesture_ignored', gesture, reason: 'manual_answer_is_single_scroll_box' });
       return;
     }
 
     if (gesture.includes("up") || gesture.includes("previous") || gesture.includes("prev")) {
-      const result = this.pageManualAnswer("previous", eventId);
-      this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_page_${result.status}` });
+      this.broadcastInsightEvent({ type: 'manual_gesture_ignored', gesture, reason: 'manual_answer_is_single_scroll_box' });
       return;
     }
 

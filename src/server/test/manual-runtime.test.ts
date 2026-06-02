@@ -189,6 +189,22 @@ test("g2 long press is ignored by SayNext because the system may reserve it", as
   user.cleanup();
 });
 
+test("g2 scroll gestures do not page or refresh the pinned manual answer", async () => {
+  const session = new MockUserSession();
+  const user = new User("manual-scroll-gesture-user");
+  const events: any[] = [];
+  user.addSSEClient((data) => events.push(JSON.parse(data)));
+
+  await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  session.touchHandler?.({ gesture: "swipe_down" });
+  session.touchHandler?.({ gesture: "swipe_up" });
+  await sleep(20);
+
+  expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "manual_answer_is_single_scroll_box")).toBe(true);
+  expect(events.some((event) => String(event.reason || "").startsWith("manual_page_"))).toBe(false);
+  user.cleanup();
+});
+
 test("g2 two short button presses are treated as double tap", async () => {
   const session = new MockUserSession();
   const user = new User("manual-button-user");

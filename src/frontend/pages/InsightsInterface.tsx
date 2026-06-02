@@ -22,7 +22,6 @@ import {
   advanceTeleprompt,
   cancelTeleprompt,
   displayInsightForReading,
-  pageManualAnswer,
   pauseForReading,
   resumeAutomatic,
   rewindTeleprompt,
@@ -49,7 +48,7 @@ type TelepromptUiState = {
 
 type ManualUiSummary = {
   transcriptCount: number;
-  pageLabel: string;
+  answerLabel: string;
   pendingLabel: string;
   hasAnswer: boolean;
 };
@@ -118,10 +117,27 @@ function summarizeManualState(state: any): ManualUiSummary {
   const totalPages = Number(currentAnswer?.totalPages ?? 0);
   return {
     transcriptCount: Number(state?.transcriptCount ?? 0),
-    pageLabel: currentAnswer && totalPages > 0 ? `${pageIndex + 1}/${totalPages}` : 'None',
+    answerLabel: currentAnswer ? (totalPages > 1 ? `${pageIndex + 1}/${totalPages}` : 'Ready') : 'None',
     pendingLabel: state?.pending?.kind ? String(state.pending.kind) : 'None',
     hasAnswer: Boolean(currentAnswer),
   };
+}
+
+function manualAnswerTextFromPayload(answer: any): string {
+  return String(answer?.output || answer?.text || '').trim();
+}
+
+function manualStatusMessage(status: string): string {
+  if (status === 'no_new_speech') {
+    return 'No new speech captured yet. Wait for the speech count to increase, then press Generate again.';
+  }
+  if (status === 'no_current_answer') {
+    return 'No answer yet. Say something first, then press Generate.';
+  }
+  if (status === 'noop') {
+    return 'No page change.';
+  }
+  return `Manual action returned ${status}.`;
 }
 
 /**
@@ -232,10 +248,11 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
   const [statusDetail, setStatusDetail] = useState('Waiting for the Mentra session.');
   const [manualSummary, setManualSummary] = useState<ManualUiSummary>({
     transcriptCount: 0,
-    pageLabel: 'None',
+    answerLabel: 'None',
     pendingLabel: 'None',
     hasAnswer: false,
   });
+  const [manualAnswerText, setManualAnswerText] = useState('');
   const [thinkingWord, setThinkingWord] = useState(() =>
     THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)]
   );
@@ -257,7 +274,8 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     setTelepromptState(null);
     setRuntimeStatus('Ready');
     setStatusDetail('Screen cleared. Listening continues if glasses are connected.');
-    setManualSummary({ transcriptCount: 0, pageLabel: 'None', pendingLabel: 'None', hasAnswer: false });
+    setManualSummary({ transcriptCount: 0, answerLabel: 'None', pendingLabel: 'None', hasAnswer: false });
+    setManualAnswerText('');
     setIsLoadingHistory(false);
     setHasConnectedBefore(false);
     renderedIdsRef.current.clear();
@@ -325,7 +343,13 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             setThinkingWord(randomWord);
             setIsProcessing(false);
             setRuntimeStatus('Answer ready');
-            setStatusDetail('New display cue received.');
+            const isManualInsight = String(data.agentType || '').toLowerCase() === 'manual';
+            setStatusDetail(isManualInsight ? 'Answer is pinned on display.' : 'New display cue received.');
+
+            if (isManualInsight) {
+              setManualAnswerText(String(data.text || '').trim());
+              return;
+            }
 
             const nextInsight = {
               id: data.id || Date.now().toString(),
@@ -389,13 +413,23 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           } else if (data.type === 'history') {
             // Instant scroll, no animation — mark all IDs as already rendered
             scrollInstantRef.current = true;
-            const historyInsights = dedupeInsightsById((data.insights || []).map((ins: any) => ({
-              id: ins.id,
-              text: ins.text,
-              timestamp: ins.timestamp,
-              agentType: ins.agentType,
-              reasoning: ins.reasoning,
-            })));
+            const rawHistory = data.insights || [];
+            const latestManual = [...rawHistory]
+              .reverse()
+              .find((ins: any) => String(ins.agentType || '').toLowerCase() === 'manual');
+            if (latestManual?.text) {
+              setManualAnswerText(String(latestManual.text).trim());
+              setManualSummary((current) => ({ ...current, hasAnswer: true, answerLabel: 'Ready' }));
+            }
+            const historyInsights = dedupeInsightsById(rawHistory
+              .filter((ins: any) => String(ins.agentType || '').toLowerCase() !== 'manual')
+              .map((ins: any) => ({
+                id: ins.id,
+                text: ins.text,
+                timestamp: ins.timestamp,
+                agentType: ins.agentType,
+                reasoning: ins.reasoning,
+              })));
             for (const ins of historyInsights) {
               renderedIdsRef.current.add(ins.id);
             }
@@ -448,18 +482,28 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             applyManualState(data.state);
             setIsProcessing(false);
             setRuntimeStatus('Answer ready');
-            setStatusDetail(data.answer?.totalPages > 1 ? `Answer page ${data.answer.pageIndex + 1}/${data.answer.totalPages}.` : 'Answer is pinned on display.');
+            setStatusDetail('Answer is pinned on display.');
+            setManualAnswerText(manualAnswerTextFromPayload(data.answer));
           } else if (data.type === 'manual_page') {
             applyManualState(data.state);
-            setRuntimeStatus('Answer page');
-            setStatusDetail(data.answer?.totalPages > 1 ? `Showing page ${data.answer.pageIndex + 1}/${data.answer.totalPages}.` : 'Only one page.');
+            setRuntimeStatus('Answer ready');
+            setStatusDetail('Answer is pinned on display.');
+            setManualAnswerText(manualAnswerTextFromPayload(data.answer));
           } else if (data.type === 'manual_cleared') {
             applyManualState(data.state);
             setIsProcessing(false);
             setRuntimeStatus('Listening');
             setStatusDetail('Display cleared. Listening continues.');
+            setManualAnswerText('');
+          } else if (data.type === 'manual_error') {
+            applyManualState(data.state);
+            setIsProcessing(false);
+            setRuntimeStatus('Error');
+            setStatusDetail(data.error || 'Manual generation failed.');
           } else if (data.type === 'manual_gesture_ignored') {
-            setStatusDetail('Long press ignored by SayNext; it may be reserved by the glasses system.');
+            setStatusDetail(data.reason === 'manual_answer_is_single_scroll_box'
+              ? 'Use the phone answer box to scroll the full response.'
+              : 'Long press ignored by SayNext; it may be reserved by the glasses system.');
           } else if (data.type === 'manual_gesture_pending') {
             setStatusDetail('Tap received. Waiting briefly to detect double tap.');
           } else if (data.type === 'manual_gesture') {
@@ -579,12 +623,17 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
       }
       const result = await runManualAction(userId, action);
       applyManualState(result.state);
+      if (result.status !== 'busy') {
+        setIsProcessing(false);
+      }
       if (result.status === 'ok' && result.answer) {
         setRuntimeStatus('Answer ready');
-        setStatusDetail(result.answer.totalPages > 1 ? `Answer page ${result.answer.pageIndex + 1}/${result.answer.totalPages}.` : 'Answer is pinned on display.');
+        setStatusDetail('Answer is pinned on display.');
+        setManualAnswerText(manualAnswerTextFromPayload(result.answer));
       } else if (result.status === 'cleared') {
         setRuntimeStatus('Listening');
         setStatusDetail('Display cleared. Listening continues.');
+        setManualAnswerText('');
         setInsights([]);
         renderedIdsRef.current.clear();
       } else if (result.status === 'busy') {
@@ -592,28 +641,10 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
         setStatusDetail('A generation is already running.');
       } else {
         setRuntimeStatus('Listening');
-        setStatusDetail(result.error || `Manual action returned ${result.status}.`);
+        setStatusDetail(result.error || manualStatusMessage(result.status));
       }
     } catch (error) {
       setIsProcessing(false);
-      setRuntimeStatus('Error');
-      setStatusDetail(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const handleManualPage = async (direction: 'next' | 'previous') => {
-    if (!userId) return;
-
-    try {
-      const result = await pageManualAnswer(userId, direction);
-      applyManualState(result.state);
-      if (result.answer) {
-        setRuntimeStatus('Answer page');
-        setStatusDetail(result.answer.totalPages > 1 ? `Showing page ${result.answer.pageIndex + 1}/${result.answer.totalPages}.` : 'Only one page.');
-      } else {
-        setStatusDetail(result.error || `Page action returned ${result.status}.`);
-      }
-    } catch (error) {
       setRuntimeStatus('Error');
       setStatusDetail(error instanceof Error ? error.message : String(error));
     }
@@ -626,7 +657,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     : isProcessing || runtimeStatus.includes('Generating') || runtimeStatus.includes('Regenerating') || runtimeStatus.includes('Preparing') || runtimeStatus === 'Clearing'
       ? 'bg-amber-500/10 text-amber-500 border-amber-500/20'
       : 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20';
-  const showManualControls = sessionActive !== false || insights.length > 0 || hasConnectedBefore;
+  const showManualControls = sessionActive !== false || Boolean(manualAnswerText) || insights.length > 0 || hasConnectedBefore;
 
   // Render Settings page if on settings
   if (currentPage === 'settings') {
@@ -778,7 +809,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
               <div className="rounded-[18px] px-3 py-2" style={{ backgroundColor: 'var(--background)' }}>
                 <div className="text-[11px] text-muted-foreground">Answer</div>
                 <div className="text-[16px] font-bold" style={{ color: 'var(--secondary-foreground)' }}>
-                  {manualSummary.pageLabel}
+                  {manualSummary.answerLabel}
                 </div>
               </div>
               <div className="rounded-[18px] px-3 py-2" style={{ backgroundColor: 'var(--background)' }}>
@@ -798,11 +829,13 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           style={{
             scrollbarWidth: 'none',
             msOverflowStyle: 'none',
+            overscrollBehaviorY: 'contain',
+            WebkitOverflowScrolling: 'touch',
           }}
         >
           {/* Empty States: Welcome / Disconnected / Loading */}
           <AnimatePresence mode="wait">
-            {isLoadingHistory && insights.length === 0 && (
+            {isLoadingHistory && insights.length === 0 && !manualAnswerText && (
               <motion.div
                 key="loading-screen"
                 initial={{ opacity: 0 }}
@@ -820,7 +853,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                 </div>
               </motion.div>
             )}
-            {!isLoadingHistory && insights.length === 0 && sessionActive === false && (
+            {!isLoadingHistory && insights.length === 0 && !manualAnswerText && sessionActive === false && (
               <motion.div
                 key="disconnected-screen"
                 initial={{ opacity: 0 }}
@@ -842,7 +875,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                 </div>
               </motion.div>
             )}
-            {!isLoadingHistory && insights.length === 0 && sessionActive !== false && !isProcessing && (
+            {!isLoadingHistory && insights.length === 0 && !manualAnswerText && sessionActive !== false && !isProcessing && (
               <motion.div
                 key="welcome-screen"
                 initial={{ opacity: 0 }}
@@ -905,7 +938,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           </AnimatePresence>
 
           {/* Insight List */}
-          {(insights.length > 0 || isProcessing) && (
+          {(manualAnswerText || insights.length > 0 || isProcessing) && (
             <motion.div
               initial={hasConnectedBefore ? { opacity: 1, y: 0 } : { opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -913,6 +946,52 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
               className="px-[24px] py-6 pb-[210px] relative z-20"
             >
               <div className="max-w-3xl mx-auto space-y-6">
+                {manualAnswerText && (
+                  <motion.section
+                    key="manual-answer-card"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.25 }}
+                    className="rounded-[28px] border shadow-sm overflow-hidden"
+                    style={{
+                      backgroundColor: 'var(--primary-foreground)',
+                      borderColor: 'var(--border)',
+                    }}
+                  >
+                    <div
+                      className="flex items-center justify-between px-5 py-3 border-b"
+                      style={{ borderColor: 'var(--border)' }}
+                    >
+                      <div>
+                        <div className="text-[13px] font-semibold text-muted-foreground">Pinned answer</div>
+                        <div className="text-[18px] font-bold" style={{ color: 'var(--secondary-foreground)' }}>
+                          Latest response
+                        </div>
+                      </div>
+                      <span
+                        className="rounded-full border px-3 py-1 text-[12px] font-semibold"
+                        style={{
+                          color: 'var(--secondary-foreground)',
+                          borderColor: 'var(--border)',
+                        }}
+                      >
+                        Scroll
+                      </span>
+                    </div>
+                    <div
+                      className="max-h-[54vh] overflow-y-auto px-5 py-4 text-[18px] leading-[1.55] whitespace-pre-wrap"
+                      style={{
+                        color: 'var(--secondary-foreground)',
+                        scrollbarWidth: 'thin',
+                        overscrollBehaviorY: 'contain',
+                        WebkitOverflowScrolling: 'touch',
+                      }}
+                    >
+                      {manualAnswerText}
+                    </div>
+                  </motion.section>
+                )}
+
                 {insights.map((insight) => {
                   const isNew = !renderedIdsRef.current.has(insight.id);
                   if (isNew) renderedIdsRef.current.add(insight.id);
@@ -1042,32 +1121,8 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                   Generate
                 </button>
                 <button
-                  onClick={() => handleManualPage('previous')}
-                  disabled={!manualSummary.hasAnswer}
-                  className="min-h-[54px] px-2 rounded-[18px] text-[17px] font-bold shadow-sm transition active:scale-[0.99] disabled:opacity-45"
-                  style={{
-                    backgroundColor: 'var(--primary-foreground)',
-                    color: 'var(--secondary-foreground)',
-                    border: '1px solid var(--border)',
-                  }}
-                >
-                  Back
-                </button>
-                <button
-                  onClick={() => handleManualPage('next')}
-                  disabled={!manualSummary.hasAnswer}
-                  className="min-h-[54px] px-2 rounded-[18px] text-[17px] font-bold shadow-sm transition active:scale-[0.99] disabled:opacity-45"
-                  style={{
-                    backgroundColor: 'var(--primary-foreground)',
-                    color: 'var(--secondary-foreground)',
-                    border: '1px solid var(--border)',
-                  }}
-                >
-                  Next
-                </button>
-                <button
                   onClick={() => handleManualAction(manualSummary.hasAnswer ? 'regenerate' : 'clear')}
-                  className="min-h-[54px] px-2 rounded-[18px] text-[17px] font-bold shadow-sm transition active:scale-[0.99]"
+                  className="col-span-3 min-h-[54px] px-2 rounded-[18px] text-[18px] font-bold shadow-sm transition active:scale-[0.99]"
                   style={{
                     backgroundColor: 'var(--primary-foreground)',
                     color: 'var(--secondary-foreground)',
@@ -1095,7 +1150,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
         )}
 
         {/* Bottom Header */}
-        <BottomHeader isVisible={insights.length > 0} />
+        <BottomHeader isVisible={Boolean(manualAnswerText) || insights.length > 0} />
       </div>
     </div>
   );
