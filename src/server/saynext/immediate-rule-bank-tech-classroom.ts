@@ -154,6 +154,8 @@ export const TECH_CLASSROOM_IMMEDIATE_RULES: ImmediateRule[] = [
     category: "tech_process",
     include: [/\bcold start\b/i, /\b(patient[- ]?critical|critical app|health|doctor|clinical|medical)\b/i],
     output: "Yes, cold-start delay can matter for patient-critical apps. The safe design is to keep critical paths predictable: provision or warm the function if needed, monitor latency, and avoid putting emergency decisions behind a slow serverless path.",
+    hint: "Route as a patient-critical Lambda cold-start trade-off. Answer cautiously and keep the critical path predictable.",
+    mustInclude: ["cold-start", "latency"],
     reasoning: "Immediate Lambda cold-start patient-critical answer",
     confidence: 0.9,
   },

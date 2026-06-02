@@ -3,11 +3,23 @@ import type { ImmediateRule } from "./immediate-rule-registry";
 // Bank responsibility: stable self-introduction, education, interview-profile, and supported personal background facts.
 export const PROFILE_IMMEDIATE_RULES: ImmediateRule[] = [
   {
+    id: "immediate:intro-cloud-engineering-interest",
+    priority: 465,
+    category: "career_pitch",
+    include: [/\b(introduce yourself|self[-\s]?introduction)\b/i, /\bcloud engineering|cloud\b/i],
+    output: "Yeah, sure. I'm Xiang Li, and I'm currently doing my MACS degree at Dalhousie. I've been working mostly on web and cloud projects, like React, Firebase, and AWS serverless stuff. I'm interested in cloud engineering because I like building real projects that connect frontend, backend, and cloud services.",
+    hint: "Route as a brief interview self-introduction plus cloud-engineering interest. Use profile facts and project context, but let the model phrase it naturally.",
+    mustInclude: ["Xiang Li", "MACS", "cloud engineering"],
+    reasoning: "Immediate intro plus cloud-engineering interest route",
+  },
+  {
     id: "immediate:formal-self-introduction",
     priority: 460,
     category: "career_pitch",
     include: [/\b(introduce yourself|self[-\s]?introduction|graduation photo|quickly before the photo|before the photo)\b/i],
     output: "Hi, I'm Xiang Li. I'm a MACS student at Dalhousie, so Master of Applied Computer Science.",
+    hint: "Route as a brief self-introduction using stable profile facts.",
+    mustInclude: ["Xiang Li", "MACS", "Dalhousie"],
     reasoning: "Immediate formal self-introduction response",
   },
   {

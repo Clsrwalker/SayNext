@@ -1,5 +1,5 @@
 import type { Agent } from "@mastra/core/agent";
-import { Action, AgentType, type Conversation, type AgentResponse } from "../types";
+import { Action, AgentType, type AgentResponse, type Conversation } from "../types";
 import type { EventMemorySnapshot } from "../../memory/event-memory";
 import {
   type OpenAiConversationSession,
@@ -7,10 +7,8 @@ import {
   isOpenAiConversationStateEnabled,
   shouldCommitTranscriptToOpenAiConversation,
 } from "./openai-conversation-state";
-import { buildKnownTermAsrPromptHint, normalizeKnownProjectAsrAliases } from "../../text/asr-corrections";
-import {
-  buildProcessTrace,
-} from "../../saynext/process-router";
+import { normalizeKnownProjectAsrAliases } from "../../text/asr-corrections";
+import { buildProcessTrace } from "../../saynext/process-router";
 import {
   LLM_PROVIDER,
   MODEL_NAME,
@@ -23,11 +21,10 @@ import {
   resolveOpenAiModelConfig,
   withModelTimeout,
 } from "../../saynext/model-runtime";
-import { sayNextInstructions } from "../../saynext/prompts";
+import { buildSayNextLiveTaskPrompt, sayNextInstructions } from "../../saynext/prompts";
 import {
-  buildCompactXiangProfile,
-  buildGeneralAsrPromptHint,
-  buildProcessHint,
+  buildLiveXiangProfile,
+  compactRuntimeContextBlock,
   detectPromptMode,
   estimateTokens,
   filterRuntimePersonalMemoryContext,
@@ -37,7 +34,6 @@ import {
 import {
   extractOutputField,
   finalizeSayNextOutput,
-  looksLikeQuestion,
   sanitizeSayNextOutput,
   type OutputLanguage,
 } from "../../saynext/output-postprocess";
@@ -57,6 +53,7 @@ import {
   getPrenoteExactAnswerImmediateResponse,
   getUnsupportedPremiseImmediateResponse,
 } from "../../saynext/immediate-response";
+
 export {
   PROCESS_RULES,
   matchSayNextProcessRules,
@@ -72,24 +69,21 @@ export {
 export {
   extractOutputField,
   finalizeSayNextOutput,
+  generateOptionalContinuation,
+  generateTelepromptScript,
   initialAgentHigh,
   initialAgentLow,
   initialAgentMedium,
-  generateOptionalContinuation,
-  generateTelepromptScript,
   resolveOpenAiModelConfig,
   sanitizeSayNextOutput,
 };
 export type { OutputLanguage };
 
 function getLatestTranscript(conversation: Conversation): string {
-  for (let i = conversation.length - 1; i >= 0; i--) {
+  for (let i = conversation.length - 1; i >= 0; i -= 1) {
     const item = conversation[i];
-    if (item.type === 'transcript') {
-      return item.text;
-    }
+    if (item.type === "transcript") return item.text;
   }
-
   return "";
 }
 
@@ -100,7 +94,7 @@ export interface ProcessConversationOptions {
 
 export async function processConversation(
   conversation: Conversation,
-  frequency: 'low' | 'medium' | 'high' = 'high',
+  frequency: "low" | "medium" | "high" = "high",
   eventMemory?: EventMemorySnapshot,
   outputLanguage: OutputLanguage = "english",
   activePrenoteContext = "",
@@ -109,14 +103,10 @@ export async function processConversation(
   options: ProcessConversationOptions = {},
 ): Promise<AgentResponse> {
   const currentTimestamp = Date.now();
-  const currentDate = new Date(currentTimestamp).toISOString();
   const rawLatestTranscript = getLatestTranscript(conversation);
   const latestTranscript = normalizeKnownProjectAsrAliases(rawLatestTranscript);
-  const asrCorrectionHint = [
-    buildKnownTermAsrPromptHint(rawLatestTranscript),
-    buildGeneralAsrPromptHint(rawLatestTranscript),
-  ].filter(Boolean).join("\n");
   const promptMode = detectPromptMode(latestTranscript, eventMemory);
+  const isClassroomMode = promptMode === "classroom";
   const latestTranscriptIndex = findLatestTranscriptIndex(conversation);
   const compactConversation = conversation
     .filter((_, index) => index !== latestTranscriptIndex)
@@ -126,170 +116,83 @@ export async function processConversation(
     .map((item) => item.text);
   const hasRecentAgentOutput = compactConversation.some((item) => item.type === "insight" || item.type === "silent" || item.type === "route");
 
-  const immediateDecision = getImmediateDecision(latestTranscript, currentTimestamp, outputLanguage, {
-    previousTranscriptTexts,
-    hasPriorTranscript: previousTranscriptTexts.length > 0,
-    hasRecentAgentOutput,
-  });
+  const immediateDecision = isClassroomMode
+    ? { response: null, routeHints: [] }
+    : getImmediateDecision(latestTranscript, currentTimestamp, outputLanguage, {
+      previousTranscriptTexts,
+      hasPriorTranscript: previousTranscriptTexts.length > 0,
+      hasRecentAgentOutput,
+    });
   const immediateResponse = immediateDecision.response;
   if (immediateResponse) {
     return withProcessTrace(immediateResponse, latestTranscript, "immediate_rule", promptMode);
   }
+
   const immediateRouteHints = immediateDecision.routeHints;
-  const formattedImmediateRouteHints = formatImmediateRouteHints(immediateRouteHints);
+  const formattedImmediateRouteHints = isClassroomMode ? "" : formatImmediateRouteHints(immediateRouteHints);
   const immediateHintRuleIds = immediateRouteHints.map((hint) => `hint:${hint.id}`);
-
-  const processHint = buildProcessHint(latestTranscript, promptMode);
-  const latestLooksLikeQuestion = looksLikeQuestion(latestTranscript);
-  const formattedHistoryLines: string[] = [];
-  for (const item of compactConversation) {
-    switch (item.type) {
-      case 'transcript':
-        formattedHistoryLines.push(`Transcript: "${item.text}"`);
-        break;
-      case 'insight':
-        // Previous suggestions are model outputs, not conversation audio.
-        // Keeping them out of the prompt prevents the model from replying to itself.
-        break;
-      case 'silent':
-        formattedHistoryLines.push(`Previous non-response: "${item.reasoning}"`);
-        break;
-      case 'route':
-        formattedHistoryLines.push(`Previous route decision: "${item.reasoning}"`);
-        break;
-    }
-  }
-
-  const formattedHistory = `--- RECENT CONVERSATION ---\n${formattedHistoryLines.join('\n')}\n--- END CONVERSATION ---`;
   const retrievedSamples: { id: string }[] = [];
-  const formattedProfile = buildCompactXiangProfile(promptMode);
+
   const historyTranscriptTexts = compactConversation
     .filter((item) => item.type === "transcript")
     .map((item) => item.text);
-  const formattedEventMemory = formatCompactEventMemory(eventMemory, [latestTranscript, ...historyTranscriptTexts]);
-  const formattedPrenoteContext = activePrenoteContext.trim() || "No active prenote.";
-  const formattedSceneProfile = activeSceneProfilePrompt.trim() || "No active scene profile.";
-  const filteredPersonalMemoryContext = filterRuntimePersonalMemoryContext(
-    relevantPersonalMemoryContext,
-    latestTranscript,
-    promptMode,
-    eventMemory,
-  );
-  const formattedPersonalMemory = filteredPersonalMemoryContext.trim() || "No relevant personal memory.";
+  const formattedProfile = isClassroomMode ? "" : buildLiveXiangProfile(promptMode);
+  const formattedEventMemory = isClassroomMode
+    ? ""
+    : formatCompactEventMemory(eventMemory, [latestTranscript, ...historyTranscriptTexts]);
+  const formattedPrenoteContext = activePrenoteContext.trim()
+    ? compactRuntimeContextBlock(activePrenoteContext.trim(), 1200)
+    : "";
+  const filteredPersonalMemoryContext = isClassroomMode
+    ? ""
+    : filterRuntimePersonalMemoryContext(
+      relevantPersonalMemoryContext,
+      latestTranscript,
+      promptMode,
+      eventMemory,
+    );
+  const formattedPersonalMemory = isClassroomMode
+    ? ""
+    : compactRuntimeContextBlock(filteredPersonalMemoryContext.trim() || "No relevant personal memory.", 1400);
   const trustedSupportContext = [
     formattedProfile,
-    formattedSceneProfile,
     formattedEventMemory,
     formattedPersonalMemory,
     formattedPrenoteContext,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
+
   const prenoteExactResponse = getPrenoteExactAnswerImmediateResponse(latestTranscript, formattedPrenoteContext, currentTimestamp);
   if (prenoteExactResponse) {
     return withProcessTrace(prenoteExactResponse, latestTranscript, "context_rule", promptMode);
   }
 
-  const unsupportedPremiseResponse = getUnsupportedPremiseImmediateResponse(latestTranscript, currentTimestamp, trustedSupportContext);
-  if (unsupportedPremiseResponse) {
-    return withProcessTrace(unsupportedPremiseResponse, latestTranscript, "context_rule", promptMode);
+  if (!isClassroomMode) {
+    const unsupportedPremiseResponse = getUnsupportedPremiseImmediateResponse(latestTranscript, currentTimestamp, trustedSupportContext);
+    if (unsupportedPremiseResponse) {
+      return withProcessTrace(unsupportedPremiseResponse, latestTranscript, "context_rule", promptMode);
+    }
+
+    const recentTranscriptContext = previousTranscriptTexts.join("\n");
+    const contextAwareProjectResponse = getContextAwareProjectImmediateResponse(latestTranscript, trustedSupportContext, currentTimestamp, recentTranscriptContext);
+    if (contextAwareProjectResponse) {
+      return withProcessTrace(contextAwareProjectResponse, latestTranscript, "context_rule", promptMode);
+    }
   }
 
-  const contextAwareProjectResponse = getContextAwareProjectImmediateResponse(latestTranscript, trustedSupportContext, currentTimestamp, formattedHistory);
-  if (contextAwareProjectResponse) {
-    return withProcessTrace(contextAwareProjectResponse, latestTranscript, "context_rule", promptMode);
-  }
+  const stablePromptPrefix = buildSayNextLiveTaskPrompt({
+    formattedSceneProfile: isClassroomMode
+      ? ""
+      : compactRuntimeContextBlock(activeSceneProfilePrompt.trim(), 900),
+    promptMode,
+    supportContext: isClassroomMode ? formattedPrenoteContext : compactRuntimeContextBlock(trustedSupportContext, 2600),
+    routeHints: formattedImmediateRouteHints,
+  });
 
-  console.log("\n--- SayNext Agent Context ---\n", formattedHistory, "\n-----------------------------\n");
-  const stablePromptPrefix = `Task:
-- Use the latest transcript as the trigger and follow the active scene profile first.
-- Direct question: answer directly. Lecture/explanation: add a useful supplement or question. Casual: keep it natural. Meeting: move the task forward.
-- Use the process hint as the decision procedure. Do not just pattern-match one keyword from the transcript.
-- If the transcript contains multiple possible topics, choose the latest or most actionable direct question. Do not let a side phrase hijack the answer.
-- Output must read like something Xiang can say out loud immediately. Avoid quoted terms, parentheses, Markdown backticks, e.g., and spec-doc phrasing.
-- If an ASR correction hint is present, treat it as a candidate interpretation of noisy speech. Use it when it fits the context and retrieved memory; otherwise ask one short clarification. Do not repeat weird ASR artifacts as if they are meaningful.
-- Never output placeholders like X, Y, Z, [date], [insert details], or fake exact values. If exact status is missing, say what needs to be confirmed.
-- For live meeting replies, keep it to one or two short spoken sentences. Do not pack multiple document actions into one long sentence.
-- If the transcript asks Xiang's name, identity, or name pronunciation, answer with Xiang Li / Xiang; never echo a wrong name.
-- If someone suggests adding a new feature before fixing a known bug/blocker, push back gently and prioritize the core bug first.
-- For public-facing project or interview answers, use "Hybrid Search Memory Assistant" as the name for SayNext unless the conversation is clearly internal.
-- Use active prenote memory as prepared context when relevant. It is stronger than generic knowledge, but do not force it if unrelated.
-- If the active prenote contains an exact date, room, deadline, rubric item, API field, requirement, or policy that answers the latest transcript, use that exact detail instead of guessing.
-- Use relevant personal memory only when it directly helps; do not volunteer sensitive details.
-- Do not mention memory source refs, categories, or usage rules. If a relevant memory has source ref starting with knowledge:xiang-playbook:, treat it as a response playbook only: use its logic, but do not claim Xiang lived that exact event.
-- For conflict, feedback, deadline, debugging, demo-pressure, unclear-requirement, or unknown-answer situations, a response playbook can supply the reasoning path when no exact personal story exists.
-- For daily/IELTS life questions, do not invent specific named movies, shows, stores, restaurants, parks, rooms, parties, trips, valuable items, friends, animal encounters, or recent events. If memory is missing, answer generally and modestly.
-- Avoid forced return questions like "How about you?", "What happened after that?", "ready?", "right?", or "huh?" unless the user explicitly asks for a question to say or the question is operationally necessary.
-- If the transcript asks why/origin/motivation for Xiang's own project or interest, and relevant personal memory contains an explicit origin, lead with that origin before technical details.
-- Personality, self-image, identity-belonging, mentor, relationship, political-values, and social-confidence memory is private shaping context. Use it only when the latest transcript directly asks about motivation, work style, confidence, self-image, social style, identity/belonging, important mentors, dating/relationship boundaries, political values, or future/workplace preference. Phrase it modestly and safely; do not quote raw insecurity like "too dumb", name private mentors, or volunteer political opinions unless Xiang explicitly asks for that topic.
-- High-stakes money, contract, lease, medical, legal, or non-refundable transaction pressure: do not agree or commit for Xiang. Use a cautious, sayable line asking to review, confirm in writing, or check with the right person.
-- Formal ceremony/toast/speech moments: be warm, simple, respectful, and not slangy.
-- If the latest transcript asks what question Xiang should ask in class or after a lecture, output one short student-like question only. Make it low-profile and natural, often with "would it be" or "so basically"; do not add an explanation.
-- For direct classroom concept questions, prefer 1-2 compact spoken sentences. For lecture supplements, prefer 12-28 words. Do not write a mini textbook explanation unless the transcript asks for detail.
-- Ambiguous meeting statements using "it/this/that" without enough background: avoid blindly agreeing; clarify the specific part, risk, or next check.
-- For meetings, include a concrete next move such as owner, blocker, decision, assumption, contract, test, log check, or scope cut. Avoid general "we should review it" language.
-- Do not use the personal sample library.
-- The requested Output language below is mandatory.
-- If active event memory says source=open_* or source=short_form, or the transcript is labelled third-party dialogue, reply neutrally to the transcript only; do not use Xiang personal/profile context or take over a speaker role.
-- For labelled third-party dialogue, output a short neutral content response or summary. Do not output meta text like "respond neutrally" or "do not take over the speaker role".
+  const outputLanguageText = outputLanguage === "chinese" ? "Chinese" : "English";
+  const dynamicPromptCore = `Output language: ${outputLanguageText}`;
+  const dynamicPromptSuffix = `${dynamicPromptCore}\n\nCurrent transcript: ${latestTranscript}`;
+  const openAiConversationInstructions = `${sayNextInstructions}\n\n${stablePromptPrefix}\n\n${dynamicPromptCore}`;
 
---- ACTIVE SCENE PROFILE ---
-${formattedSceneProfile}
---- END ACTIVE SCENE PROFILE ---
-
---- XIANG PROFILE ---
-Prompt mode: ${promptMode}
-${formattedProfile}
---- END XIANG PROFILE ---
-
---- ACTIVE PRENOTE MEMORY ---
-${formattedPrenoteContext}
---- END ACTIVE PRENOTE MEMORY ---`;
-
-  const dynamicPromptCore = `Time: ${currentDate}
-Output language: ${outputLanguage === "chinese" ? "Chinese" : "English"}
-Latest transcript looks like a direct question: ${latestLooksLikeQuestion ? "yes" : "no"}
-
---- PROCESS HINT ---
-${processHint}
---- END PROCESS HINT ---
-${formattedImmediateRouteHints ? `
---- ROUTE/GUARD HINTS ---
-${formattedImmediateRouteHints}
---- END ROUTE/GUARD HINTS ---
-` : ""}
-
---- LATEST TRANSCRIPT ---
-Transcript: "${latestTranscript}"
---- END LATEST TRANSCRIPT ---
-${asrCorrectionHint ? `
---- ASR CORRECTION HINT ---
-${asrCorrectionHint}
---- END ASR CORRECTION HINT ---
-` : ""}
-
---- ACTIVE EVENT MEMORY ---
-${formattedEventMemory}
---- END ACTIVE EVENT MEMORY ---
-
---- RELEVANT PERSONAL MEMORY ---
-${formattedPersonalMemory}
---- END RELEVANT PERSONAL MEMORY ---`;
-
-  const dynamicPromptSuffix = `${dynamicPromptCore}
-
-${formattedHistory}`;
-
-  const openAiConversationInstructions = `${sayNextInstructions}
-
-${stablePromptPrefix}
-
-${dynamicPromptCore}
-
-OpenAI conversation state may contain previous clean transcript turns from this app session.
-- Treat previous user messages as prior transcript context only.
-- Assistant outputs are display suggestions, not external speech. If any previous assistant output is still visible in state, do not treat it as something the other person said.
-- The current transcript is provided in the user input for this request.`;
-
-  // Keep repeated content before volatile transcript/event context so OpenAI prompt caching can reuse the prefix.
   const prompt = `${stablePromptPrefix}\n\n${dynamicPromptSuffix}`;
   const cacheablePrefix = `${sayNextInstructions}\n\n${stablePromptPrefix}`;
   const openAiConversationReady = Boolean(options.openAiConversationSession)
@@ -303,13 +206,13 @@ OpenAI conversation state may contain previous clean transcript turns from this 
   try {
     let agent: Agent<any, any>;
     switch (frequency) {
-      case 'low':
+      case "low":
         agent = initialAgentLow;
         break;
-      case 'medium':
+      case "medium":
         agent = initialAgentMedium;
         break;
-      case 'high':
+      case "high":
       default:
         agent = initialAgentHigh;
         break;
@@ -404,7 +307,7 @@ OpenAI conversation state may contain previous clean transcript turns from this 
                 ruleId: "model-ollama-generation",
               }),
             }),
-          }
+          },
         };
       }
 
@@ -436,7 +339,7 @@ OpenAI conversation state may contain previous clean transcript turns from this 
               ruleId: "model-openai-generation",
             }),
           }),
-        }
+        },
       };
     }
 
@@ -459,13 +362,13 @@ OpenAI conversation state may contain previous clean transcript turns from this 
             promptMode,
           }),
         }),
-      }
+      },
     };
   } catch (error) {
     console.error("Error in processConversation:", error);
     const fallback = getFallbackResponse(latestTranscript, currentTimestamp);
     if (fallback.type === Action.INSIGHT) {
-      fallback.reasoning = `Fallback after model error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      fallback.reasoning = `Fallback after model error: ${error instanceof Error ? error.message : "Unknown error"}`;
       fallback.metadata.agentInput = createAgentInputMetadata({
         retrievedSampleIds: retrievedSamples.map((sample) => sample.id),
         processTrace: buildProcessTrace({

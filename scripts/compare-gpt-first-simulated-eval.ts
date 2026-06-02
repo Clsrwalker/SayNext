@@ -385,8 +385,18 @@ async function main(): Promise<void> {
   const apiUrl = argValue("--api") || "http://localhost:3107/api/debug/saynext-replay";
   const model = argValue("--model") || process.env.OPENAI_MODEL || "gpt-5.4-nano";
   const outDir = argValue("--out-dir") || join(process.cwd(), "data", "review");
+  const sceneFilter = argValue("--scene");
 
-  const turns = selectDiverse(loadEvalTurns(paths), limit, seed);
+  const loadedTurns = loadEvalTurns(paths);
+  const filteredTurns = sceneFilter
+    ? loadedTurns.filter((item) => item.spec.scene === sceneFilter)
+    : loadedTurns;
+  const turns = selectDiverse(filteredTurns, limit, seed);
+  if (!turns.length) {
+    console.error(`[compare-gpt-first-simulated-eval] No turns found${sceneFilter ? ` for scene=${sceneFilter}` : ""}.`);
+    process.exitCode = 1;
+    return;
+  }
   const agent = new Agent({
     name: "SayNextSimulatedGptFirstCompare",
     model: openai(model),
@@ -424,7 +434,7 @@ async function main(): Promise<void> {
     `Sources: ${paths.map((path) => basename(path)).join(", ")}`,
     `Model: ${model}`,
     `Current API: ${apiUrl}`,
-    `Selection: diverse random limit=${limit} seed=${seed}`,
+    `Selection: diverse random limit=${limit} seed=${seed}${sceneFilter ? ` scene=${sceneFilter}` : ""}`,
     `Turns: ${results.length}`,
     `Old eval flagged rows: ${countFlagged("oldFlags")}`,
     `Current API flagged rows: ${countFlagged("currentFlags")}`,

@@ -92,7 +92,7 @@ export function detectPromptMode(latestTranscript: string, eventMemory?: EventMe
 
   const text = `${latestTranscript} ${eventMemory?.scene ?? ""} ${eventMemory?.title ?? ""} ${eventMemory?.summary ?? ""}`.toLowerCase();
 
-  if (includesAny(text, ["interview", "candidate", "hire", "resume", "tell me about yourself", "why should we hire", "position", "role"])) {
+  if (/\b(interview|candidate|hire|resume|tell me about yourself|why should we hire|position|role)\b/i.test(text)) {
     return "interview";
   }
 
@@ -228,6 +228,32 @@ export function buildCompactXiangProfile(mode: PromptMode): string {
   };
 
   return [...base, ...modeProfiles[mode]].join("\n");
+}
+
+export function buildLiveXiangProfile(mode: PromptMode): string {
+  const modeLine: Record<PromptMode, string> = {
+    casual: "Casual: short, relaxed, modest, slightly imperfect; one simple opinion plus one small reason.",
+    classroom: "Classroom: capable student tone; answer direct concept questions in 1-2 speakable sentences.",
+    interview: "Interview: honest junior developer tone; use real projects only and do not overclaim.",
+    technical: "Technical: precise mechanism, trade-off, or next check; do not claim senior personal experience.",
+    service: "Service/admin: polite, direct, cautious with money, documents, health, legal, and private details.",
+    general: "General: answer the latest turn briefly; use personal detail only when directly useful.",
+  };
+
+  return [
+    "Xiang Li: Chinese international MACS student at Dalhousie in Halifax; previous CS degree at Acadia.",
+    "Voice: simple spoken English, calm, modest, internet-native, not corporate or over-polished.",
+    "Goal: help Xiang say the shortest useful thing now; answer first, then one reason/bridge/next step if needed.",
+    "Never invent personal facts, work history, awards, exact dates, family/health/immigration/financial details, or named experiences.",
+    "Known projects: Hybrid Search Memory Assistant/SayNext, Elder Album, DalParkAid, JobLens, Study Session Tracker.",
+    modeLine[mode],
+  ].join("\n");
+}
+
+export function compactRuntimeContextBlock(text: string, maxChars = 1400): string {
+  const compacted = String(text || "").trim();
+  if (!compacted || compacted.length <= maxChars) return compacted;
+  return `${compacted.slice(0, Math.max(0, maxChars - 80)).trim()}\n[trimmed for live prompt; use only if directly relevant]`;
 }
 
 export function findLatestTranscriptIndex(conversation: Conversation): number {

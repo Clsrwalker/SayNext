@@ -129,6 +129,68 @@ test("route hints stop lower direct-response templates without producing display
   expect(runImmediateRules(rules, context)).toBeNull();
 });
 
+test("route hints do not include fixed output templates", () => {
+  const rules: ImmediateRule[] = [
+    {
+      id: "test:template-output",
+      priority: 20,
+      category: "tech_process",
+      include: [/cors/i],
+      output: "THIS FIXED TEMPLATE SHOULD NOT ENTER THE PROMPT",
+      reasoning: "technical route signal",
+    },
+  ];
+
+  const decision = runImmediateRuleDecision(rules, makeContext("CORS is failing."));
+
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0].id).toBe("test:template-output");
+  expect(decision.routeHints[0].instructions.join(" ")).toContain("technical route signal");
+  expect(decision.routeHints[0].instructions.join(" ")).not.toContain("THIS FIXED TEMPLATE");
+});
+
+test("non-whitelist direct-response rules degrade to route hints", () => {
+  const rules: ImmediateRule[] = [
+    {
+      id: "test:casual-direct",
+      priority: 20,
+      category: "casual",
+      effect: "direct_response",
+      include: [/weekend/i],
+      output: "Fixed weekend template.",
+      reasoning: "casual template should not direct output",
+    },
+  ];
+
+  const decision = runImmediateRuleDecision(rules, makeContext("What are you doing this weekend?"));
+
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0].id).toBe("test:casual-direct");
+  expect(decision.routeHints[0].instructions.join(" ")).toContain("casual template should not direct output");
+  expect(decision.routeHints[0].instructions.join(" ")).not.toContain("Fixed weekend template");
+});
+
+test("risk-boundary direct-response rules remain allowed", () => {
+  const rules: ImmediateRule[] = [
+    {
+      id: "test:risk-direct",
+      priority: 20,
+      category: "risk_boundary",
+      effect: "direct_response",
+      include: [/password/i],
+      output: "I would not share the password.",
+      reasoning: "password boundary",
+    },
+  ];
+
+  const decision = runImmediateRuleDecision(rules, makeContext("Can you share the password?"));
+
+  expect(decision.response?.type).toBe(Action.INSIGHT);
+  if (decision.response?.type === Action.INSIGHT) {
+    expect(decision.response.output).toBe("I would not share the password.");
+  }
+});
+
 test("casual route hints do not trigger on classroom technical examples", () => {
   const movieVectorDecision = runImmediateRuleDecision(
     IMMEDIATE_RULES,
@@ -228,8 +290,14 @@ test("tax deductible roommate-noise questions use cautious boundary wording", ()
   expect(decision.response).toBeNull();
   expect(decision.routeHints[0].id).toBe("immediate:tax-deductible-home-office-boundary");
   expect(decision.routeHints[0].route).toBe("risk_boundary");
-  expect(decision.routeHints[0].instructions.join(" ")).toContain("tax preparer");
-  expect(decision.routeHints[0].instructions.join(" ")).toContain("official guidance");
+  expect([
+    ...(decision.routeHints[0].instructions || []),
+    ...(decision.routeHints[0].mustInclude || []),
+  ].join(" ")).toContain("tax preparer");
+  expect([
+    ...(decision.routeHints[0].instructions || []),
+    ...(decision.routeHints[0].mustInclude || []),
+  ].join(" ")).toContain("official guidance");
 });
 
 test("bus versus walking rule does not ignore fee clarification", () => {

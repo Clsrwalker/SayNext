@@ -137,6 +137,8 @@ export const CASUAL_IMMEDIATE_RULES: ImmediateRule[] = [
     category: "casual",
     include: [/\batomic habits\b/i, /\b(measurable|payoff|track|behavior|behaviour|habit|takeaway|apply this week|actionable)\b/i],
     output: "The useful takeaway is to make the first step very small and visible. For this week, I would pick one behavior, define the trigger, and track whether I actually did it each day.",
+    hint: "Route as a short Atomic Habits measurement takeaway. Keep it practical, not a book summary.",
+    mustInclude: ["track", "behavior"],
     reasoning: "Immediate Atomic Habits measurement answer",
     confidence: 0.88,
   },

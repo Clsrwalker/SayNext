@@ -172,16 +172,10 @@ function matchesRule(rule: ImmediateRule, context: ImmediateRuleContext): boolea
 }
 
 function buildRouteHint(rule: ImmediateRule, context: ImmediateRuleContext): ImmediateRuleHint {
-  const referenceOutput = rule.output
-    ? typeof rule.output === "function" ? rule.output(context) : rule.output
-    : "";
   const rawInstructions = rule.hint
     ? Array.isArray(rule.hint) ? rule.hint : [rule.hint]
     : [
-      `${rule.reasoning}. This matched an immediate rule, but the final answer should be generated from the latest transcript and recent context, not copied from a fixed template.`,
-      ...(referenceOutput
-        ? [`Reference facts only, rewrite naturally if still relevant: ${referenceOutput}`]
-        : []),
+      `${rule.reasoning}. This matched an immediate rule, but it is only a route or guard signal. Generate the final answer from the latest transcript and trusted context, not from a fixed template.`,
     ];
 
   return {
@@ -196,6 +190,14 @@ function buildRouteHint(rule: ImmediateRule, context: ImmediateRuleContext): Imm
     mustInclude: rule.mustInclude,
     mustAvoid: rule.mustAvoid,
   };
+}
+
+function canUseDirectResponse(rule: ImmediateRule): boolean {
+  if (rule.action === "silent") return true;
+  if (rule.effect !== "direct_response") return false;
+  return rule.category === "no_intervention"
+    || rule.category === "asr_correction"
+    || rule.category === "risk_boundary";
 }
 
 export function runImmediateRuleDecision(rules: ImmediateRule[], context: ImmediateRuleContext): ImmediateRuleDecision {
@@ -214,6 +216,14 @@ export function runImmediateRuleDecision(rules: ImmediateRule[], context: Immedi
     }
 
     const effect = resolveRuleEffect(rule);
+    if (effect === "direct_response" && !canUseDirectResponse(rule)) {
+      return {
+        response: null,
+        routeHints: [buildRouteHint(rule, context)],
+        matchedRule: rule,
+      };
+    }
+
     if (effect === "route_hint" || effect === "guard") {
       return {
         response: null,

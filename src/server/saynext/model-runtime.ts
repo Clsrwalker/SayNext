@@ -57,8 +57,8 @@ export async function generateWithOllama(prompt: string): Promise<string> {
     signal: controller.signal,
     body: JSON.stringify({
       model: OLLAMA_MODEL,
-      system: `${sayNextInstructions}\n\nDo not return JSON for Ollama. Return only the short useful text to show on the display.`,
-      prompt: `${prompt}\n\nReturn only one short useful text. Use 2-4 short sentences if a professional or academic question needs depth. Obey the Output language exactly. If Output language is English, do not output Chinese. No JSON. No labels. No reasoning.`,
+      system: `${sayNextInstructions}\n\nDo not return JSON. Return only one short display sentence.`,
+      prompt: `${prompt}\n\nReturn only one short answer. Obey the output language. No JSON. No labels. No reasoning.`,
       stream: false,
       options: {
         temperature: 0.35,

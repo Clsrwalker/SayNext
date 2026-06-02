@@ -38,6 +38,9 @@ export const TECH_IMMEDIATE_RULES: ImmediateRule[] = [
     category: "tech_process",
     include: [/\b(specific logs?|aws components?|components we should check|check first|list the .*logs?)\b/i, /\b(aws|api gateway|lambda|authorizer|iam|headers?|route|method|request id)\b/i],
     output: "For an AWS API issue, I would check API Gateway access and execution logs first, then the authorizer or JWT claims, Lambda logs, and IAM or resource policy denies. I would compare the route, method, headers, and request ID against the failing response.",
+    hint: "Route as a generic AWS API debugging checklist. Keep it project-neutral unless the user named a project.",
+    mustInclude: ["API Gateway", "Lambda logs", "IAM"],
+    mustAvoid: ["JobLens"],
     reasoning: "Immediate generic AWS API logs checklist",
   },
   {
@@ -271,6 +274,8 @@ export const TECH_IMMEDIATE_RULES: ImmediateRule[] = [
     category: "tech_process",
     include: [/\b(minimal repro|repro|token reduction|input tokens?|prompt size|hybrid search memory|hybrid search)\b/i, /\b(jobless ai|job level ai|job level|jobless|token reduction|input tokens?|hybrid search)\b/i],
     output: "For a minimal repro, I would use one long transcript plus a small memory set, run it once with all memory included and once with hybrid retrieval only, then compare input tokens, retrieved chunks, and whether the final answer stays grounded.",
+    hint: "Route as a Hybrid Search Memory Assistant token-reduction explanation or minimal repro. Keep it about retrieval context selection, not JobLens.",
+    mustInclude: ["minimal repro", "input tokens", "retrieved chunks", "grounded"],
     reasoning: "Immediate token-reduction minimal repro response",
   },
   {
@@ -305,6 +310,8 @@ export const TECH_IMMEDIATE_RULES: ImmediateRule[] = [
     include: [/\b(schema|scheme)\b/i, /\b(mean|confus|plainly|explain|plan|structure)\b/i],
     exclude: [/\b(query plan|schema evolution|prove correctness|correctness)\b/i],
     output: "Plainly, schema usually means the structure of data, like fields and types. Scheme usually means a plan or arrangement. So for a cloud or database assignment, I would say schema, not scheme.",
+    hint: "Route as a plain-language schema versus scheme clarification.",
+    mustInclude: ["schema", "scheme", "structure", "plan"],
     reasoning: "Immediate schema versus scheme clarification",
   },
   {

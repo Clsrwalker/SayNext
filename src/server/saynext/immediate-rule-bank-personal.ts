@@ -111,6 +111,8 @@ export const PERSONAL_IMMEDIATE_RULES: ImmediateRule[] = [
     include: [/\b(bus|walking|walk)\b/i, /\b(airport|travel|route)\b/i],
     exclude: [/\b(fee|fees|cost|charge|price|ticket|service charge|unpack that fee|library service)\b/i],
     output: "For airport travel, bus is usually more comfortable if there is luggage or a longer distance. Walking only makes sense for a short, clear route with light bags and good weather.",
+    hint: "Route as an airport-travel bus-versus-walking preference. Keep it practical and conditional.",
+    mustInclude: ["bus", "luggage"],
     reasoning: "Immediate airport bus-versus-walking answer",
     confidence: 0.88,
   },

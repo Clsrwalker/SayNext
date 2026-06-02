@@ -108,6 +108,9 @@ export const CURRENT_AFFAIRS_IMMEDIATE_RULES: ImmediateRule[] = [
     category: "asr_correction",
     include: [/\b(source checking|source verification|reposting|repost|original post|author|evidence)\b/i, /\b(older album|elder album|elder elbow|elderalbum)\b/i],
     output: "I would treat that phrase as ASR noise and not turn it into a project name. The real answer is source checking first, then tracing whether reposts changed or amplified the claim.",
+    hint: "Treat ElderAlbum/older album wording as ASR noise in a source-checking discussion, not as the project topic.",
+    mustInclude: ["ASR noise", "source"],
+    mustAvoid: ["ElderAlbum-style"],
     reasoning: "Immediate source-checking ASR-noise correction",
   },
   {

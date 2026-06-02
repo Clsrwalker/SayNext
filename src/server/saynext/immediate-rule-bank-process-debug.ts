@@ -47,6 +47,8 @@ export const PROCESS_DEBUG_IMMEDIATE_RULES: ImmediateRule[] = [
     include: [/\b(response windows?|late see|latency|escalation path|pressure spikes?)\b/i, /\b(define|writing|escalation|pressure|window|response)\b/i],
     exclude: [/\b(indexing|embedding|retrieval|bottlenecks?|response time|p95|pipeline|rag|cold start|serverless|lambda)\b/i],
     output: "I would define it simply: normal response within one business day, urgent issues use the escalation channel, and if pressure spikes we pause new requests and agree on the top priority in writing.",
+    hint: "Route as a response-window and escalation-process answer. Keep it operational and written/fact-based.",
+    mustInclude: ["response", "escalation", "writing"],
     reasoning: "Immediate response-window escalation process response",
     confidence: 0.88,
   },

@@ -8,6 +8,8 @@ export const OPEN_TOPIC_RISK_IMMEDIATE_RULES: ImmediateRule[] = [
       category: "risk_boundary",
       include: [/\b(threat model|counterfeit|leaks?|mask risks?|risk)\b/i, /\b(statinary|stationary|stationery|pens?|paper|notebooks?|tactile)\b/i],
       output: "If we are threat-modeling it, the risk is not the stationery itself but source and trust: counterfeit materials, misleading labels, or unknown sellers. I would check seller, price, and materials before treating it as safe.",
+      hint: "Route as a stationery threat-model answer. Keep the risk about source, trust, and materials.",
+      mustInclude: ["counterfeit", "seller", "materials"],
       reasoning: "Immediate stationery threat-model answer",
       confidence: 0.88,
     },
@@ -83,6 +85,8 @@ export const OPEN_TOPIC_RISK_IMMEDIATE_RULES: ImmediateRule[] = [
       category: "risk_boundary",
       include: [/\b(bank fraud|fraud call|bank call|verify a bank)\b/i, /\b(plain language|before sharing|info|information|verify|step)\b/i],
       output: "I would not share information on the call. I would hang up, use the number on the bank card or official app, and ask whether there is really a fraud alert on the account.",
+      hint: "Route as a plain-language bank fraud call verification boundary. Keep the verification path official.",
+      mustInclude: ["official", "bank"],
       reasoning: "Immediate bank fraud verification steps",
     },
   {
@@ -125,6 +129,9 @@ export const OPEN_TOPIC_RISK_IMMEDIATE_RULES: ImmediateRule[] = [
       category: "risk_boundary",
       include: [/\bpatient privacy\b/i, /\b(protect|who can see|access|share|data|details|vague)\b/i],
       output: "For patient privacy, I would use the minimum-necessary rule: collect only what is needed, limit access by role, log access, and avoid sharing identifiable details unless there is a clear reason and consent.",
+      hint: "Route as a patient privacy protection answer. Use minimum necessary and access-control framing.",
+      mustInclude: ["minimum", "access"],
+      mustAvoid: ["JobLens"],
       reasoning: "Immediate patient privacy protection answer",
     },
   {

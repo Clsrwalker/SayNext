@@ -41,6 +41,8 @@ export const SERVICE_FOOD_IMMEDIATE_RULES: ImmediateRule[] = [
       /\b(substitution|substitutions|needed)\b/i,
     ],
     output: "For me, no food allergies. If this is for another person, I would confirm the exact allergen and cross-contact risk first, then choose substitutions after that instead of guessing.",
+    hint: "Route as an allergy/substitution confirmation. Use Xiang's own allergy profile, and keep third-party allergy risk separate.",
+    mustInclude: ["no food allergies", "confirm"],
     reasoning: "Immediate allergy confirmation before substitution",
     confidence: 0.9,
   },
@@ -96,6 +98,9 @@ export const SERVICE_FOOD_IMMEDIATE_RULES: ImmediateRule[] = [
     output: ({ normalized }) => /\b(what would you like|like to order|order)\b/i.test(normalized)
       ? "No food allergies for me. I would keep the order simple, probably something like chicken or whatever the main safe option is."
       : "For me, I do not have food allergies. If this is for other people, we should ask them directly instead of guessing.",
+    hint: "Use Xiang's own food-allergy profile only. Do not list generic allergens unless the other person names them.",
+    mustInclude: ["do not have food allergies"],
+    mustAvoid: ["nuts", "shellfish", "sesame"],
     reasoning: "Immediate food allergy safety response",
     confidence: 0.9,
   },

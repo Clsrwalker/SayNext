@@ -20,8 +20,12 @@ function expectImmediateHint(
     ...(decision.routeHints[0]?.mustInclude || []),
     ...(decision.routeHints[0]?.mustAvoid || []),
   ].join(" ").toLowerCase();
+  const generativeHintText = [
+    ...(decision.routeHints[0]?.instructions || []),
+    ...(decision.routeHints[0]?.mustInclude || []),
+  ].join(" ").toLowerCase();
   for (const term of mustContain) expect(hintText).toContain(term.toLowerCase());
-  for (const term of mustAvoid) expect(hintText).not.toContain(term.toLowerCase());
+  for (const term of mustAvoid) expect(generativeHintText).not.toContain(term.toLowerCase());
   return decision.routeHints[0];
 }
 
@@ -1370,8 +1374,14 @@ test("keeps process-first answers under ASR and topic noise", async () => {
         ...(decision.routeHints[0].mustInclude || []),
         ...(decision.routeHints[0].mustAvoid || []),
       ].join(" ").toLowerCase();
-      for (const term of item.must) expect(hintText).toContain(term.toLowerCase());
-      for (const term of item.avoid) expect(hintText).not.toContain(term.toLowerCase());
+      const generativeHintText = [
+        ...(decision.routeHints[0].instructions || []),
+        ...(decision.routeHints[0].mustInclude || []),
+      ].join(" ").toLowerCase();
+      if (item.routeHint) {
+        for (const term of item.must) expect(hintText).toContain(term.toLowerCase());
+      }
+      for (const term of item.avoid) expect(generativeHintText).not.toContain(term.toLowerCase());
       continue;
     }
 

@@ -11,6 +11,7 @@ import { routeFastScene, type SceneBuiltinKey } from '../../scene/fast-scene-rou
 import { makeTelepromptOpeningLine, shouldStartTeleprompt, TelepromptRuntime, type TelepromptDisplay } from '../../teleprompt/teleprompt-runtime';
 import { OpenAiConversationSession, isOpenAiConversationStateEnabled } from './openai-conversation-state';
 import { normalizeKnownProjectAsrAliases } from '../../text/asr-corrections';
+import { detectPromptMode } from '../../saynext/context-builder';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 const SUGGESTION_ECHO_WINDOW_MS = 45 * 1000;
@@ -511,6 +512,8 @@ export class MergeResponseHandler {
         .filter((item) => item.type === "transcript")
         .map((item) => item.text),
     );
+    const promptMode = detectPromptMode(text, eventSnapshot);
+    const isClassroomMode = promptMode === "classroom";
     const memoryQuery = eventSnapshot.recentTranscripts.slice(-4).join("\n") || text;
     const telepromptNeed = shouldStartTeleprompt(text, `${eventSnapshot.scene} ${activeSceneProfilePrompt}`);
     const prenoteRetrievalMode = telepromptNeed === "none" ? "fast" : "semantic";
@@ -531,7 +534,9 @@ export class MergeResponseHandler {
       prenoteQuery,
       prenoteRetrievalMode,
     );
-    const relevantPersonalMemoryContext = conversationLogger.getRelevantPersonalMemoryContext(this.userId, memoryQuery, 3);
+    const relevantPersonalMemoryContext = isClassroomMode
+      ? ""
+      : conversationLogger.getRelevantPersonalMemoryContext(this.userId, memoryQuery, 3);
 
     if (telepromptNeed !== "none") {
       this.startTelepromptAnswer({

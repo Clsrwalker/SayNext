@@ -46,7 +46,7 @@ test("explicit flag can disable conversation state in travel mode", () => {
 
 test("conversation input stores only the latest clean transcript", () => {
   expect(buildOpenAiConversationInput("  Could you explain Kubernetes?  "))
-    .toBe('Transcript: "Could you explain Kubernetes?"');
+    .toBe("Current transcript: Could you explain Kubernetes?");
 });
 
 test("conversation payload keeps history out of the request input", () => {
@@ -59,7 +59,7 @@ test("conversation payload keeps history out of the request input", () => {
 
   expect(payload.conversation).toBe("conv_test");
   expect(payload.input).toHaveLength(1);
-  expect(payload.input[0].content[0].text).toBe('Transcript: "What project are you proud of?"');
+  expect(payload.input[0].content[0].text).toBe("Current transcript: What project are you proud of?");
   expect(payload.input[0].content[0].text).not.toContain("RECENT CONVERSATION");
   expect(payload.input[0].content[0].text).not.toContain("Previous suggestion");
 });

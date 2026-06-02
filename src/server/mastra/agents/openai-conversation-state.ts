@@ -48,7 +48,7 @@ export function shouldCommitTranscriptToOpenAiConversation(reason: TranscriptCom
 }
 
 export function buildOpenAiConversationInput(latestTranscript: string): string {
-  return `Transcript: "${latestTranscript.trim()}"`;
+  return `Current transcript: ${latestTranscript.trim()}`;
 }
 
 export function buildOpenAiConversationPayload(options: {
@@ -231,8 +231,7 @@ export class OpenAiConversationSession {
       throw new Error("OpenAI conversation create returned no id");
     }
 
-    const conversationId = data.id.trim();
-    return conversationId;
+    return data.id.trim();
   }
 
   private scheduleOutputCleanup(conversationId: string, outputItemIds: string[]): void {
