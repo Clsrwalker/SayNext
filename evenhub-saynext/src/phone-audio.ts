@@ -60,6 +60,9 @@ export async function startPhoneMic(params: {
   }
 
   const audioContext = new AudioContextCtor() as AudioContextLike;
+  if (audioContext.state === "suspended") {
+    await audioContext.resume().catch(() => undefined);
+  }
   const source = audioContext.createMediaStreamSource(stream);
   const processor = audioContext.createScriptProcessor(4096, 1, 1);
   const mute = audioContext.createGain();

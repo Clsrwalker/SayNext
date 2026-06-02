@@ -58,7 +58,7 @@ export default function App() {
   const [display, setDisplay] = useState<DisplayState>(INITIAL_DISPLAY_STATE);
   const [bridgeStatus, setBridgeStatus] = useState("Bridge not connected");
   const [wsStatus, setWsStatus] = useState("Disconnected");
-  const [audioStatus, setAudioStatus] = useState("Audio idle");
+  const [audioStatus, setAudioStatus] = useState("Audio idle. Tap Start to open the microphone.");
   const [localAudioBytesSent, setLocalAudioBytesSent] = useState(0);
   const bridgeRef = useRef<BridgeHandle | null>(null);
   const wsRef = useRef<SayNextWsClient | null>(null);
@@ -71,7 +71,7 @@ export default function App() {
   const signalCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const localAudioBytesSentRef = useRef(0);
   const lastAudioUiUpdateRef = useRef(0);
-  const wantListeningRef = useRef(true);
+  const wantListeningRef = useRef(false);
   const previousMicSourceRef = useRef(config.settings.micSource);
 
   const glassesText = useMemo(() => formatGlassesText(display, config.settings), [display, config.settings]);
@@ -135,14 +135,16 @@ export default function App() {
     }
   }, []);
 
-  const scheduleG2SignalCheck = useCallback((baselineBytes: number) => {
+  const scheduleMicSignalCheck = useCallback((source: SayNextSettings["micSource"], baselineBytes: number) => {
     clearSignalCheck();
     signalCheckTimerRef.current = setTimeout(() => {
       signalCheckTimerRef.current = null;
       if (!wantListeningRef.current) return;
-      if (configRef.current.settings.micSource !== "g2") return;
+      if (configRef.current.settings.micSource !== source) return;
       if (localAudioBytesSentRef.current > baselineBytes) return;
-      setAudioStatus("No G2 audio signal. Switch to Phone mic if the glasses stay silent.");
+      setAudioStatus(source === "phone"
+        ? "No phone audio signal. Check microphone permission, then tap Pause and Start again."
+        : "No G2 audio signal. Switch to Phone mic if the glasses stay silent.");
     }, G2_SIGNAL_TIMEOUT_MS);
   }, [clearSignalCheck]);
 
@@ -181,28 +183,29 @@ export default function App() {
     setAudioStatus(micSource === "phone" ? "Opening phone mic..." : "Opening G2 mic...");
 
     try {
+      const baselineBytes = localAudioBytesSentRef.current;
       if (micSource === "phone") {
-        await bridgeRef.current?.setRecording(false).catch(() => undefined);
         if (!phoneMicRef.current) {
           phoneMicRef.current = await startPhoneMic({
             onPcm: noteAudioSent,
             onStatus: setAudioStatus,
           });
         }
-        setAudioStatus("Phone mic listening");
+        await bridgeRef.current?.setRecording(false).catch(() => undefined);
+        setAudioStatus("Phone mic listening; waiting for signal.");
+        scheduleMicSignalCheck("phone", baselineBytes);
       } else {
         await stopPhoneMic();
         if (!bridgeRef.current) {
           throw new Error("G2 bridge is not connected yet.");
         }
 
-        const baselineBytes = localAudioBytesSentRef.current;
         const opened = await bridgeRef.current.setRecording(true);
         if (!opened) {
           throw new Error("G2 mic did not open. Switch to Phone mic.");
         }
         setAudioStatus("G2 mic listening; waiting for signal.");
-        scheduleG2SignalCheck(baselineBytes);
+        scheduleMicSignalCheck("g2", baselineBytes);
       }
 
       sendControl("start_listening");
@@ -215,7 +218,7 @@ export default function App() {
       sendControl("stop_listening");
       setDisplay((current) => ({ ...current, recording: false, status: "Mic unavailable", error: message }));
     }
-  }, [clearSignalCheck, noteAudioSent, scheduleG2SignalCheck, sendControl, stopPhoneMic]);
+  }, [clearSignalCheck, noteAudioSent, scheduleMicSignalCheck, sendControl, stopPhoneMic]);
 
   const stopSelectedAudio = useCallback(async () => {
     wantListeningRef.current = false;
@@ -224,7 +227,7 @@ export default function App() {
     await stopPhoneMic();
     sendControl("stop_listening");
     setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
-    setAudioStatus("Audio idle");
+    setAudioStatus("Audio idle. Tap Start to open the microphone.");
   }, [clearSignalCheck, sendControl, stopPhoneMic]);
 
   const connectWs = useCallback(() => {
@@ -305,8 +308,12 @@ export default function App() {
         },
       });
       await bridgeRef.current.render(glassesTextRef.current);
-      await startSelectedAudio();
-      setBridgeStatus("Bridge connected; listening");
+      if (wantListeningRef.current) {
+        await startSelectedAudio();
+        setBridgeStatus("Bridge connected; listening");
+      } else {
+        setBridgeStatus("Bridge connected; ready");
+      }
     } catch (error) {
       setBridgeStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -493,7 +500,7 @@ export default function App() {
 
       <nav className="action-bar" aria-label="Session actions">
         <button className={display.recording ? "secondary-action" : "primary-action"} onClick={display.recording ? stopListening : startListening}>
-          {display.recording ? "Pause" : "Resume"}
+          {display.recording ? "Pause" : "Start"}
         </button>
         <button className="primary-action" onClick={() => sendControl("generate")}>Generate</button>
         <button onClick={() => sendControl("regenerate")}>Retry</button>
