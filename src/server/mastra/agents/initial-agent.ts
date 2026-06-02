@@ -91,6 +91,7 @@ function getLatestTranscript(conversation: Conversation): string {
 export interface ProcessConversationOptions {
   openAiConversationSession?: OpenAiConversationSession;
   transcriptCommitReason?: TranscriptCommitReason;
+  responseStyle?: "auto" | "manual";
 }
 
 export async function processConversation(
@@ -190,12 +191,19 @@ export async function processConversation(
   });
 
   const outputLanguageText = outputLanguage === "chinese" ? "Chinese" : "English";
-  const dynamicPromptCore = `Output language: ${outputLanguageText}`;
+  const manualResponseInstruction = options.responseStyle === "manual"
+    ? "Manual G2 display: answer with 45-120 English words when useful. Still be natural, direct, and sayable. Do not use Markdown."
+    : "";
+  const dynamicPromptCore = [
+    `Output language: ${outputLanguageText}`,
+    manualResponseInstruction,
+  ].filter(Boolean).join("\n");
   const dynamicPromptSuffix = `${dynamicPromptCore}\n\nCurrent transcript: ${latestTranscript}`;
   const openAiConversationInput = buildOpenAiConversationInput(latestTranscript, {
     outputLanguage: outputLanguageText,
     promptMode,
     preparedNote: formattedPrenoteContext,
+    taskHint: manualResponseInstruction,
   });
 
   const prompt = `${stablePromptPrefix}\n\n${dynamicPromptSuffix}`;

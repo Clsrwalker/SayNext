@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { AppSession } from '@mentra/sdk';
 import { Action, AgentType, type AgentResponse, type AgentInsight, type Conversation, type AgentRoute } from "../types";
 import { generateOptionalContinuation, generateTelepromptScript, processConversation, type OutputLanguage } from "./initial-agent";
@@ -31,6 +32,10 @@ const AUTO_SCENE_FORCE_CONFIDENCE = Number(process.env.AUTO_SCENE_FORCE_CONFIDEN
 const AUTO_SCENE_SWITCH_COOLDOWN_MS = Number(process.env.AUTO_SCENE_SWITCH_COOLDOWN_MS || 20_000);
 const MAX_DISPLAYED_SUGGESTIONS = 12;
 const MIN_ECHO_WORDS = 3;
+const MANUAL_MAX_SEGMENTS = 500;
+const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
+const MANUAL_PAGE_TARGET_WORDS = 95;
+const MANUAL_PAGE_MAX_CHARS = 620;
 const STRONG_ECHO_SIMILARITY = 0.82;
 const MEDIUM_ECHO_SIMILARITY = 0.68;
 const STRONG_ECHO_TRANSCRIPT_COVERAGE = 0.75;
@@ -114,6 +119,84 @@ type LastDisplayedAnswerContext = {
 type ReadbackContinuationPrefetch = {
   key: string;
   promise: Promise<string | null>;
+};
+
+export type InteractionMode = "g1_auto" | "g2_manual";
+
+type TranscriptSegment = {
+  id: string;
+  text: string;
+  timestamp: number;
+  reason: "isFinal" | "timeout";
+  createdAt: number;
+};
+
+type SourceRange = {
+  fromExclusive: string | null;
+  toInclusive: string;
+  segmentIds: string[];
+  textDigest: string;
+};
+
+type ManualAnswer = {
+  answerGroupId: string;
+  answerId: string;
+  requestId: string;
+  sourceRange: SourceRange;
+  output: string;
+  pages: string[];
+  pageIndex: number;
+  createdAt: number;
+};
+
+type PendingManualRequest = {
+  requestId: string;
+  kind: "generate" | "regenerate";
+  sourceRange: SourceRange;
+  cancelled: boolean;
+};
+
+export type ManualActionResult = {
+  status:
+    | "ok"
+    | "busy"
+    | "no_new_speech"
+    | "no_current_answer"
+    | "cleared"
+    | "noop"
+    | "error";
+  sessionId: string;
+  state: ManualRuntimeState;
+  answer?: {
+    answerGroupId: string;
+    answerId: string;
+    pageIndex: number;
+    totalPages: number;
+    text: string;
+    output: string;
+  };
+  error?: string;
+};
+
+export type ManualRuntimeState = {
+  mode: InteractionMode;
+  sessionId: string;
+  transcriptCount: number;
+  lastGeneratedCursor: string | null;
+  pending: null | {
+    requestId: string;
+    kind: "generate" | "regenerate";
+    sourceRange: SourceRange;
+  };
+  currentAnswer: null | {
+    answerGroupId: string;
+    answerId: string;
+    pageIndex: number;
+    totalPages: number;
+    sourceRange: SourceRange;
+    outputDigest: string;
+  };
+  stateVersion: number;
 };
 
 export type SuggestionEchoMatch = {
@@ -267,6 +350,46 @@ function computeTelepromptDisplayDuration(display: TelepromptDisplay): number {
   );
 }
 
+function shortHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+function makeRuntimeId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function paginateManualAnswer(text: string): string[] {
+  const cleaned = String(text || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return [];
+
+  const sentences = cleaned.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g)
+    ?.map((item) => item.trim())
+    .filter(Boolean) ?? [cleaned];
+
+  const pages: string[] = [];
+  let current = "";
+  let currentWords = 0;
+
+  for (const sentence of sentences) {
+    const words = wordCountForEcho(sentence);
+    const next = current ? `${current} ${sentence}` : sentence;
+    if (
+      current
+      && (currentWords + words > MANUAL_PAGE_TARGET_WORDS || next.length > MANUAL_PAGE_MAX_CHARS)
+    ) {
+      pages.push(current.trim());
+      current = sentence;
+      currentWords = words;
+    } else {
+      current = next;
+      currentWords += words;
+    }
+  }
+
+  if (current.trim()) pages.push(current.trim());
+  return pages.length ? pages : [cleaned];
+}
+
 function isLikelyQuestionSuggestionPartialEcho(transcript: string, candidate: string, transcriptCoverage: number, candidateCoverage: number): boolean {
   if (!isQuestionLikeDisplayedCandidate(candidate)) return false;
 
@@ -396,6 +519,14 @@ export class MergeResponseHandler {
   private autoScenePendingKey: SceneBuiltinKey | null = null;
   private autoScenePendingCount: number = 0;
   private autoSceneLastSwitchAt: number = 0;
+  private interactionMode: InteractionMode;
+  private transcriptSegments: TranscriptSegment[] = [];
+  private transcriptSeq: number = 0;
+  private lastGeneratedCursor: string | null = null;
+  private pendingManualRequest: PendingManualRequest | null = null;
+  private currentManualAnswer: ManualAnswer | null = null;
+  private manualStateVersion: number = 0;
+  private manualActionResults: Map<string, { expiresAt: number; result: ManualActionResult }> = new Map();
   public frequency: 'low' | 'medium' | 'high';
   public outputLanguage: OutputLanguage;
 
@@ -409,6 +540,7 @@ export class MergeResponseHandler {
     locationManager: LocationManager,
     initialFrequency: 'low' | 'medium' | 'high' = 'high',
     initialOutputLanguage: OutputLanguage = "english",
+    initialInteractionMode: InteractionMode = "g1_auto",
   ) {
     this.session = session;
     this.userId = userId;
@@ -424,6 +556,7 @@ export class MergeResponseHandler {
     this.eventMemory = new EventMemoryManager(userId, this.sessionId);
     this.frequency = initialFrequency;
     this.outputLanguage = initialOutputLanguage;
+    this.interactionMode = initialInteractionMode;
   }
 
   /**
@@ -436,13 +569,13 @@ export class MergeResponseHandler {
       this.session.logger.info(`Corrected known ASR alias: "${originalText}" -> "${text}"`);
     }
 
-    if (this.isPausedForReading) {
+    if (this.isPausedForReading && this.interactionMode !== "g2_manual") {
       this.session.logger.info(`Manual pause active, ignoring transcript: "${text}"`);
       this.onStatus?.({ type: "processing_done", reason: "paused" });
       return;
     }
 
-    const suggestionEcho = !this.teleprompt.isActive()
+    const suggestionEcho = this.interactionMode === "g1_auto" && !this.teleprompt.isActive()
       ? this.getRecentDisplayedSuggestionEcho(text, timestamp)
       : null;
     if (suggestionEcho) {
@@ -455,15 +588,19 @@ export class MergeResponseHandler {
 
     this.cancelReadbackContinuation("new_transcript");
     const requestSeq = ++this.processingSeq;
-    const eventSnapshot = this.eventMemory.addTranscript(text, timestamp);
-    this.resetEventIdleTimer();
+    const { eventSnapshot } = this.commitTranscriptSegment(text, timestamp, reason);
 
-    // Add the transcript to conversation
-    this.conversation.push({
-      type: 'transcript',
-      text,
-      timestamp
-    });
+    if (this.interactionMode === "g2_manual") {
+      this.logManualTranscriptSample(text, timestamp, reason);
+      this.onStatus?.({
+        type: "manual_status",
+        reason: "transcript_committed",
+        state: this.getManualState(),
+      });
+      this.onStatus?.({ type: "processing_done", reason: "manual_transcript_committed" });
+      this.trimConversationHistory();
+      return;
+    }
 
     const telepromptResult = this.teleprompt.isActive()
       ? this.teleprompt.handleTranscript(text, timestamp, reason === "timeout" ? "timeout" : "final")
@@ -612,6 +749,7 @@ export class MergeResponseHandler {
   }
 
   handlePartialTranscript(text: string, timestamp: number): boolean {
+    if (this.interactionMode === "g2_manual") return false;
     if (this.isPausedForReading || this.teleprompt.isActive()) return false;
 
     const suggestionEcho = this.getRecentDisplayedSuggestionEcho(text, timestamp);
@@ -697,6 +835,55 @@ export class MergeResponseHandler {
       });
     } catch (error) {
       this.session.logger.error(`Failed to log conversation sample: ${error}`);
+    }
+  }
+
+  private commitTranscriptSegment(text: string, timestamp: number, reason: "isFinal" | "timeout"): {
+    segment: TranscriptSegment;
+    eventSnapshot: EventMemorySnapshot;
+  } {
+    const eventSnapshot = this.eventMemory.addTranscript(text, timestamp);
+    this.resetEventIdleTimer();
+
+    const segment: TranscriptSegment = {
+      id: `seg_${++this.transcriptSeq}`,
+      text,
+      timestamp,
+      reason,
+      createdAt: Date.now(),
+    };
+    this.transcriptSegments.push(segment);
+    if (this.transcriptSegments.length > MANUAL_MAX_SEGMENTS) {
+      const removable = this.transcriptSegments.length - MANUAL_MAX_SEGMENTS;
+      this.transcriptSegments.splice(0, removable);
+    }
+
+    this.conversation.push({
+      type: "transcript",
+      text,
+      timestamp,
+    });
+
+    return { segment, eventSnapshot };
+  }
+
+  private logManualTranscriptSample(text: string, timestamp: number, reason: "isFinal" | "timeout"): void {
+    try {
+      conversationLogger.createSample({
+        userId: this.userId,
+        sessionId: this.sessionId,
+        timestamp,
+        language: this.outputLanguage,
+        transcript: text,
+        aiReply: null,
+        actionType: "manual_transcript",
+        reasoning: `G2 manual mode committed transcript (${reason}) without automatic generation`,
+        model: null,
+        profileVersion: "g2-manual-v1",
+        retrievedSampleIds: [],
+      });
+    } catch (error) {
+      this.session.logger.error(`Failed to log manual transcript sample: ${error}`);
     }
   }
 
@@ -1090,8 +1277,433 @@ export class MergeResponseHandler {
     return this.isPausedForReading;
   }
 
+  getInteractionMode(): InteractionMode {
+    return this.interactionMode;
+  }
+
+  setInteractionMode(mode: InteractionMode): void {
+    if (this.interactionMode === mode) return;
+    this.interactionMode = mode;
+    this.cancelReadbackContinuation("interaction_mode_change");
+    if (mode === "g2_manual") {
+      this.teleprompt.cancel();
+      this.isPausedForReading = false;
+      this.pendingManualRequest = null;
+      this.currentManualAnswer = null;
+      this.lastGeneratedCursor = this.transcriptSegments.at(-1)?.id ?? this.lastGeneratedCursor;
+      if (this.displayTimer) {
+        clearTimeout(this.displayTimer);
+        this.displayTimer = null;
+      }
+      this.isDisplaying = false;
+      this.currentDisplayText = null;
+      this.currentDisplayExpiresAt = 0;
+      this.session.layouts.showTextWall("SayNext manual mode. Listening.", { durationMs: 2000 });
+    } else {
+      this.pendingManualRequest = null;
+      this.currentManualAnswer = null;
+      this.isDisplaying = false;
+      this.currentDisplayText = null;
+      this.currentDisplayExpiresAt = 0;
+      this.session.layouts.showTextWall("SayNext is listening.", { durationMs: 1500 });
+    }
+    this.bumpManualState();
+    this.onStatus?.({ type: "interaction_mode", mode, state: this.getManualState() });
+  }
+
+  getRuntimeSessionId(): string {
+    return this.sessionId;
+  }
+
+  getManualState(): ManualRuntimeState {
+    return {
+      mode: this.interactionMode,
+      sessionId: this.sessionId,
+      transcriptCount: this.transcriptSegments.length,
+      lastGeneratedCursor: this.lastGeneratedCursor,
+      pending: this.pendingManualRequest
+        ? {
+          requestId: this.pendingManualRequest.requestId,
+          kind: this.pendingManualRequest.kind,
+          sourceRange: this.pendingManualRequest.sourceRange,
+        }
+        : null,
+      currentAnswer: this.currentManualAnswer
+        ? {
+          answerGroupId: this.currentManualAnswer.answerGroupId,
+          answerId: this.currentManualAnswer.answerId,
+          pageIndex: this.currentManualAnswer.pageIndex,
+          totalPages: this.currentManualAnswer.pages.length,
+          sourceRange: this.currentManualAnswer.sourceRange,
+          outputDigest: shortHash(this.currentManualAnswer.output),
+        }
+        : null,
+      stateVersion: this.manualStateVersion,
+    };
+  }
+
+  async generateManualAnswer(clientEventId?: string): Promise<ManualActionResult> {
+    const cached = this.getCachedManualAction(clientEventId);
+    if (cached) return cached;
+
+    if (this.pendingManualRequest) {
+      return this.cacheManualAction(clientEventId, {
+        status: "busy",
+        sessionId: this.sessionId,
+        state: this.getManualState(),
+      });
+    }
+
+    const sourceRange = this.buildNewManualSourceRange();
+    if (!sourceRange) {
+      return this.cacheManualAction(clientEventId, {
+        status: "no_new_speech",
+        sessionId: this.sessionId,
+        state: this.getManualState(),
+      });
+    }
+
+    return this.runManualGeneration("generate", sourceRange, clientEventId);
+  }
+
+  async regenerateManualAnswer(clientEventId?: string): Promise<ManualActionResult> {
+    const cached = this.getCachedManualAction(clientEventId);
+    if (cached) return cached;
+
+    if (this.pendingManualRequest) {
+      return this.cacheManualAction(clientEventId, {
+        status: "busy",
+        sessionId: this.sessionId,
+        state: this.getManualState(),
+      });
+    }
+
+    if (!this.currentManualAnswer) {
+      return this.cacheManualAction(clientEventId, {
+        status: "no_current_answer",
+        sessionId: this.sessionId,
+        state: this.getManualState(),
+      });
+    }
+
+    return this.runManualGeneration("regenerate", this.currentManualAnswer.sourceRange, clientEventId);
+  }
+
+  pageManualAnswer(direction: "next" | "previous", clientEventId?: string): ManualActionResult {
+    const cached = this.getCachedManualAction(clientEventId);
+    if (cached) return cached;
+
+    if (!this.currentManualAnswer) {
+      return this.cacheManualAction(clientEventId, {
+        status: "no_current_answer",
+        sessionId: this.sessionId,
+        state: this.getManualState(),
+      });
+    }
+
+    const current = this.currentManualAnswer;
+    const nextIndex = direction === "next"
+      ? Math.min(current.pages.length - 1, current.pageIndex + 1)
+      : Math.max(0, current.pageIndex - 1);
+
+    if (nextIndex === current.pageIndex) {
+      return this.cacheManualAction(clientEventId, {
+        status: "noop",
+        sessionId: this.sessionId,
+        state: this.getManualState(),
+        answer: this.manualAnswerPayload(current),
+      });
+    }
+
+    current.pageIndex = nextIndex;
+    this.renderManualAnswer("manual_page");
+    return this.cacheManualAction(clientEventId, {
+      status: "ok",
+      sessionId: this.sessionId,
+      state: this.getManualState(),
+      answer: this.manualAnswerPayload(current),
+    });
+  }
+
+  clearManualAnswer(clientEventId?: string): ManualActionResult {
+    const cached = this.getCachedManualAction(clientEventId);
+    if (cached) return cached;
+
+    if (this.pendingManualRequest) {
+      this.pendingManualRequest.cancelled = true;
+      this.pendingManualRequest = null;
+    }
+    this.currentManualAnswer = null;
+    this.isDisplaying = false;
+    this.currentDisplayText = null;
+    this.currentDisplayExpiresAt = 0;
+    this.cancelReadbackContinuation("manual_clear");
+    if (this.displayTimer) {
+      clearTimeout(this.displayTimer);
+      this.displayTimer = null;
+    }
+    if (this.pausedDisplayRefreshTimer) {
+      clearTimeout(this.pausedDisplayRefreshTimer);
+      this.pausedDisplayRefreshTimer = null;
+    }
+    this.bumpManualState();
+    this.session.layouts.clearView();
+    this.onStatus?.({ type: "manual_cleared", state: this.getManualState() });
+
+    return this.cacheManualAction(clientEventId, {
+      status: "cleared",
+      sessionId: this.sessionId,
+      state: this.getManualState(),
+    });
+  }
+
   isTelepromptActive(): boolean {
     return this.teleprompt.isActive();
+  }
+
+  private buildNewManualSourceRange(): SourceRange | null {
+    let startIndex = 0;
+    if (this.lastGeneratedCursor) {
+      const cursorIndex = this.transcriptSegments.findIndex((segment) => segment.id === this.lastGeneratedCursor);
+      startIndex = cursorIndex >= 0 ? cursorIndex + 1 : 0;
+    }
+    const segments = this.transcriptSegments.slice(startIndex);
+    if (!segments.length) return null;
+
+    const text = segments.map((segment) => segment.text).join("\n");
+    return {
+      fromExclusive: this.lastGeneratedCursor,
+      toInclusive: segments[segments.length - 1].id,
+      segmentIds: segments.map((segment) => segment.id),
+      textDigest: shortHash(text),
+    };
+  }
+
+  private segmentsForSourceRange(sourceRange: SourceRange): TranscriptSegment[] {
+    const wanted = new Set(sourceRange.segmentIds);
+    return this.transcriptSegments.filter((segment) => wanted.has(segment.id));
+  }
+
+  private textForSourceRange(sourceRange: SourceRange): string {
+    return this.segmentsForSourceRange(sourceRange).map((segment) => segment.text).join("\n").trim();
+  }
+
+  private async runManualGeneration(
+    kind: "generate" | "regenerate",
+    sourceRange: SourceRange,
+    clientEventId?: string,
+  ): Promise<ManualActionResult> {
+    const requestId = makeRuntimeId("manual_req");
+    const pending: PendingManualRequest = {
+      requestId,
+      kind,
+      sourceRange,
+      cancelled: false,
+    };
+    this.pendingManualRequest = pending;
+    this.bumpManualState();
+    this.onStatus?.({ type: "manual_generating", requestId, kind, sourceRange, state: this.getManualState() });
+    if (!this.currentManualAnswer) {
+      this.session.layouts.showTextWall("Generating...");
+    }
+
+    try {
+      const segments = this.segmentsForSourceRange(sourceRange);
+      const sourceText = this.textForSourceRange(sourceRange);
+      if (!segments.length || !sourceText) {
+        if (this.pendingManualRequest?.requestId === requestId) {
+          this.pendingManualRequest = null;
+          this.bumpManualState();
+        }
+        return this.cacheManualAction(clientEventId, {
+          status: "no_new_speech",
+          sessionId: this.sessionId,
+          state: this.getManualState(),
+        });
+      }
+
+      const latestText = segments[segments.length - 1].text;
+      const timestamp = Date.now();
+      const context: Conversation = segments.map((segment) => ({
+        type: "transcript",
+        text: segment.text,
+        timestamp: segment.timestamp,
+      }));
+      const eventSnapshot = this.eventMemory.getSnapshot();
+      const activeSceneProfilePrompt = this.resolveActiveSceneProfilePrompt(
+        latestText,
+        timestamp,
+        segments.map((segment) => segment.text),
+      );
+      const promptMode = detectPromptMode(latestText, eventSnapshot);
+      const isClassroomMode = promptMode === "classroom";
+      const telepromptNeed = "none";
+      const prenoteQuery = [
+        sourceText,
+        eventSnapshot.title,
+        eventSnapshot.summary,
+        activeSceneProfilePrompt,
+      ].filter(Boolean).join("\n");
+      const activePrenoteContext = await conversationLogger.getActivePrenoteRuntimeContextForQuery(
+        this.userId,
+        prenoteQuery,
+        telepromptNeed === "none" ? "fast" : "semantic",
+      );
+      const relevantPersonalMemoryContext = isClassroomMode
+        ? ""
+        : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, sourceText, 3);
+
+      const response = await processConversation(
+        context,
+        this.frequency,
+        eventSnapshot,
+        this.outputLanguage,
+        activePrenoteContext,
+        activeSceneProfilePrompt,
+        relevantPersonalMemoryContext,
+        {
+          openAiConversationSession: this.openAiConversationSession,
+          transcriptCommitReason: "final",
+          responseStyle: "manual",
+        },
+      );
+
+      if (pending.cancelled || this.pendingManualRequest?.requestId !== requestId) {
+        return {
+          status: "noop",
+          sessionId: this.sessionId,
+          state: this.getManualState(),
+        };
+      }
+
+      this.pendingManualRequest = null;
+      if (response.type !== Action.INSIGHT) {
+        this.bumpManualState();
+        const result: ManualActionResult = {
+          status: "error",
+          sessionId: this.sessionId,
+          state: this.getManualState(),
+          error: `Manual generation returned ${response.type}`,
+        };
+        this.onStatus?.({ type: "manual_error", requestId, error: result.error, state: result.state });
+        return this.cacheManualAction(clientEventId, result);
+      }
+
+      const answerGroupId = kind === "regenerate" && this.currentManualAnswer
+        ? this.currentManualAnswer.answerGroupId
+        : makeRuntimeId("manual_group");
+      const answer: ManualAnswer = {
+        answerGroupId,
+        answerId: makeRuntimeId("manual_answer"),
+        requestId,
+        sourceRange,
+        output: response.output,
+        pages: paginateManualAnswer(response.output),
+        pageIndex: 0,
+        createdAt: timestamp,
+      };
+
+      this.currentManualAnswer = answer;
+      if (kind === "generate") {
+        this.lastGeneratedCursor = sourceRange.toInclusive;
+      }
+      this.conversation.push(response);
+      this.eventMemory.addResponse(response);
+      this.logConversationSample(sourceText, timestamp, response);
+      this.renderManualAnswer("manual_answer");
+
+      const result: ManualActionResult = {
+        status: "ok",
+        sessionId: this.sessionId,
+        state: this.getManualState(),
+        answer: this.manualAnswerPayload(answer),
+      };
+      this.onStatus?.({ type: "manual_answer", requestId, state: result.state, answer: result.answer });
+      return this.cacheManualAction(clientEventId, result);
+    } catch (error) {
+      if (this.pendingManualRequest?.requestId === requestId) {
+        this.pendingManualRequest = null;
+      }
+      this.bumpManualState();
+      const result: ManualActionResult = {
+        status: "error",
+        sessionId: this.sessionId,
+        state: this.getManualState(),
+        error: error instanceof Error ? error.message : String(error),
+      };
+      this.onStatus?.({ type: "manual_error", requestId, error: result.error, state: result.state });
+      return this.cacheManualAction(clientEventId, result);
+    }
+  }
+
+  private manualAnswerPayload(answer: ManualAnswer): NonNullable<ManualActionResult["answer"]> {
+    return {
+      answerGroupId: answer.answerGroupId,
+      answerId: answer.answerId,
+      pageIndex: answer.pageIndex,
+      totalPages: answer.pages.length,
+      text: answer.pages[answer.pageIndex] || answer.output,
+      output: answer.output,
+    };
+  }
+
+  private renderManualAnswer(eventType: "manual_answer" | "manual_page"): void {
+    if (!this.currentManualAnswer) return;
+    this.cancelReadbackContinuation(eventType);
+    if (this.displayTimer) {
+      clearTimeout(this.displayTimer);
+      this.displayTimer = null;
+    }
+    const answer = this.currentManualAnswer;
+    const pageText = answer.pages[answer.pageIndex] || answer.output;
+    const displayText = answer.pages.length > 1
+      ? `${pageText}\n${answer.pageIndex + 1}/${answer.pages.length}`
+      : pageText;
+    this.isDisplaying = true;
+    this.currentDisplayText = displayText;
+    this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
+    this.lastInsightText = displayText;
+    this.bumpManualState();
+    this.session.layouts.showTextWall(displayText);
+    if (this.onInsight) {
+      this.onInsight({
+        text: displayText,
+        timestamp: Date.now(),
+        agentType: "Manual",
+        reasoning: eventType,
+      });
+    }
+    this.onStatus?.({ type: eventType, state: this.getManualState(), answer: this.manualAnswerPayload(answer) });
+  }
+
+  private bumpManualState(): void {
+    this.manualStateVersion += 1;
+  }
+
+  private getCachedManualAction(clientEventId?: string): ManualActionResult | null {
+    if (!clientEventId) return null;
+    this.cleanupManualActionCache();
+    return this.manualActionResults.get(`${this.sessionId}:${clientEventId}`)?.result ?? null;
+  }
+
+  private cacheManualAction(clientEventId: string | undefined, result: ManualActionResult): ManualActionResult {
+    if (clientEventId) {
+      this.manualActionResults.set(`${this.sessionId}:${clientEventId}`, {
+        expiresAt: Date.now() + MANUAL_ACTION_TTL_MS,
+        result,
+      });
+      this.cleanupManualActionCache();
+    }
+    return result;
+  }
+
+  private cleanupManualActionCache(): void {
+    const now = Date.now();
+    for (const [key, value] of this.manualActionResults.entries()) {
+      if (value.expiresAt <= now) {
+        this.manualActionResults.delete(key);
+      }
+    }
   }
 
   private startDisplayReleaseTimer(durationMs: number): void {
@@ -1135,6 +1747,13 @@ export class MergeResponseHandler {
       this.eventIdleTimer = null;
     }
     this.conversation = [];
+    this.transcriptSegments = [];
+    this.transcriptSeq = 0;
+    this.lastGeneratedCursor = null;
+    this.pendingManualRequest = null;
+    this.currentManualAnswer = null;
+    this.manualActionResults.clear();
+    this.bumpManualState();
     this.openAiConversationSession.reset();
   }
 
@@ -1152,6 +1771,13 @@ export class MergeResponseHandler {
     this.currentDisplayExpiresAt = 0;
     this.isDisplaying = false;
     this.isPausedForReading = false;
+    this.transcriptSegments = [];
+    this.transcriptSeq = 0;
+    this.lastGeneratedCursor = null;
+    this.pendingManualRequest = null;
+    this.currentManualAnswer = null;
+    this.manualActionResults.clear();
+    this.bumpManualState();
 
     this.eventMemory.closeActiveEvent();
     if (this.eventIdleTimer) {
@@ -1169,13 +1795,20 @@ export class MergeResponseHandler {
     this.cancelReadbackContinuation("runtime_reset");
 
     this.onStatus?.({ type: "processing_done", reason: "manual_reset" });
-    this.session.layouts.showTextWall("SayNext is listening.", { durationMs: 1500 });
+    this.session.layouts.showTextWall(
+      this.interactionMode === "g2_manual" ? "SayNext manual mode. Listening." : "SayNext is listening.",
+      { durationMs: 1500 },
+    );
     this.session.logger.info("Current SayNext runtime state reset");
   }
 
   close(): void {
     this.cancelReadbackContinuation("close");
     this.teleprompt.cancel();
+    if (this.pendingManualRequest) {
+      this.pendingManualRequest.cancelled = true;
+      this.pendingManualRequest = null;
+    }
     this.openAiConversationSession.reset();
     this.eventMemory.closeActiveEvent();
     if (this.eventIdleTimer) {

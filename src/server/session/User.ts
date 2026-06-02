@@ -1,17 +1,49 @@
 import { AppSession } from "@mentra/sdk";
 import { InsightHistoryManager, type InsightEntry } from "../manager/InsightHistoryManager";
 import { LocationManager } from "../manager/LocationManager";
-import { MergeResponseHandler } from "../mastra/agents";
+import {
+  MergeResponseHandler,
+  type InteractionMode,
+  type ManualActionResult,
+  type ManualRuntimeState,
+} from "../mastra/agents";
 import type { OutputLanguage } from "../mastra/agents/initial-agent";
 import { UTTERANCE_TIMEOUT_MS } from "../config";
 
 const MAX_EVENT_QUEUE_SIZE = 100;
+const SINGLE_TAP_DELAY_MS = 280;
 const LOW_VALUE_UTTERANCE_PATTERN = /^(and|so|then|but|or|uh|um|erm|hmm|mm|ah|oh|okay|ok|right|yeah|yes|no|嗯|呃|啊|哦|噢|唔|然后|所以)[\s.,!?。！？]*$/i;
 
 function isLowValueUtterance(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) return true;
   return LOW_VALUE_UTTERANCE_PATTERN.test(normalized);
+}
+
+function normalizeInteractionMode(value: unknown, fallback: InteractionMode = "g2_manual"): InteractionMode {
+  if (value === "g1_auto" || value === "g2_manual") return value;
+  return fallback;
+}
+
+function inactiveManualState(mode: InteractionMode, sessionId = ""): ManualRuntimeState {
+  return {
+    mode,
+    sessionId,
+    transcriptCount: 0,
+    lastGeneratedCursor: null,
+    pending: null,
+    currentAnswer: null,
+    stateVersion: 0,
+  };
+}
+
+function inactiveManualResult(mode: InteractionMode, error = "No active session"): ManualActionResult {
+  return {
+    status: "error",
+    sessionId: "",
+    state: inactiveManualState(mode),
+    error,
+  };
 }
 
 /**
@@ -35,6 +67,7 @@ export class User {
   /** Transcription buffering state */
   private currentUtteranceBuffer: string = "";
   private utteranceTimer: NodeJS.Timeout | null = null;
+  private pendingSingleTapTimer: NodeJS.Timeout | null = null;
   private lastProcessedUtterance: string = "";
   private lastProcessedAt: number = 0;
   private lastProcessedReason: 'isFinal' | 'timeout' | null = null;
@@ -86,6 +119,7 @@ export class User {
     // Load settings from SimpleStorage synchronously before setting up listeners
     let frequency: 'low' | 'medium' | 'high' = 'high';
     let outputLanguage: OutputLanguage = 'english';
+    let interactionMode: InteractionMode = normalizeInteractionMode(process.env.SAYNEXT_INTERACTION_MODE);
     try {
       const value = await session.simpleStorage.get('insight_frequency');
       frequency = (value as 'low' | 'medium' | 'high') || 'high';
@@ -100,15 +134,25 @@ export class User {
     } catch (err) {
       session.logger.error(`Failed to load output language setting: ${err}`);
     }
+    try {
+      const value = await session.simpleStorage.get('interaction_mode');
+      interactionMode = normalizeInteractionMode(value ?? interactionMode);
+      session.logger.info(`Initial interaction mode: ${interactionMode}`);
+    } catch (err) {
+      session.logger.error(`Failed to load interaction mode setting: ${err}`);
+    }
 
     // Create the response handler BEFORE setting up transcription listener
-    this.responseHandler = new MergeResponseHandler(session, this.userId, this.location, frequency, outputLanguage);
+    this.responseHandler = new MergeResponseHandler(session, this.userId, this.location, frequency, outputLanguage, interactionMode);
     this.wireInsightCallback();
 
     // Set up transcription listener — responseHandler is guaranteed to exist
     this.setupTranscriptionListener(session);
 
-    session.layouts.showTextWall("SayNext is listening.", { durationMs: 2000 });
+    session.layouts.showTextWall(
+      interactionMode === "g2_manual" ? "SayNext manual mode. Listening." : "SayNext is listening.",
+      { durationMs: 2000 },
+    );
 
     // Broadcast session started
     this.broadcastInsightEvent({ type: 'session_started' });
@@ -251,6 +295,87 @@ export class User {
     if (typeof unsubPermissionError === 'function') {
       this.eventUnsubscribers.push(unsubPermissionError);
     }
+
+    this.setupManualGestureListener(session);
+  }
+
+  /** Wire G2/R1 touch gestures to manual-first controls when available. */
+  private setupManualGestureListener(session: AppSession): void {
+    const events = session.events as any;
+    if (typeof events.onTouchEvent !== "function") return;
+
+    const unsubscribe = events.onTouchEvent((event: any) => {
+      const gesture = String(
+        event?.gesture
+        || event?.type
+        || event?.touchType
+        || event?.action
+        || event?.eventType
+        || "",
+      ).toLowerCase();
+
+      if (!gesture) return;
+      void this.handleManualGesture(gesture);
+    });
+
+    if (typeof unsubscribe === "function") {
+      this.eventUnsubscribers.push(unsubscribe);
+    }
+  }
+
+  private async handleManualGesture(gesture: string): Promise<void> {
+    if (this.getInteractionMode() !== "g2_manual") return;
+
+    const eventId = `gesture:${gesture}:${Date.now()}`;
+    this.broadcastInsightEvent({ type: 'manual_gesture', gesture });
+
+    if (gesture.includes("hold") || gesture.includes("long")) {
+      this.cancelPendingSingleTap();
+      const result = this.clearManualAnswer(eventId);
+      this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_clear_${result.status}` });
+      return;
+    }
+
+    if (gesture.includes("double")) {
+      this.cancelPendingSingleTap();
+      this.broadcastInsightEvent({ type: 'processing' });
+      const result = await this.regenerateManualAnswer(eventId);
+      this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_${result.status}` });
+      return;
+    }
+
+    if (gesture.includes("single") || gesture.includes("tap")) {
+      this.cancelPendingSingleTap();
+      this.pendingSingleTapTimer = setTimeout(() => {
+        this.pendingSingleTapTimer = null;
+        this.broadcastInsightEvent({ type: 'processing' });
+        void this.generateManualAnswer(eventId).then((result) => {
+          this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_${result.status}` });
+        });
+      }, SINGLE_TAP_DELAY_MS);
+      this.broadcastInsightEvent({ type: 'manual_gesture_pending', gesture, delayMs: SINGLE_TAP_DELAY_MS });
+      return;
+    }
+
+    if (gesture.includes("down") || gesture.includes("next")) {
+      const result = this.pageManualAnswer("next", eventId);
+      this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_page_${result.status}` });
+      return;
+    }
+
+    if (gesture.includes("up") || gesture.includes("previous") || gesture.includes("prev")) {
+      const result = this.pageManualAnswer("previous", eventId);
+      this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_page_${result.status}` });
+      return;
+    }
+
+  }
+
+  private cancelPendingSingleTap(): void {
+    if (!this.pendingSingleTapTimer) return;
+    clearTimeout(this.pendingSingleTapTimer);
+    this.pendingSingleTapTimer = null;
+    this.broadcastInsightEvent({ type: 'manual_gesture_cancelled', gesture: 'single_tap' });
   }
 
   /** Update frequency setting */
@@ -289,6 +414,61 @@ export class User {
   /** Get current output language */
   getOutputLanguage(): OutputLanguage {
     return this.responseHandler?.outputLanguage || 'english';
+  }
+
+  /** Update G1 auto vs G2 manual interaction mode. */
+  setInteractionMode(mode: InteractionMode): void {
+    if (mode !== "g2_manual") {
+      this.cancelPendingSingleTap();
+    }
+    this.responseHandler?.setInteractionMode(mode);
+    console.log(`[User] Interaction mode updated to ${mode} for ${this.userId}`);
+
+    if (this.appSession) {
+      this.appSession.simpleStorage.set('interaction_mode', mode).catch((err) => {
+        console.error(`[User] Failed to save interaction mode to SimpleStorage: ${err}`);
+      });
+    }
+  }
+
+  /** Get current interaction mode */
+  getInteractionMode(): InteractionMode {
+    return this.responseHandler?.getInteractionMode() || normalizeInteractionMode(process.env.SAYNEXT_INTERACTION_MODE);
+  }
+
+  /** Get the active runtime session id, if glasses are connected. */
+  getRuntimeSessionId(): string | null {
+    return this.responseHandler?.getRuntimeSessionId() || null;
+  }
+
+  /** Get current G2 manual runtime state. */
+  getManualState(): ManualRuntimeState {
+    return this.responseHandler?.getManualState()
+      || inactiveManualState(this.getInteractionMode(), this.getRuntimeSessionId() || "");
+  }
+
+  /** Generate from committed speech since the last successful manual generation. */
+  generateManualAnswer(clientEventId?: string): Promise<ManualActionResult> {
+    return this.responseHandler?.generateManualAnswer(clientEventId)
+      || Promise.resolve(inactiveManualResult(this.getInteractionMode()));
+  }
+
+  /** Regenerate an alternate answer from the same previous source range. */
+  regenerateManualAnswer(clientEventId?: string): Promise<ManualActionResult> {
+    return this.responseHandler?.regenerateManualAnswer(clientEventId)
+      || Promise.resolve(inactiveManualResult(this.getInteractionMode()));
+  }
+
+  /** Page through the current manual answer. */
+  pageManualAnswer(direction: "next" | "previous", clientEventId?: string): ManualActionResult {
+    return this.responseHandler?.pageManualAnswer(direction, clientEventId)
+      || inactiveManualResult(this.getInteractionMode());
+  }
+
+  /** Clear the pinned G2 answer and keep listening. */
+  clearManualAnswer(clientEventId?: string): ManualActionResult {
+    return this.responseHandler?.clearManualAnswer(clientEventId)
+      || inactiveManualResult(this.getInteractionMode());
   }
 
   /** Pause AI processing while the user reads the current suggestion */
@@ -340,6 +520,7 @@ export class User {
       clearTimeout(this.utteranceTimer);
       this.utteranceTimer = null;
     }
+    this.cancelPendingSingleTap();
     this.unsubscribeEventListeners();
     this.currentUtteranceBuffer = "";
     this.responseHandler?.close();
@@ -359,6 +540,7 @@ export class User {
       clearTimeout(this.utteranceTimer);
       this.utteranceTimer = null;
     }
+    this.cancelPendingSingleTap();
 
     this.currentUtteranceBuffer = "";
     this.lastProcessedUtterance = "";
@@ -413,6 +595,7 @@ export class User {
       clearTimeout(this.utteranceTimer);
       this.utteranceTimer = null;
     }
+    this.cancelPendingSingleTap();
     this.unsubscribeEventListeners();
     this.responseHandler?.close();
     this.insightHistory.destroy();

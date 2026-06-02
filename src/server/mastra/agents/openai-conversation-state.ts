@@ -11,6 +11,7 @@ export interface OpenAiConversationGenerateOptions {
   latestTranscript: string;
   outputLanguage?: string;
   promptMode?: string;
+  taskHint?: string;
   preparedNote?: string;
   timeoutMs: number;
 }
@@ -47,6 +48,7 @@ export interface OpenAiConversationCreatePayload {
 export interface OpenAiConversationInputOptions {
   outputLanguage?: string;
   promptMode?: string;
+  taskHint?: string;
   preparedNote?: string;
 }
 
@@ -68,6 +70,7 @@ export function buildOpenAiConversationInput(latestTranscript: string, options: 
   const lines = [
     options.outputLanguage?.trim() ? `Language: ${options.outputLanguage.trim()}` : "",
     options.promptMode?.trim() ? `Mode: ${options.promptMode.trim()}` : "",
+    options.taskHint?.trim() ? `Task: ${options.taskHint.trim()}` : "",
     options.preparedNote?.trim() ? `Prepared note:\n${options.preparedNote.trim()}` : "",
     `Transcript: ${latestTranscript.trim()}`,
   ].filter(Boolean);
@@ -193,6 +196,7 @@ export class OpenAiConversationSession {
       inputOptions: {
         outputLanguage: options.outputLanguage,
         promptMode: options.promptMode,
+        taskHint: options.taskHint,
         preparedNote: options.preparedNote,
       },
     });

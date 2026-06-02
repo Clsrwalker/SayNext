@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { getHealth } from "../api/health";
 import { insightStream } from "../api/insights";
 import { getSettings, updateSettings } from "../api/settings";
+import { clearManual, generateManual, getManualState, pageManual, regenerateManual } from "../api/manual";
 import { advanceTeleprompt, cancelTeleprompt, resetCurrentSession, rewindTeleprompt } from "../api/session";
 import { listConversationEvents, listConversationSamples, updateConversationSample } from "../api/conversation-samples";
 import {
@@ -52,6 +53,11 @@ api.post("/session/reset", resetCurrentSession);
 api.post("/teleprompt/next", advanceTeleprompt);
 api.post("/teleprompt/previous", rewindTeleprompt);
 api.post("/teleprompt/cancel", cancelTeleprompt);
+api.get("/manual/state", getManualState);
+api.post("/manual/generate", generateManual);
+api.post("/manual/regenerate", regenerateManual);
+api.post("/manual/page", pageManual);
+api.post("/manual/clear", clearManual);
 
 // Conversation samples for rating and future personalization datasets
 api.get("/conversation-samples", listConversationSamples);
