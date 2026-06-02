@@ -70,7 +70,7 @@ export const replaySayNextApi = async (c: Context) => {
     const relevantPersonalMemoryContext =
       typeof body.relevantPersonalMemoryContext === "string"
         ? body.relevantPersonalMemoryContext
-        : conversationLogger.getRelevantPersonalMemoryContext(userId, transcripts.slice(-4).join("\n"), 4);
+        : await conversationLogger.getRelevantPersonalMemoryContextAsync(userId, transcripts.slice(-4).join("\n"), 4);
 
     const immediateDecision = getImmediateDecision(transcript, timestamp, outputLanguage, {
       previousTranscriptTexts,

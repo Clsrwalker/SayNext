@@ -1,5 +1,49 @@
 import { expect, test } from "bun:test";
-import { conversationLogger } from "../data/conversation-logger";
+import {
+  conversationLogger,
+  createPersonalMemoryRetrievalDebug,
+  packPersonalMemoryContextForTest,
+  type PersonalMemorySearchResult,
+} from "../data/conversation-logger";
+
+function memorySearchFixture(params: {
+  id: number;
+  title: string;
+  sourceRef: string;
+  keywords: string[];
+  content: string;
+  usageRule: string;
+  score?: number;
+}): PersonalMemorySearchResult {
+  const now = new Date().toISOString();
+  return {
+    id: params.id,
+    userId: "test-user",
+    title: params.title,
+    category: "technical_projects",
+    sensitivity: "low",
+    content: params.content,
+    usageRule: params.usageRule,
+    keywords: params.keywords,
+    embedding: [],
+    embeddingProvider: "openai",
+    embeddingModel: "text-embedding-3-small",
+    embeddingDimensions: null,
+    embeddingInputHash: "",
+    embeddingInputVersion: "test",
+    embeddingUpdatedAt: now,
+    embeddingStatus: "ready",
+    embeddingError: "",
+    status: "active",
+    source: "import",
+    sourceRef: params.sourceRef,
+    contentHash: "",
+    createdAt: now,
+    updatedAt: now,
+    score: params.score ?? 1,
+    keywordScore: 0,
+  };
+}
 
 test("programming language queries prefer technical profile over spoken-language memory", () => {
   const userId = `test-programming-language-profile-${Date.now()}`;
@@ -47,7 +91,7 @@ test("programming language queries prefer technical profile over spoken-language
   }
 });
 
-test("cloud experience queries prefer JobLens and ElderAlbum over SayNext-style projects", () => {
+test("cloud experience queries prefer JobLens and ElderAlbum over non-cloud assistant projects", () => {
   const userId = `test-cloud-project-profile-${Date.now()}`;
   const createdIds: number[] = [];
 
@@ -79,19 +123,19 @@ test("cloud experience queries prefer JobLens and ElderAlbum over SayNext-style 
   });
   if (elder) createdIds.push(elder.id);
 
-  const saynext = conversationLogger.createPersonalMemory({
+  const assistantProject = conversationLogger.createPersonalMemory({
     userId,
-    title: "Hybrid Search Memory Assistant",
+    title: "Conversation support assistant",
     category: "technical_projects",
     sensitivity: "low",
     source: "import",
-    sourceRef: "redacted-project:ai-context-engine-hybrid-search",
+    sourceRef: "redacted-project:conversation-support-assistant",
     upsertBySource: true,
     keywords: ["hybrid search", "memory", "conversation assistant", "project", "cloud"],
-    content: "Hybrid Search Memory Assistant is a conversation support project, not the preferred cloud project example.",
+    content: "This conversation support assistant is an AI context project, not the preferred cloud project example.",
     usageRule: "Use only when asked about the AI context engine or conversation assistant.",
   });
-  if (saynext) createdIds.push(saynext.id);
+  if (assistantProject) createdIds.push(assistantProject.id);
 
   try {
     conversationLogger.rebuildPersonalMemoryFts(userId);
@@ -101,7 +145,14 @@ test("cloud experience queries prefer JobLens and ElderAlbum over SayNext-style 
 
     expect(refs[0]).toBe("doc:joblens:architecture-aws");
     expect(refs).toContain("doc:elderalbum:aws-architecture-deployment");
-    expect(refs).not.toContain("redacted-project:ai-context-engine-hybrid-search");
+    expect(refs).not.toContain("redacted-project:conversation-support-assistant");
+
+    const debug = createPersonalMemoryRetrievalDebug("Which project should I talk about for cloud experience?");
+    conversationLogger.searchPersonalMemoriesHybrid(userId, debug.query, 3, debug);
+    const assistantCandidate = debug.candidates.find((candidate) => candidate.sourceRef === "redacted-project:conversation-support-assistant");
+    expect(assistantCandidate?.included).toBe(false);
+    expect(assistantCandidate?.softPenalty).toBeLessThan(0);
+    expect(assistantCandidate?.reasons.some((reason) => reason.startsWith("soft_penalty:cloud_project_question_prefers_cloud_project"))).toBe(true);
   } finally {
     for (const id of createdIds) {
       conversationLogger.deletePersonalMemory(userId, id);
@@ -155,21 +206,21 @@ test("JobLens ASR aliases still retrieve JobLens cloud memory", () => {
   }
 });
 
-test("hybrid retrieval design questions prefer Hybrid Search Memory Assistant memory", () => {
+test("project retrieval design questions prefer matching project memory", () => {
   const userId = `test-hybrid-retrieval-profile-${Date.now()}`;
   const createdIds: number[] = [];
 
   const projectMemory = conversationLogger.createPersonalMemory({
     userId,
-    title: "Hybrid Search Memory Assistant goal and architecture",
+    title: "JobLens resume matching retrieval design",
     category: "project_public_framing",
     sensitivity: "medium",
     source: "import",
-    sourceRef: "xiang-update:2026-05-18:hybrid-search-memory-assistant-goal-architecture",
+    sourceRef: "doc:joblens:resume-matching-retrieval-design",
     upsertBySource: true,
-    keywords: ["hybrid search", "retrieval design", "memory gating", "input token reduction", "SQLite FTS5", "BM25"],
-    content: "Hybrid Search Memory Assistant uses SQLite FTS5, local hashed vectors, keyword overlap, intent boosts, sensitivity filters, and prenote retrieval to send less but better context into the LLM.",
-    usageRule: "Use for hybrid retrieval design, memory gating, and input token reduction questions.",
+    keywords: ["JobLens", "resume matching", "retrieval design", "job matching", "ranking", "trade-off"],
+    content: "JobLens uses resume and job-posting signals to retrieve and rank matching opportunities. The trade-off is balancing explainable filters with flexible matching quality.",
+    usageRule: "Use for JobLens resume matching retrieval design and trade-off questions.",
   });
   if (projectMemory) createdIds.push(projectMemory.id);
 
@@ -190,10 +241,58 @@ test("hybrid retrieval design questions prefer Hybrid Search Memory Assistant me
   try {
     conversationLogger.rebuildPersonalMemoryFts(userId);
     const refs = conversationLogger
-      .searchPersonalMemoriesHybrid(userId, "What was the trade-off in your hybrid retrieval design?", 3)
+      .searchPersonalMemoriesHybrid(userId, "What was the trade-off in your JobLens resume matching retrieval design?", 3)
       .map((memory) => memory.sourceRef);
 
-    expect(refs[0]).toBe("xiang-update:2026-05-18:hybrid-search-memory-assistant-goal-architecture");
+    expect(refs[0]).toBe("doc:joblens:resume-matching-retrieval-design");
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+  }
+});
+
+test("named project queries prefer canonical project memory over generic study memories", () => {
+  const userId = `test-study-session-project-${Date.now()}`;
+  const createdIds: number[] = [];
+
+  const project = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Project Study Session Tracker - architecture and data flow",
+    category: "technical_projects",
+    sensitivity: "low",
+    source: "import",
+    sourceRef: "doc:study-session-tracker:architecture-data-flow",
+    upsertBySource: true,
+    keywords: ["Study Session Tracker", "study timer", "Firebase", "Firestore", "dashboard"],
+    content: "Study Session Tracker uses Firebase Authentication, Firestore, a study timer, dashboard, reminders, tasks, and calendar-style planning. The data flow is user login, timer/task updates, Firestore writes, then dashboard aggregation.",
+    usageRule: "Use for Study Session Tracker architecture and data flow questions.",
+  });
+  if (project) createdIds.push(project.id);
+
+  const genericStudy = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Xiang early study avoidance and academic turnaround",
+    category: "learning_style",
+    sensitivity: "medium",
+    source: "manual",
+    sourceRef: "xiang-update:2026-05-18:study-avoidance-turnaround",
+    upsertBySource: true,
+    keywords: ["study", "student", "high school", "academic turnaround"],
+    content: "Xiang did not like studying much in middle school and high school, then improved after coming to Canada.",
+    usageRule: "Use for personal questions about study habits or academic turnaround.",
+  });
+  if (genericStudy) createdIds.push(genericStudy.id);
+
+  try {
+    conversationLogger.rebuildPersonalMemoryFts(userId);
+    const results = conversationLogger.searchPersonalMemoriesHybrid(
+      userId,
+      "Can you explain Study Session Tracker architecture and data flow?",
+      2,
+    );
+
+    expect(results[0]?.sourceRef).toBe("doc:study-session-tracker:architecture-data-flow");
   } finally {
     for (const id of createdIds) {
       conversationLogger.deletePersonalMemory(userId, id);
@@ -306,6 +405,435 @@ test("React Native parking questions do not get pulled toward AI Meeting Monitor
       .map((memory) => memory.sourceRef);
 
     expect(refs[0]).toBe("doc:dalparkaid:overview-problem");
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+  }
+});
+
+test("personal memory search debug traces candidates without private content", () => {
+  const userId = `test-memory-debug-trace-${Date.now()}`;
+  const createdIds: number[] = [];
+
+  const joblens = conversationLogger.createPersonalMemory({
+    userId,
+    title: "JobLens retrieval debug memory",
+    category: "technical_projects",
+    sensitivity: "low",
+    source: "import",
+    sourceRef: "doc:joblens:retrieval-debug",
+    upsertBySource: true,
+    keywords: ["JobLens", "resume matching", "retrieval debug", "debug trace", "ranking"],
+    content: "JobLens has a retrieval debug trace for resume matching and ranking behavior.",
+    usageRule: "Use for JobLens retrieval debug questions.",
+  });
+  if (joblens) createdIds.push(joblens.id);
+
+  const privateMemory = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Sensitive unrelated private marker",
+    category: "health_private",
+    sensitivity: "high",
+    source: "manual",
+    sourceRef: "test:sensitive-private-marker",
+    upsertBySource: true,
+    keywords: ["private marker"],
+    content: "VERY_PRIVATE_DEBUG_TRACE_CONTENT_SHOULD_NOT_APPEAR",
+    usageRule: "Do not use unless directly requested.",
+  });
+  if (privateMemory) createdIds.push(privateMemory.id);
+
+  try {
+    conversationLogger.rebuildPersonalMemoryFts(userId);
+    const query = "What was the trade-off in your JobLens resume matching retrieval debug design?";
+    const debug = createPersonalMemoryRetrievalDebug(query);
+    const results = conversationLogger.searchPersonalMemoriesHybrid(userId, query, 3, debug);
+
+    expect(results[0]?.sourceRef).toBe("doc:joblens:retrieval-debug");
+
+    const included = debug.candidates.find((candidate) => candidate.sourceRef === "doc:joblens:retrieval-debug");
+    expect(included?.included).toBe(true);
+    expect(included?.canonicalProjectId).toBe("joblens");
+    expect(included?.queryIntent).toBe("memory_personalization");
+    expect(included?.reasons).toContain("included");
+    expect(debug.packedContextChars).toBeGreaterThan(0);
+
+    const rejected = debug.candidates.find((candidate) => candidate.sourceRef === "test:sensitive-private-marker");
+    expect(rejected?.included).toBe(false);
+    expect(rejected?.reasons).toContain("rejected:high_sensitivity_requires_direct_signal");
+    expect(JSON.stringify(debug)).not.toContain("VERY_PRIVATE_DEBUG_TRACE_CONTENT_SHOULD_NOT_APPEAR");
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+  }
+});
+
+test("excerpt memory packing remains available as a compact fallback", () => {
+  const memory = memorySearchFixture({
+    id: 1,
+    title: "JobLens matching context and token reduction",
+    sourceRef: "doc:joblens:matching-context-test",
+    keywords: ["JobLens", "resume matching", "input token reduction", "retrieval"],
+    content: [
+      "JobLens uses retrieved resume and job-posting context, keyword overlap, and gating to reduce prompt input tokens.",
+      Array.from({ length: 120 }, () => "UNRELATED_LONG_MARKER").join(" "),
+    ].join(" "),
+    usageRule: "Use for JobLens matching context and token reduction questions.",
+  });
+
+  const context = packPersonalMemoryContextForTest(
+    [memory],
+    "How does JobLens reduce prompt input tokens with resume matching context?",
+    "excerpt",
+  );
+
+  expect(context.length).toBeLessThanOrEqual(1400);
+  expect(context).toContain("Relevant facts:");
+  expect(context).toContain("reduce prompt input tokens");
+  expect(context).not.toContain("UNRELATED_LONG_MARKER");
+});
+
+test("tagged memory cards expose candidate labels and fuller detail for GPT selection", () => {
+  const memories: PersonalMemorySearchResult[] = [
+    memorySearchFixture({
+      id: 1,
+      title: "JobLens workflow and architecture",
+      sourceRef: "doc:joblens:architecture-workflow",
+      keywords: ["JobLens", "architecture", "workflow", "resume", "job posting", "matching"],
+      content: [
+        "JobLens has a resume upload flow, job-posting ingestion, matching service, and result explanation screen.",
+        "The backend separates document parsing, embedding lookup, scoring, and user-facing explanation so each step can be debugged independently.",
+      ].join(" "),
+      usageRule: "Use for JobLens architecture and workflow questions.",
+    }),
+    memorySearchFixture({
+      id: 2,
+      title: "JobLens overview and product scope",
+      sourceRef: "doc:joblens:overview-scope",
+      keywords: ["JobLens", "overview", "definition", "resume", "job matching", "student project"],
+      content: [
+        "JobLens is a student job-matching assistant that compares a resume with job postings and explains fit, missing skills, and improvement areas.",
+        "The useful answer should say it is not just a generic chatbot: it grounds the response in retrieved resume/job context and turns that into practical matching feedback.",
+        "For deeper questions, explain that the project value comes from combining structured resume data, job requirements, retrieval, and a short explanation layer instead of dumping raw scores.",
+      ].join(" "),
+      usageRule: "Use as the primary factual definition when asked what JobLens is.",
+    }),
+    memorySearchFixture({
+      id: 3,
+      title: "JobLens interview impact story",
+      sourceRef: "xiang-behavioral:joblens-impact-story",
+      keywords: ["JobLens", "impact", "interview", "story"],
+      content: "The JobLens story focuses on making job-search feedback less vague for students by turning resume gaps into concrete improvement points.",
+      usageRule: "Use only when asked for motivation, impact, or a behavioral story.",
+    }),
+  ];
+
+  const context = packPersonalMemoryContextForTest(memories, "What is JobLens?", "tagged_cards");
+
+  expect(context).toContain("Memory candidates. Use the best matching candidate");
+  expect(context).toContain("Possible memory candidates:");
+  expect(context).toContain("Type: architecture");
+  expect(context).toContain("Type: overview / definition");
+  expect(context).toContain("Grounding: story / behavior memory");
+  expect(context).toContain("Detailed candidate: JobLens overview and product scope");
+  expect(context).toContain("Fuller detail:");
+  expect(context).toContain("not just a generic chatbot");
+  expect(context).toContain("Secondary candidate:");
+  expect(context).not.toContain("confidence");
+});
+
+test("legacy sync personal memory writes pending OpenAI embedding metadata instead of local vectors", () => {
+  const userId = `test-memory-embedding-metadata-${Date.now()}`;
+  const createdIds: number[] = [];
+
+  const memory = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Embedding metadata test memory",
+    category: "technical_projects",
+    sensitivity: "low",
+    source: "import",
+    sourceRef: "test:embedding-metadata-local",
+    upsertBySource: true,
+    keywords: ["embedding", "metadata"],
+    content: "This memory is used to verify local embedding metadata is persisted.",
+    usageRule: "Use only for embedding metadata tests.",
+  });
+  if (memory) createdIds.push(memory.id);
+
+  try {
+    expect(memory?.embeddingProvider).toBe("openai");
+    expect(memory?.embeddingModel).toBe("text-embedding-3-small");
+    expect(memory?.embeddingDimensions).toBe(null);
+    expect(memory?.embeddingInputVersion).toBeTruthy();
+    expect(memory?.embeddingInputHash).toHaveLength(64);
+    expect(memory?.embeddingStatus).toBe("error");
+    expect(memory?.embeddingError).toContain("openai_embedding_not_generated_in_sync_path");
+    expect(memory?.embedding).toEqual([]);
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+  }
+});
+
+test("async personal memory retrieval uses lexical fallback without local vectors for pending corpus", async () => {
+  const userId = `test-memory-async-local-fallback-${Date.now()}`;
+  const createdIds: number[] = [];
+
+  const memory = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Async local fallback retrieval memory",
+    category: "knowledge_retrieval",
+    sensitivity: "low",
+    source: "knowledge",
+    sourceRef: "knowledge:test:async-local-fallback",
+    upsertBySource: true,
+    keywords: ["async retrieval", "local fallback", "memory context"],
+    content: "Async personal memory retrieval should still find local-hybrid memories when OpenAI embeddings have not been reindexed.",
+    usageRule: "Use for async retrieval fallback tests.",
+  });
+  if (memory) createdIds.push(memory.id);
+
+  try {
+    conversationLogger.rebuildPersonalMemoryFts(userId);
+    const debug = createPersonalMemoryRetrievalDebug("How does async retrieval local fallback work?");
+    const results = await conversationLogger.searchPersonalMemoriesHybridAsync(
+      userId,
+      debug.query,
+      3,
+      debug,
+    );
+
+    expect(results[0]?.sourceRef).toBe("knowledge:test:async-local-fallback");
+    expect(debug.embeddingProvider).toBe("openai");
+    expect(debug.embeddingModel).toBe("text-embedding-3-small");
+    expect(debug.embeddingDimensions).toBe(null);
+    expect(debug.candidates.find((candidate) => candidate.sourceRef === "knowledge:test:async-local-fallback")?.vectorScore).toBe(0);
+
+    const context = await conversationLogger.getRelevantPersonalMemoryContextAsync(
+      userId,
+      "How does async retrieval local fallback work?",
+      3,
+    );
+    expect(context).toContain("Async local fallback retrieval memory");
+    expect(context).toContain("Key facts:");
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+  }
+});
+
+test("async create and update personal memory use OpenAI embeddings", async () => {
+  const userId = `test-memory-openai-embedding-${Date.now()}`;
+  const createdIds: number[] = [];
+  const oldApiKey = process.env.OPENAI_API_KEY;
+  const oldFetch = globalThis.fetch;
+  let callCount = 0;
+
+  process.env.OPENAI_API_KEY = "test-openai-key";
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    callCount += 1;
+    const body = JSON.parse(String(init?.body || "{}"));
+    const input = Array.isArray(body.input) ? body.input : [body.input];
+    return new Response(JSON.stringify({
+      data: input.map((_text: string, index: number) => ({
+        index,
+        embedding: [1, index + 1, 0.5],
+      })),
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const created = await conversationLogger.createPersonalMemoryAsync({
+      userId,
+      title: "OpenAI embedding create test",
+      category: "knowledge_retrieval",
+      sensitivity: "low",
+      source: "knowledge",
+      sourceRef: "knowledge:test:openai-create-update",
+      upsertBySource: true,
+      keywords: ["openai embedding", "create update"],
+      content: "OpenAI embeddings should be generated during async memory creation.",
+      usageRule: "Use for OpenAI embedding tests.",
+    });
+    if (created) createdIds.push(created.id);
+
+    expect(created?.embeddingProvider).toBe("openai");
+    expect(created?.embeddingModel).toBe("text-embedding-3-small");
+    expect(created?.embeddingDimensions).toBe(3);
+    expect(created?.embeddingStatus).toBe("ready");
+    expect(created?.embedding.length).toBe(3);
+
+    const updated = await conversationLogger.updatePersonalMemoryAsync(userId, created?.id ?? -1, {
+      content: "OpenAI embeddings should also be regenerated during async memory updates.",
+    });
+
+    expect(updated?.embeddingProvider).toBe("openai");
+    expect(updated?.embeddingStatus).toBe("ready");
+    expect(callCount).toBeGreaterThanOrEqual(2);
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+    if (oldApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = oldApiKey;
+    }
+    globalThis.fetch = oldFetch;
+  }
+});
+
+test("general technical queries soft-penalize project memory instead of silently dropping it", () => {
+  const userId = `test-soft-penalty-technical-${Date.now()}`;
+  const createdIds: number[] = [];
+
+  const knowledge = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Knowledge: backpropagation definition",
+    category: "knowledge_ml",
+    sensitivity: "low",
+    source: "knowledge",
+    sourceRef: "knowledge:test:backpropagation-definition",
+    upsertBySource: true,
+    keywords: ["backpropagation", "neural network", "gradient", "training"],
+    content: "Backpropagation computes gradients through a neural network so training can update model weights.",
+    usageRule: "Use for general machine learning concept questions.",
+  });
+  if (knowledge) createdIds.push(knowledge.id);
+
+  const project = conversationLogger.createPersonalMemory({
+    userId,
+    title: "JobLens project note with backpropagation wording",
+    category: "technical_projects",
+    sensitivity: "low",
+    source: "import",
+    sourceRef: "doc:joblens:backpropagation-noise",
+    upsertBySource: true,
+    keywords: ["JobLens", "backpropagation", "project", "memory retrieval"],
+    content: "JobLens is a personal project; this test memory mentions backpropagation only as noisy overlap.",
+    usageRule: "Use only for JobLens project questions.",
+  });
+  if (project) createdIds.push(project.id);
+
+  try {
+    conversationLogger.rebuildPersonalMemoryFts(userId);
+    const query = "What is backpropagation?";
+    const debug = createPersonalMemoryRetrievalDebug(query);
+    const results = conversationLogger.searchPersonalMemoriesHybrid(userId, query, 3, debug);
+
+    expect(results[0]?.sourceRef).toBe("knowledge:test:backpropagation-definition");
+
+    const projectCandidate = debug.candidates.find((candidate) => candidate.sourceRef === "doc:joblens:backpropagation-noise");
+    expect(projectCandidate?.included).toBe(false);
+    expect(projectCandidate?.softPenalty).toBeLessThan(0);
+    expect(projectCandidate?.reasons.some((reason) => reason.startsWith("soft_penalty:non_knowledge_memory_in_general_or_public_learning_context"))).toBe(true);
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+  }
+});
+
+test("personal experience queries soft-penalize generic knowledge memory", () => {
+  const userId = `test-soft-penalty-personal-${Date.now()}`;
+  const createdIds: number[] = [];
+
+  const personal = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Xiang family business background",
+    category: "family_background",
+    sensitivity: "medium",
+    source: "import",
+    sourceRef: "xiang-profile:family-background-test",
+    upsertBySource: true,
+    keywords: ["family business", "factory", "what happened"],
+    content: "Xiang has private family-business background context for questions about what happened to the family business.",
+    usageRule: "Use carefully for direct family business questions.",
+  });
+  if (personal) createdIds.push(personal.id);
+
+  const genericKnowledge = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Generic family business explanation",
+    category: "knowledge_business",
+    sensitivity: "low",
+    source: "knowledge",
+    sourceRef: "knowledge:test:generic-family-business",
+    upsertBySource: true,
+    keywords: ["family business", "business", "what happened"],
+    content: "A generic explanation of family businesses and why small companies can change over time.",
+    usageRule: "Use for general business knowledge, not Xiang personal background.",
+  });
+  if (genericKnowledge) createdIds.push(genericKnowledge.id);
+
+  try {
+    conversationLogger.rebuildPersonalMemoryFts(userId);
+    const query = "What happened to your family business?";
+    const debug = createPersonalMemoryRetrievalDebug(query);
+    const results = conversationLogger.searchPersonalMemoriesHybrid(userId, query, 3, debug);
+
+    expect(results.map((memory) => memory.sourceRef)).toContain("xiang-profile:family-background-test");
+
+    const knowledgeCandidate = debug.candidates.find((candidate) => candidate.sourceRef === "knowledge:test:generic-family-business");
+    expect(knowledgeCandidate?.included).toBe(false);
+    expect(knowledgeCandidate?.softPenalty).toBeLessThan(0);
+    expect(knowledgeCandidate?.reasons.some((reason) => reason.startsWith("soft_penalty:knowledge_memory_for_personal_experience_question"))).toBe(true);
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+  }
+});
+
+test("high sensitivity remains a hard rejection while other mismatches are soft penalties", () => {
+  const userId = `test-soft-penalty-hard-gate-${Date.now()}`;
+  const createdIds: number[] = [];
+
+  const safeKnowledge = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Knowledge: supervised learning",
+    category: "knowledge_ml",
+    sensitivity: "low",
+    source: "knowledge",
+    sourceRef: "knowledge:test:supervised-learning",
+    upsertBySource: true,
+    keywords: ["supervised learning", "labels", "training data"],
+    content: "Supervised learning trains a model using labeled examples.",
+    usageRule: "Use for general ML concept questions.",
+  });
+  if (safeKnowledge) createdIds.push(safeKnowledge.id);
+
+  const sensitive = conversationLogger.createPersonalMemory({
+    userId,
+    title: "Sensitive unrelated project marker",
+    category: "health_private",
+    sensitivity: "high",
+    source: "import",
+    sourceRef: "test:high-sensitive-hard-gate",
+    upsertBySource: true,
+    keywords: ["private marker"],
+    content: "VERY_PRIVATE_HIGH_SENSITIVITY_CONTENT_SHOULD_NOT_APPEAR",
+    usageRule: "Do not use without a direct high-sensitivity signal.",
+  });
+  if (sensitive) createdIds.push(sensitive.id);
+
+  try {
+    conversationLogger.rebuildPersonalMemoryFts(userId);
+    const query = "What is supervised learning?";
+    const debug = createPersonalMemoryRetrievalDebug(query);
+    conversationLogger.searchPersonalMemoriesHybrid(userId, query, 3, debug);
+
+    const candidate = debug.candidates.find((item) => item.sourceRef === "test:high-sensitive-hard-gate");
+    expect(candidate?.included).toBe(false);
+    expect(candidate?.reasons).toContain("rejected:high_sensitivity_requires_direct_signal");
+    expect(JSON.stringify(debug)).not.toContain("VERY_PRIVATE_HIGH_SENSITIVITY_CONTENT_SHOULD_NOT_APPEAR");
   } finally {
     for (const id of createdIds) {
       conversationLogger.deletePersonalMemory(userId, id);

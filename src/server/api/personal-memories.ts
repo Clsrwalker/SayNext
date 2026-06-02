@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { conversationLogger, type PersonalMemoryRecord } from "../data/conversation-logger";
+import { conversationLogger, createPersonalMemoryRetrievalDebug, type PersonalMemoryRecord } from "../data/conversation-logger";
 
 function serializeMemory(memory: PersonalMemoryRecord) {
   return {
@@ -11,6 +11,13 @@ function serializeMemory(memory: PersonalMemoryRecord) {
     content: memory.content,
     usageRule: memory.usageRule,
     keywords: memory.keywords,
+    embeddingProvider: memory.embeddingProvider,
+    embeddingModel: memory.embeddingModel,
+    embeddingDimensions: memory.embeddingDimensions,
+    embeddingInputVersion: memory.embeddingInputVersion,
+    embeddingUpdatedAt: memory.embeddingUpdatedAt,
+    embeddingStatus: memory.embeddingStatus,
+    embeddingError: memory.embeddingError,
     status: memory.status,
     source: memory.source,
     sourceRef: memory.sourceRef,
@@ -64,19 +71,27 @@ export const createPersonalMemory = async (c: Context) => {
   if (!userId) return c.json({ error: "userId is required" }, 400);
   if (!content) return c.json({ error: "content is required" }, 400);
 
-  const memory = conversationLogger.createPersonalMemory({
-    userId,
-    title: title || "Personal memory",
-    category,
-    sensitivity: sensitivity === "low" || sensitivity === "high" ? sensitivity : "medium",
-    content,
-    usageRule: String(body.usageRule || "").trim(),
-    keywords: normalizeKeywords(body.keywords),
-    status: body.status === "disabled" ? "disabled" : "active",
-    source: ["pipeline", "import", "knowledge"].includes(body.source) ? body.source : "manual",
-    sourceRef: typeof body.sourceRef === "string" ? body.sourceRef.trim() : "",
-    upsertBySource: body.upsertBySource === true,
-  });
+  let memory: PersonalMemoryRecord | null;
+  try {
+    memory = await conversationLogger.createPersonalMemoryAsync({
+      userId,
+      title: title || "Personal memory",
+      category,
+      sensitivity: sensitivity === "low" || sensitivity === "high" ? sensitivity : "medium",
+      content,
+      usageRule: String(body.usageRule || "").trim(),
+      keywords: normalizeKeywords(body.keywords),
+      status: body.status === "disabled" ? "disabled" : "active",
+      source: ["pipeline", "import", "knowledge"].includes(body.source) ? body.source : "manual",
+      sourceRef: typeof body.sourceRef === "string" ? body.sourceRef.trim() : "",
+      upsertBySource: body.upsertBySource === true,
+    });
+  } catch (error) {
+    return c.json({
+      error: "Personal memory embedding failed",
+      detail: error instanceof Error ? error.message : String(error),
+    }, 503);
+  }
 
   if (!memory) return c.json({ error: "Personal memory storage is disabled" }, 503);
   return c.json({ memory: serializeMemory(memory) }, 201);
@@ -92,16 +107,24 @@ export const updatePersonalMemory = async (c: Context) => {
   const userId = userIdFrom(c, body);
   if (!userId) return c.json({ error: "userId is required" }, 400);
 
-  const memory = conversationLogger.updatePersonalMemory(userId, id, {
-    title: typeof body.title === "string" ? body.title : undefined,
-    category: typeof body.category === "string" ? body.category : undefined,
-    sensitivity: body.sensitivity === "low" || body.sensitivity === "medium" || body.sensitivity === "high" ? body.sensitivity : undefined,
-    content: typeof body.content === "string" ? body.content : undefined,
-    usageRule: typeof body.usageRule === "string" ? body.usageRule : undefined,
-    keywords: body.keywords !== undefined ? normalizeKeywords(body.keywords) : undefined,
-    status: body.status === "active" || body.status === "disabled" ? body.status : undefined,
-    sourceRef: typeof body.sourceRef === "string" ? body.sourceRef : undefined,
-  });
+  let memory: PersonalMemoryRecord | null;
+  try {
+    memory = await conversationLogger.updatePersonalMemoryAsync(userId, id, {
+      title: typeof body.title === "string" ? body.title : undefined,
+      category: typeof body.category === "string" ? body.category : undefined,
+      sensitivity: body.sensitivity === "low" || body.sensitivity === "medium" || body.sensitivity === "high" ? body.sensitivity : undefined,
+      content: typeof body.content === "string" ? body.content : undefined,
+      usageRule: typeof body.usageRule === "string" ? body.usageRule : undefined,
+      keywords: body.keywords !== undefined ? normalizeKeywords(body.keywords) : undefined,
+      status: body.status === "active" || body.status === "disabled" ? body.status : undefined,
+      sourceRef: typeof body.sourceRef === "string" ? body.sourceRef : undefined,
+    });
+  } catch (error) {
+    return c.json({
+      error: "Personal memory embedding failed",
+      detail: error instanceof Error ? error.message : String(error),
+    }, 503);
+  }
 
   if (!memory) return c.json({ error: "Personal memory not found" }, 404);
   return c.json({ memory: serializeMemory(memory) });
@@ -128,17 +151,27 @@ export const searchPersonalMemories = async (c: Context) => {
   const userId = userIdFrom(c, body);
   const query = String(body.query || "").trim();
   const limit = Number(body.limit || 5);
+  const debugEnabled = body.debug === true || body.debug === "true";
+  const rerankRequested = body.rerank === true || body.rerank === "true";
 
   if (!userId) return c.json({ error: "userId is required" }, 400);
   if (!query) return c.json({ error: "query is required" }, 400);
 
-  const memories = conversationLogger.searchPersonalMemoriesHybrid(userId, query, limit).map((memory) => ({
+  const debug = debugEnabled ? createPersonalMemoryRetrievalDebug(query) : undefined;
+  const memories = (await conversationLogger.searchPersonalMemoriesHybridAsync(userId, query, limit, debug)).map((memory) => ({
     ...serializeMemory(memory),
     score: memory.score,
     lexicalRank: memory.lexicalRank,
     vectorRank: memory.vectorRank,
     keywordScore: memory.keywordScore,
   }));
+
+  if (debug) {
+    if (rerankRequested) {
+      debug.rerankFallbackReason = "rerank_not_enabled_in_debug_trace_v1";
+    }
+    return c.json({ memories, debug });
+  }
 
   return c.json({ memories });
 };

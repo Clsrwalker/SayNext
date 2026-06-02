@@ -483,7 +483,7 @@ async function buildReports(params: {
       );
       const relevantPersonalMemoryContext = isClassroomMode
         ? ""
-        : conversationLogger.getRelevantPersonalMemoryContext(params.userId, memoryQuery, 3);
+        : await conversationLogger.getRelevantPersonalMemoryContextAsync(params.userId, memoryQuery, 3);
       const prompt = buildPromptSnapshot({
         conversation: context,
         eventMemory: eventSnapshot,

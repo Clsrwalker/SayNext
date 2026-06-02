@@ -536,7 +536,7 @@ export class MergeResponseHandler {
     );
     const relevantPersonalMemoryContext = isClassroomMode
       ? ""
-      : conversationLogger.getRelevantPersonalMemoryContext(this.userId, memoryQuery, 3);
+      : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, memoryQuery, 3);
 
     if (telepromptNeed !== "none") {
       this.startTelepromptAnswer({
