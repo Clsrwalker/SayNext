@@ -8,6 +8,7 @@ import { SayNextWsClient } from "./ws-client";
 
 const STORAGE_KEY = "saynext-evenhub-settings";
 const SINGLE_TAP_DELAY_MS = 280;
+const G2_SIGNAL_TIMEOUT_MS = 5000;
 
 type SavedConfig = {
   wsUrl: string;
@@ -42,12 +43,19 @@ function readSavedConfig(): SavedConfig {
   };
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 export default function App() {
   const [config, setConfig] = useState<SavedConfig>(() => readSavedConfig());
   const [display, setDisplay] = useState<DisplayState>(INITIAL_DISPLAY_STATE);
   const [bridgeStatus, setBridgeStatus] = useState("Bridge not connected");
   const [wsStatus, setWsStatus] = useState("Disconnected");
-  const [, setAudioStatus] = useState("Audio idle");
+  const [audioStatus, setAudioStatus] = useState("Audio idle");
+  const [localAudioBytesSent, setLocalAudioBytesSent] = useState(0);
   const bridgeRef = useRef<BridgeHandle | null>(null);
   const wsRef = useRef<SayNextWsClient | null>(null);
   const configRef = useRef(config);
@@ -56,6 +64,9 @@ export default function App() {
   const bridgeConnectingRef = useRef(false);
   const phoneMicRef = useRef<PhoneMicHandle | null>(null);
   const pendingTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const signalCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const localAudioBytesSentRef = useRef(0);
+  const lastAudioUiUpdateRef = useRef(0);
   const wantListeningRef = useRef(true);
   const previousMicSourceRef = useRef(config.settings.micSource);
 
@@ -102,6 +113,35 @@ export default function App() {
     return true;
   }, []);
 
+  const clearSignalCheck = useCallback(() => {
+    if (!signalCheckTimerRef.current) return;
+    clearTimeout(signalCheckTimerRef.current);
+    signalCheckTimerRef.current = null;
+  }, []);
+
+  const noteAudioSent = useCallback((pcm: Uint8Array) => {
+    localAudioBytesSentRef.current += pcm.byteLength;
+    wsRef.current?.sendAudio(pcm);
+
+    const now = Date.now();
+    if (now - lastAudioUiUpdateRef.current > 500) {
+      lastAudioUiUpdateRef.current = now;
+      setLocalAudioBytesSent(localAudioBytesSentRef.current);
+      setAudioStatus("Mic signal live");
+    }
+  }, []);
+
+  const scheduleG2SignalCheck = useCallback((baselineBytes: number) => {
+    clearSignalCheck();
+    signalCheckTimerRef.current = setTimeout(() => {
+      signalCheckTimerRef.current = null;
+      if (!wantListeningRef.current) return;
+      if (configRef.current.settings.micSource !== "g2") return;
+      if (localAudioBytesSentRef.current > baselineBytes) return;
+      setAudioStatus("No G2 audio signal. Switch to Phone mic if the glasses stay silent.");
+    }, G2_SIGNAL_TIMEOUT_MS);
+  }, [clearSignalCheck]);
+
   const dispatchGestureAction = useCallback((action: Parameters<SayNextWsClient["sendControl"]>[0]) => {
     if (action === "generate") {
       if (clearPendingTap()) {
@@ -135,31 +175,44 @@ export default function App() {
     sendControl("start_listening");
 
     if (configRef.current.settings.micSource === "phone") {
+      clearSignalCheck();
       await bridgeRef.current?.setRecording(false).catch(() => undefined);
       if (!phoneMicRef.current) {
         phoneMicRef.current = await startPhoneMic({
-          onPcm: (pcm) => wsRef.current?.sendAudio(pcm),
+          onPcm: noteAudioSent,
           onStatus: setAudioStatus,
         });
       }
       setAudioStatus("Phone mic listening");
     } else {
       await stopPhoneMic();
-      await bridgeRef.current?.setRecording(true);
-      setAudioStatus("G2 mic listening");
+      if (!bridgeRef.current) {
+        setAudioStatus("Waiting for G2 bridge before opening the mic.");
+      } else {
+        const baselineBytes = localAudioBytesSentRef.current;
+        const opened = await bridgeRef.current.setRecording(true);
+        if (opened) {
+          setAudioStatus("G2 mic listening; waiting for signal.");
+          scheduleG2SignalCheck(baselineBytes);
+        } else {
+          clearSignalCheck();
+          setAudioStatus("G2 mic did not open. Switch to Phone mic.");
+        }
+      }
     }
 
     setDisplay((current) => ({ ...current, recording: true, status: "Listening" }));
-  }, [sendControl, stopPhoneMic]);
+  }, [clearSignalCheck, noteAudioSent, scheduleG2SignalCheck, sendControl, stopPhoneMic]);
 
   const stopSelectedAudio = useCallback(async () => {
     wantListeningRef.current = false;
+    clearSignalCheck();
     await bridgeRef.current?.setRecording(false).catch(() => undefined);
     await stopPhoneMic();
     sendControl("stop_listening");
     setDisplay((current) => ({ ...current, recording: false, status: "Ready" }));
     setAudioStatus("Audio idle");
-  }, [sendControl, stopPhoneMic]);
+  }, [clearSignalCheck, sendControl, stopPhoneMic]);
 
   const connectWs = useCallback(() => {
     const activeConfig = configRef.current;
@@ -187,10 +240,11 @@ export default function App() {
     connectWs();
     return () => {
       clearPendingTap();
+      clearSignalCheck();
       void stopPhoneMic();
       wsRef.current?.close();
     };
-  }, [clearPendingTap, connectWs, stopPhoneMic]);
+  }, [clearPendingTap, clearSignalCheck, connectWs, stopPhoneMic]);
 
   const connectGlasses = useCallback(async () => {
     if (bridgeRef.current || bridgeConnectingRef.current) return;
@@ -216,7 +270,7 @@ export default function App() {
         onStatus: setBridgeStatus,
         onAudio: (pcm) => {
           if (configRef.current.settings.micSource === "g2") {
-            wsRef.current?.sendAudio(pcm);
+            noteAudioSent(pcm);
           }
         },
         onLifecycle: handleLifecycle,
@@ -245,7 +299,7 @@ export default function App() {
     } finally {
       bridgeConnectingRef.current = false;
     }
-  }, [clearPendingTap, dispatchGestureAction, sendClientEventLog, startSelectedAudio, stopSelectedAudio]);
+  }, [clearPendingTap, dispatchGestureAction, noteAudioSent, sendClientEventLog, startSelectedAudio, stopSelectedAudio]);
 
   useEffect(() => {
     void connectGlasses();
@@ -280,6 +334,8 @@ export default function App() {
   const currentPage = display.answerText ? display.pageIndex + 1 : 0;
   const micLabel = config.settings.micSource === "g2" ? "G2 Mic" : "Phone Mic";
   const activityLabel = display.recording ? "Listening" : "Paused";
+  const audioBytes = Math.max(localAudioBytesSent, display.audioBytesReceived);
+  const signalLabel = audioBytes > 0 ? formatBytes(audioBytes) : display.recording ? "No signal" : "Idle";
   const sessionState = wsStatus === "Connected" ? "Connected" : "Disconnected";
   const bridgeReady = bridgeStatus.toLowerCase().includes("connected")
     || bridgeStatus.toLowerCase().includes("ready")
@@ -319,6 +375,10 @@ export default function App() {
             <span>Mode</span>
             <strong>{config.settings.sceneMode}</strong>
           </div>
+          <div className={audioBytes > 0 ? "signal-live" : display.recording ? "signal-warn" : ""}>
+            <span>Signal</span>
+            <strong>{signalLabel}</strong>
+          </div>
         </div>
       </section>
 
@@ -355,6 +415,7 @@ export default function App() {
         <p className={display.transcript ? "transcript-text" : "transcript-text empty"}>
           {display.transcript || "No speech captured yet."}
         </p>
+        <p className="audio-status">{audioStatus}</p>
       </section>
 
       <section className="settings-card">

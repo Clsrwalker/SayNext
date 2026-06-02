@@ -11,7 +11,7 @@ import {
 export type BridgeHandle = {
   bridge: EvenAppBridge;
   render(text: string): Promise<void>;
-  setRecording(enabled: boolean): Promise<void>;
+  setRecording(enabled: boolean): Promise<boolean>;
 };
 
 export type BridgeLifecycleEvent = "foreground_enter" | "foreground_exit" | "abnormal_exit" | "system_exit";
@@ -23,13 +23,50 @@ function toBytes(value: unknown): Uint8Array | null {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (Array.isArray(value)) return new Uint8Array(value);
+  if (typeof value === "string" && typeof atob === "function") {
+    const normalized = value.includes(",") ? value.split(",").pop() || "" : value;
+    try {
+      const decoded = atob(normalized);
+      const bytes = new Uint8Array(decoded.length);
+      for (let index = 0; index < decoded.length; index += 1) {
+        bytes[index] = decoded.charCodeAt(index);
+      }
+      return bytes;
+    } catch {
+      return null;
+    }
+  }
   return null;
 }
 
 function readAudioPcm(event: EvenHubEvent): Uint8Array | null {
-  const audioEvent = (event as unknown as { audioEvent?: { audioPcm?: unknown } }).audioEvent;
-  if (!audioEvent) return null;
-  return toBytes(audioEvent.audioPcm);
+  const raw = event as unknown as {
+    audioEvent?: { audioPcm?: unknown; audio_pcm?: unknown; pcm?: unknown };
+    jsonData?: Record<string, unknown>;
+    data?: Record<string, unknown>;
+    payload?: Record<string, unknown>;
+  };
+  const candidates = [
+    raw.audioEvent?.audioPcm,
+    raw.audioEvent?.audio_pcm,
+    raw.audioEvent?.pcm,
+    raw.jsonData?.audioPcm,
+    raw.jsonData?.audio_pcm,
+    raw.jsonData?.pcm,
+    raw.data?.audioPcm,
+    raw.data?.audio_pcm,
+    raw.data?.pcm,
+    raw.payload?.audioPcm,
+    raw.payload?.audio_pcm,
+    raw.payload?.pcm,
+  ];
+
+  for (const candidate of candidates) {
+    const bytes = toBytes(candidate);
+    if (bytes?.byteLength) return bytes;
+  }
+
+  return null;
 }
 
 function readLifecycleEvent(event: EvenHubEvent): BridgeLifecycleEvent | null {
@@ -157,13 +194,19 @@ export async function connectBridge(params: {
     }
   }
 
-  async function setRecording(enabled: boolean): Promise<void> {
-    const audioControl = (bridge as unknown as { audioControl?: (enabled: boolean) => Promise<void> | void }).audioControl;
+  async function setRecording(enabled: boolean): Promise<boolean> {
+    const audioControl = (bridge as unknown as { audioControl?: (enabled: boolean) => Promise<boolean | void> | boolean | void }).audioControl;
     if (!audioControl) {
       params.onStatus("EvenHub bridge has no audioControl method.");
-      return;
+      return false;
     }
-    await audioControl.call(bridge, enabled);
+    const result = await audioControl.call(bridge, enabled);
+    if (result === false) {
+      params.onStatus(enabled ? "G2 microphone did not open." : "G2 microphone did not stop.");
+      return false;
+    }
+    params.onStatus(enabled ? "G2 microphone opened." : "G2 microphone stopped.");
+    return true;
   }
 
   return {

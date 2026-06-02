@@ -163,7 +163,7 @@ summary {
 
 .session-strip {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 9px;
   margin-top: 18px;
 }
@@ -191,6 +191,24 @@ summary {
   font-size: 15px;
   font-weight: 650;
   text-transform: capitalize;
+}
+
+.session-strip .signal-live {
+  border-color: #b9dbc4;
+  background: #f1faf3;
+}
+
+.session-strip .signal-live strong {
+  color: #22633a;
+}
+
+.session-strip .signal-warn {
+  border-color: #e4c9a0;
+  background: #fff8e8;
+}
+
+.session-strip .signal-warn strong {
+  color: #8a5a1d;
 }
 
 .now-card,
@@ -260,6 +278,13 @@ summary {
 
 .transcript-text.empty {
   color: #7a7972;
+}
+
+.audio-status {
+  margin-top: 8px;
+  color: #77766f;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .setting-group {
@@ -369,14 +394,14 @@ summary {
     gap: 10px;
   }
 
-  .session-strip,
-  .segmented.compact {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .session-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
     margin-top: 12px;
+  }
+
+  .segmented.compact {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .session-strip div {
