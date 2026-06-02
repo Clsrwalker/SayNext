@@ -50,6 +50,10 @@ describe("normalizeSavedWsUrl", () => {
 });
 
 describe("normalizeSettings", () => {
+  test("defaults to phone microphone because G2 audio can be unavailable", () => {
+    expect(normalizeSettings(undefined).micSource).toBe("phone");
+  });
+
   test("drops removed teleprompt values from saved settings", () => {
     const settings = normalizeSettings({
       sceneMode: "teleprompt" as never,

@@ -23,12 +23,16 @@ function readSavedConfig(): SavedConfig {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SavedConfig>;
+      const settings = normalizeSettings(parsed.settings);
+      if (!parsed.settings?.micSource || parsed.settings.micSource === "g2") {
+        settings.micSource = "phone";
+      }
       return {
         wsUrl: normalizeSavedWsUrl(parsed.wsUrl),
         token: parsed.token || defaultRelayToken(),
         userId: parsed.userId || "xiang",
         sessionId: parsed.sessionId || makeClientSessionId(),
-        settings: normalizeSettings(parsed.settings),
+        settings,
       };
     }
   } catch {

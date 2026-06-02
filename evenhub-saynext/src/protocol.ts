@@ -88,12 +88,12 @@ export const DEFAULT_SETTINGS: SayNextSettings = {
   sceneMode: "auto",
   depth: "normal",
   displayMode: "answer",
-  micSource: "g2",
+  micSource: "phone",
   outputLanguage: "english",
   manualFirst: true,
 };
 
-export const APP_VERSION = "0.1.12";
+export const APP_VERSION = "0.1.13";
 export const REMOTE_SAYNEXT_WS_URL = "wss://saynext.167.172.153.109.sslip.io/api/evenhub/ws";
 
 type LocationLike = Pick<Location, "protocol" | "hostname" | "host" | "port">;
