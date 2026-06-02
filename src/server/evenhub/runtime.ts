@@ -323,6 +323,16 @@ export class EvenHubRuntime {
 
   private async handleControl(action: EvenHubControlAction, clientEventId?: string): Promise<void> {
     if (action === "start_listening") {
+      if (this.listening) {
+        this.sendMessage({
+          type: "status",
+          status: "listening",
+          sessionId: this.sessionId,
+          clientSessionId: this.clientSessionId,
+          message: "Already listening",
+        });
+        return;
+      }
       this.listening = true;
       if (this.sttAdapter) {
         await this.sttAdapter.start();

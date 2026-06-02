@@ -53,7 +53,8 @@ function getClientSessionId(url: URL): string {
 function summarizeServerMessage(message: EvenHubServerMessage): string {
   if (message.type === "status") {
     const bytes = typeof message.audioBytesReceived === "number" ? ` audioBytes=${message.audioBytesReceived}` : "";
-    return `send type=status status=${message.status}${bytes}`;
+    const detail = message.message ? ` message=${JSON.stringify(String(message.message).slice(0, 160))}` : "";
+    return `send type=status status=${message.status}${bytes}${detail}`;
   }
   if (message.type === "transcript_partial" || message.type === "transcript_final") {
     return `send type=${message.type} len=${message.text.length}`;

@@ -68,6 +68,7 @@ export default function App() {
   const phoneMicRef = useRef<PhoneMicHandle | null>(null);
   const pendingTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wantListeningRef = useRef(true);
+  const previousMicSourceRef = useRef(config.settings.micSource);
 
   const glassesText = useMemo(() => formatGlassesText(display, config.settings), [display, config.settings]);
 
@@ -283,11 +284,13 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!wantListeningRef.current || !display.recording) return;
+    if (previousMicSourceRef.current === config.settings.micSource) return;
+    previousMicSourceRef.current = config.settings.micSource;
+    if (!wantListeningRef.current || !displayRef.current.recording) return;
     void startSelectedAudio().catch((error) => {
       setAudioStatus(error instanceof Error ? error.message : String(error));
     });
-  }, [config.settings.micSource, display.recording, startSelectedAudio]);
+  }, [config.settings.micSource, startSelectedAudio]);
 
   return (
     <main className="app-shell">
