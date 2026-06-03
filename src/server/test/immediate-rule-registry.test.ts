@@ -319,6 +319,15 @@ test("bus versus walking rule does not ignore fee clarification", () => {
   }
 });
 
+test("current student or major questions provide profile route hints without fixed output", () => {
+  const decision = getImmediateDecision("you student or working now", 123, "english");
+
+  expect(decision.response).toBeNull();
+  expect(decision.routeHints[0]?.id).toBe("immediate:current-student-program");
+  expect(decision.routeHints[0]?.mustInclude || []).toContain("MACS");
+  expect(decision.routeHints[0]?.mustInclude || []).toContain("Dalhousie");
+});
+
 test("gossip verbatim follow-up gets a boundary route hint", () => {
   const decision = getImmediateDecision(
     "Okay, but in practice, who do you tell, and what do you say verbatim?",

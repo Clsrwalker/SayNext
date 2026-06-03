@@ -32,6 +32,7 @@ class MockSession {
 class MockUserSession extends MockSession {
   touchHandler: ((event: unknown) => void) | null = null;
   buttonHandler: ((event: unknown) => void) | null = null;
+  transcriptionHandler: ((event: any) => void) | null = null;
 
   simpleStorage = {
     get: async (key: string) => key === "interaction_mode" ? "g2_manual" : undefined,
@@ -39,7 +40,12 @@ class MockUserSession extends MockSession {
   };
 
   events = {
-    onTranscriptionForLanguage: () => () => undefined,
+    onTranscriptionForLanguage: (_language: string, handler: (event: any) => void) => {
+      this.transcriptionHandler = handler;
+      return () => {
+        this.transcriptionHandler = null;
+      };
+    },
     onDisconnected: () => () => undefined,
     onPermissionDenied: () => () => undefined,
     onPermissionError: () => () => undefined,
@@ -111,8 +117,8 @@ test("g2 manual mode commits transcript and shows heard status without automatic
   expect(session.displays.at(-1)?.text).toBe("SN | HEARD TAP\nNew speech captured. Tap R1 for the next reply.");
 });
 
-test("manual generate returns no_new_speech before any committed transcript", async () => {
-  const { handler } = makeManualHandler();
+test("manual generate returns no_new_speech briefly then restores listening", async () => {
+  const { session, handler } = makeManualHandler();
 
   const result = await handler.generateManualAnswer("same-event");
   const replay = await handler.generateManualAnswer("same-event");
@@ -120,6 +126,9 @@ test("manual generate returns no_new_speech before any committed transcript", as
   expect(result.status).toBe("no_new_speech");
   expect(replay).toEqual(result);
   expect(result.state.lastGeneratedCursor).toBeNull();
+  expect(session.displays.at(-1)?.text).toBe("SN | NO SPEECH\nNo new speech yet.");
+  await sleep(1450);
+  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nListening. Tap R1 after speech.");
 });
 
 test("manual clear cancels display state without advancing transcript cursor", async () => {
@@ -163,6 +172,55 @@ test("g2 manual mode shows heard status on glasses while preserving pinned answe
   expect(session.displays.at(-1)?.text).toBe("SN | HEARD TAP\nOld pinned answer.");
 });
 
+test("manual no_new_speech restores the pinned answer after the hint", async () => {
+  const { session, handler } = makeManualHandler();
+
+  (handler as any).currentManualAnswer = {
+    answerGroupId: "manual_group_pinned",
+    answerId: "manual_answer_pinned",
+    requestId: "manual_req_pinned",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "digest",
+    },
+    output: "Pinned answer stays visible.",
+    pages: ["Pinned answer stays visible."],
+    pageIndex: 0,
+    createdAt: Date.now(),
+  };
+
+  const result = await handler.generateManualAnswer("no-speech-with-pinned-answer");
+
+  expect(result.status).toBe("no_new_speech");
+  expect(session.displays.at(-1)?.text).toBe("SN | NO SPEECH\nPinned answer stays visible.");
+  await sleep(1450);
+  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nPinned answer stays visible.");
+});
+
+test("manual generate can commit the current partial transcript before final ASR", async () => {
+  const session = new MockUserSession();
+  const user = new User("manual-partial-flush-user");
+  const events: any[] = [];
+  user.addSSEClient((data) => events.push(JSON.parse(data)));
+
+  await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  session.transcriptionHandler?.({
+    text: "Can you explain B-tree index trade",
+    isFinal: false,
+    language: "en",
+  });
+
+  const committed = await (user as any).flushPartialTranscriptForManualGenerate("test_partial");
+
+  expect(committed).toBe(true);
+  expect((user as any).responseHandler.getManualState().transcriptCount).toBe(1);
+  expect(session.displays.at(-1)?.text).toBe("SN | HEARD TAP\nNew speech captured. Tap R1 for the next reply.");
+  expect(events.some((event) => event.type === "manual_partial_committed" && event.trigger === "test_partial")).toBe(true);
+  user.cleanup();
+});
+
 test("g2 single tap delays manual generation through gesture arbitration", async () => {
   const session = new MockUserSession();
   const user = new User("manual-gesture-user");
@@ -199,19 +257,21 @@ test("g2 double tap cancels pending single tap generation", async () => {
   user.cleanup();
 });
 
-test("g2 long press is ignored by SayNext because the system may reserve it", async () => {
+test("g2 long press is ignored and restores the manual display after system confirmation", async () => {
   const session = new MockUserSession();
   const user = new User("manual-long-gesture-user");
   const events: any[] = [];
   user.addSSEClient((data) => events.push(JSON.parse(data)));
 
   await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  const initialDisplayCount = session.displays.length;
   session.touchHandler?.({ gesture: "long_press" });
   await sleep(20);
 
   expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "long_press_reserved")).toBe(true);
-  expect(session.displays.at(-1)?.text).toBe("SN | LONG OK\nLong press reached SayNext.");
-  expect(session.displays.at(-1)?.durationMs).toBe(1500);
+  expect(session.displays.length).toBe(initialDisplayCount);
+  await sleep(1250);
+  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nListening. Tap R1 after speech.");
   expect(session.clearCount).toBe(0);
   user.cleanup();
 });

@@ -175,7 +175,7 @@ function buildRouteHint(rule: ImmediateRule, context: ImmediateRuleContext): Imm
   const rawInstructions = rule.hint
     ? Array.isArray(rule.hint) ? rule.hint : [rule.hint]
     : [
-      `${rule.reasoning}. This matched an immediate rule, but it is only a route or guard signal. Generate the final answer from the latest transcript and trusted context, not from a fixed template.`,
+      `${rule.reasoning}. This matched an immediate rule, but it is only a route or guard signal. Generate the final answer from the latest transcript and provided context candidates, not from a fixed template.`,
     ];
 
   return {

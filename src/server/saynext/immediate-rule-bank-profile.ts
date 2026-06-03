@@ -93,6 +93,7 @@ export const PROFILE_IMMEDIATE_RULES: ImmediateRule[] = [
       || /\bwhat\s+(?:are\s+you\s+)?studying\b/i.test(normalized)
       || /\bwhat\s+do\s+you\s+study\b/i.test(normalized),
     output: "I'm a MACS student at Dalhousie, so Master of Applied Computer Science.",
+    mustInclude: ["MACS", "Dalhousie"],
     reasoning: "Immediate current student/program answer",
     confidence: 0.94,
   },

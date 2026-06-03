@@ -88,6 +88,8 @@ type PromptSnapshot = {
   };
 };
 
+const SAYNEXT_PERSONAL_MEMORY_TOP_K = Number(process.env.SAYNEXT_PERSONAL_MEMORY_TOP_K || 5);
+
 type TurnReport = {
   row: SampleRow;
   eventMemory: EventMemorySnapshot;
@@ -500,7 +502,11 @@ async function buildReports(params: {
       );
       const relevantPersonalMemoryContext = isClassroomMode
         ? ""
-        : await conversationLogger.getRelevantPersonalMemoryContextAsync(params.userId, memoryQuery, 3);
+        : await conversationLogger.getRelevantPersonalMemoryContextAsync(
+          params.userId,
+          memoryQuery,
+          SAYNEXT_PERSONAL_MEMORY_TOP_K,
+        );
       const prompt = buildPromptSnapshot({
         conversation: context,
         eventMemory: eventSnapshot,

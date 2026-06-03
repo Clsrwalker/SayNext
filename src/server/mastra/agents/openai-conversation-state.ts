@@ -15,6 +15,7 @@ export interface OpenAiConversationGenerateOptions {
   promptMode?: string;
   taskHint?: string;
   preparedNote?: string;
+  supportContext?: string;
   timeoutMs: number;
 }
 
@@ -52,6 +53,7 @@ export interface OpenAiConversationInputOptions {
   promptMode?: string;
   taskHint?: string;
   preparedNote?: string;
+  supportContext?: string;
 }
 
 export function isOpenAiConversationStateEnabled(provider: string): boolean {
@@ -73,6 +75,7 @@ export function buildOpenAiConversationInput(latestTranscript: string, options: 
     options.outputLanguage?.trim() ? `Language: ${options.outputLanguage.trim()}` : "",
     options.promptMode?.trim() ? `Mode: ${options.promptMode.trim()}` : "",
     options.taskHint?.trim() ? `Task: ${options.taskHint.trim()}` : "",
+    options.supportContext?.trim() ? `Relevant context candidates, use only if helpful:\n${options.supportContext.trim()}` : "",
     options.preparedNote?.trim() ? `Prepared note:\n${options.preparedNote.trim()}` : "",
     `Transcript: ${latestTranscript.trim()}`,
   ].filter(Boolean);
@@ -203,6 +206,7 @@ export class OpenAiConversationSession {
         outputLanguage: options.outputLanguage,
         promptMode: options.promptMode,
         taskHint: options.taskHint,
+        supportContext: options.supportContext,
         preparedNote: options.preparedNote,
       },
     });

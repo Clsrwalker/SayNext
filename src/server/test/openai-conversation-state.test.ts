@@ -64,6 +64,20 @@ test("conversation input carries only compact dynamic fields", () => {
   ].join("\n"));
 });
 
+test("conversation input can carry relevant support context for personal modes", () => {
+  expect(buildOpenAiConversationInput("  What is your major?  ", {
+    outputLanguage: "English",
+    promptMode: "interview",
+    supportContext: "Xiang Li: Chinese international MACS student at Dalhousie.",
+  })).toBe([
+    "Language: English",
+    "Mode: interview",
+    "Relevant context candidates, use only if helpful:",
+    "Xiang Li: Chinese international MACS student at Dalhousie.",
+    "Transcript: What is your major?",
+  ].join("\n"));
+});
+
 test("conversation create payload seeds fixed instructions once", () => {
   const payload = buildOpenAiConversationCreatePayload({
     userId: "xiang@example.com",
@@ -102,6 +116,27 @@ test("conversation payload keeps history and fixed instructions out of the per-t
   ].join("\n"));
   expect(payload.input[0].content[0].text).not.toContain("RECENT CONVERSATION");
   expect(payload.input[0].content[0].text).not.toContain("Previous suggestion");
+});
+
+test("conversation payload includes relevant support context when provided", () => {
+  const payload = buildOpenAiConversationPayload({
+    model: "gpt-4.1-mini",
+    conversationId: "conv_test",
+    latestTranscript: "What program are you in?",
+    inputOptions: {
+      outputLanguage: "English",
+      promptMode: "interview",
+      supportContext: "Xiang is a MACS student at Dalhousie.",
+    },
+  });
+
+  expect(payload.input[0].content[0].text).toBe([
+    "Language: English",
+    "Mode: interview",
+    "Relevant context candidates, use only if helpful:",
+    "Xiang is a MACS student at Dalhousie.",
+    "Transcript: What program are you in?",
+  ].join("\n"));
 });
 
 test("extracts response text from Responses API output_text first", () => {

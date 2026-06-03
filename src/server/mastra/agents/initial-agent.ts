@@ -217,6 +217,13 @@ export async function processConversation(
       : "",
     manualResponseInstruction,
   ].filter(Boolean).join("\n");
+  const conversationStateSupportContext = isClassroomMode
+    ? ""
+    : compactRuntimeContextBlock([
+      formattedProfile,
+      formattedEventMemory,
+      formattedPersonalMemory,
+    ].filter(Boolean).join("\n"), 2200);
   const dynamicPromptCore = [
     `Output language: ${outputLanguageText}`,
     manualResponseInstruction,
@@ -225,6 +232,7 @@ export async function processConversation(
   const openAiConversationInput = buildOpenAiConversationInput(latestTranscript, {
     outputLanguage: outputLanguageText,
     promptMode,
+    supportContext: conversationStateSupportContext,
     preparedNote: formattedPrenoteContext,
     taskHint: conversationStateTaskHint,
   });
@@ -269,6 +277,7 @@ export async function processConversation(
           outputLanguage: outputLanguageText,
           promptMode,
           taskHint: conversationStateTaskHint,
+          supportContext: conversationStateSupportContext,
           preparedNote: formattedPrenoteContext,
           timeoutMs: OPENAI_TIMEOUT_MS,
         });

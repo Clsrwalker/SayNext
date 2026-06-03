@@ -330,6 +330,46 @@ export class User {
     }
   }
 
+  private async flushPartialTranscriptForManualGenerate(trigger: string): Promise<boolean> {
+    const textToProcess = this.currentUtteranceBuffer.trim();
+    if (!textToProcess || !this.responseHandler || this.getInteractionMode() !== "g2_manual") {
+      return false;
+    }
+
+    if (isLowValueUtterance(textToProcess)) {
+      this.appSession?.logger.info(`Skipping low-value partial before manual generate: "${textToProcess}"`);
+      this.currentUtteranceBuffer = "";
+      return false;
+    }
+
+    if (textToProcess === this.lastProcessedUtterance) {
+      this.appSession?.logger.info(`Skipping duplicate partial before manual generate: "${textToProcess}"`);
+      this.currentUtteranceBuffer = "";
+      return false;
+    }
+
+    if (this.utteranceTimer) {
+      clearTimeout(this.utteranceTimer);
+      this.utteranceTimer = null;
+    }
+
+    this.currentUtteranceBuffer = "";
+    this.lastProcessedUtterance = textToProcess;
+    this.lastProcessedAt = Date.now();
+    this.lastProcessedReason = "timeout";
+    console.log(`[SayNext] Processing partial before manual generate (${trigger}): ${textToProcess}`);
+    this.broadcastInsightEvent({ type: "manual_partial_committed", trigger });
+
+    try {
+      await this.responseHandler.processTranscript(textToProcess, Date.now(), "timeout");
+      return true;
+    } catch (error) {
+      this.appSession?.logger.error(`Failed to process partial before manual generate: ${error}`);
+      this.broadcastInsightEvent({ type: "processing_done", reason: "manual_partial_commit_error" });
+      return false;
+    }
+  }
+
   private async handleManualGesture(gesture: string): Promise<void> {
     if (this.getInteractionMode() !== "g2_manual") return;
 
@@ -338,7 +378,7 @@ export class User {
 
     if (gesture.includes("hold") || gesture.includes("long")) {
       this.cancelPendingSingleTap();
-      this.responseHandler?.showManualLongPressProbe();
+      this.responseHandler?.restoreManualDisplayAfterSystemPrompt();
       this.broadcastInsightEvent({ type: 'manual_gesture_ignored', gesture, reason: 'long_press_reserved' });
       return;
     }
@@ -364,9 +404,10 @@ export class User {
       this.pendingSingleTapTimer = setTimeout(() => {
         this.pendingSingleTapTimer = null;
         this.broadcastInsightEvent({ type: 'processing' });
-        void this.generateManualAnswer(eventId).then((result) => {
+        void (async () => {
+          const result = await this.generateManualAnswer(eventId);
           this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_${result.status}` });
-        });
+        })();
       }, SINGLE_TAP_DELAY_MS);
       this.broadcastInsightEvent({ type: 'manual_gesture_pending', gesture, delayMs: SINGLE_TAP_DELAY_MS });
       return;
@@ -496,7 +537,8 @@ export class User {
   }
 
   /** Generate from committed speech since the last successful manual generation. */
-  generateManualAnswer(clientEventId?: string): Promise<ManualActionResult> {
+  async generateManualAnswer(clientEventId?: string): Promise<ManualActionResult> {
+    await this.flushPartialTranscriptForManualGenerate("manual_generate");
     return this.responseHandler?.generateManualAnswer(clientEventId)
       || Promise.resolve(inactiveManualResult(this.getInteractionMode()));
   }

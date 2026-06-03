@@ -36,6 +36,7 @@ const MIN_ECHO_WORDS = 3;
 const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
 const MANUAL_GENERATION_TIMEOUT_MS = Number(process.env.MANUAL_GENERATION_TIMEOUT_MS || 35_000);
+const MANUAL_TRANSIENT_STATUS_MS = Number(process.env.MENTRA_MANUAL_TRANSIENT_STATUS_MS || 1400);
 const MANUAL_TEXTWALL_BODY_LINES = Number(process.env.MENTRA_MANUAL_PAGE_LINES || 3);
 const MANUAL_TEXTWALL_LINE_UNITS = Number(process.env.MENTRA_MANUAL_LINE_UNITS || 56);
 const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
@@ -44,6 +45,7 @@ const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
 const MANUAL_BUSY_TEXT = "Still generating. Wait a moment.";
 const MANUAL_NO_NEW_SPEECH_TEXT = "No new speech yet.";
 const MANUAL_NO_ANSWER_TEXT = "No answer yet. Single tap after speech.";
+const SAYNEXT_PERSONAL_MEMORY_TOP_K = Number(process.env.SAYNEXT_PERSONAL_MEMORY_TOP_K || 5);
 const STRONG_ECHO_SIMILARITY = 0.82;
 const MEDIUM_ECHO_SIMILARITY = 0.68;
 const STRONG_ECHO_TRANSCRIPT_COVERAGE = 0.75;
@@ -381,8 +383,6 @@ function compactManualStatus(status: string): string {
       return "SN | BUSY";
     case "NO NEW SPEECH":
       return "SN | NO SPEECH";
-    case "LONG OK":
-      return "SN | LONG OK";
     case "READY":
       return "SN | READY";
     default:
@@ -787,7 +787,7 @@ export class MergeResponseHandler {
     );
     const relevantPersonalMemoryContext = isClassroomMode
       ? ""
-      : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, memoryQuery, 3);
+      : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, memoryQuery, SAYNEXT_PERSONAL_MEMORY_TOP_K);
 
     if (telepromptNeed !== "none") {
       this.startTelepromptAnswer({
@@ -1399,12 +1399,13 @@ export class MergeResponseHandler {
     this.showManualDisplay("LISTENING", MANUAL_LISTENING_TEXT, { preserveAnswer: true });
   }
 
-  showManualLongPressProbe(): void {
+  restoreManualDisplayAfterSystemPrompt(delayMs = 1200): void {
     if (this.interactionMode !== "g2_manual") return;
-    this.showManualDisplay("LONG OK", "Long press reached SayNext.", {
-      preserveAnswer: true,
-      durationMs: 1500,
-    });
+    setTimeout(() => {
+      if (this.interactionMode === "g2_manual") {
+        this.showManualListeningStatus();
+      }
+    }, delayMs);
   }
 
   setInteractionMode(mode: InteractionMode): void {
@@ -1491,7 +1492,7 @@ export class MergeResponseHandler {
     const sourceRange = this.buildNewManualSourceRange();
     if (!sourceRange) {
       console.log(`[SayNext] Manual generate has no new speech transcriptCount=${this.transcriptSegments.length} lastGeneratedCursor=${this.lastGeneratedCursor ?? "-"}`);
-      this.showManualDisplay("NO NEW SPEECH", MANUAL_NO_NEW_SPEECH_TEXT, { preserveAnswer: true });
+      this.showManualTransientDisplay("NO NEW SPEECH", MANUAL_NO_NEW_SPEECH_TEXT, { preserveAnswer: true });
       return this.cacheManualAction(clientEventId, {
         status: "no_new_speech",
         sessionId: this.sessionId,
@@ -1634,6 +1635,22 @@ export class MergeResponseHandler {
     }
   }
 
+  private showManualTransientDisplay(
+    status: string,
+    body: string,
+    options: { preserveAnswer?: boolean; durationMs?: number } = {},
+  ): void {
+    const durationMs = options.durationMs ?? MANUAL_TRANSIENT_STATUS_MS;
+    this.showManualDisplay(status, body, { ...options, durationMs });
+    const transientDisplayText = this.currentDisplayText;
+    this.displayTimer = setTimeout(() => {
+      this.displayTimer = null;
+      if (this.interactionMode !== "g2_manual") return;
+      if (this.currentDisplayText !== transientDisplayText) return;
+      this.showManualListeningStatus();
+    }, durationMs);
+  }
+
   private buildNewManualSourceRange(): SourceRange | null {
     let startIndex = 0;
     if (this.lastGeneratedCursor) {
@@ -1688,7 +1705,7 @@ export class MergeResponseHandler {
           this.pendingManualRequest = null;
           this.bumpManualState();
         }
-        this.showManualDisplay("NO NEW SPEECH", MANUAL_NO_NEW_SPEECH_TEXT, { preserveAnswer: true });
+        this.showManualTransientDisplay("NO NEW SPEECH", MANUAL_NO_NEW_SPEECH_TEXT, { preserveAnswer: true });
         return this.cacheManualAction(clientEventId, {
           status: "no_new_speech",
           sessionId: this.sessionId,
@@ -1725,7 +1742,7 @@ export class MergeResponseHandler {
       );
       const relevantPersonalMemoryContext = isClassroomMode
         ? ""
-        : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, sourceText, 3);
+        : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, sourceText, SAYNEXT_PERSONAL_MEMORY_TOP_K);
 
       const response = await withManualGenerationTimeout(
         processConversation(
