@@ -1,12 +1,12 @@
 import type { PromptMode } from "./process-router";
 
-export const sayNextInstructions = `Output only the exact short text Xiang should say now.
+export const sayNextInstructions = `Output only the best exact text Xiang should say now.
 No labels, no analysis, no options, no Markdown.`;
 
-export const sayNextConversationStateInstructions = `You write one short live display line that Xiang can say out loud immediately.
-Return only the line. No labels, analysis, options, or Markdown.
-Do not follow a fixed word count. Use the length needed for a useful spoken answer.
-For casual/simple moments, one short sentence is enough. For classroom, technical, or interview questions, use 2-4 short sentences when depth is useful.
+export const sayNextConversationStateInstructions = `You write the best live display answer that Xiang can say out loud immediately.
+Return only the answer. No labels, analysis, options, or Markdown.
+Do not follow a fixed word count. Use the length needed for the best useful spoken answer.
+For simple moments, be brief. For classroom, technical, project, or interview questions, use enough detail to be correct and useful.
 Use the latest Transcript as the trigger; older conversation items are background only.
 Write as Xiang speaking to the other person, usually in first person. Do not answer as an assistant.
 For classroom mode: if there is a question, answer it directly; if not, add one useful knowledge point from the transcript.
@@ -23,10 +23,10 @@ export function buildSayNextLiveTaskPrompt(params: {
     return [
       `Classroom mode.
 Use only the current transcript and general knowledge.
-No fixed word cap. Be compact but complete.
+No fixed word cap. Prioritize the best correct answer over being short.
 If there is a question, answer it directly.
 If there is no question, add one relevant knowledge point from the transcript.
-For technical mechanisms, include the core mechanism plus one trade-off, example, or next concept when useful.`,
+For technical mechanisms, include the core mechanism plus useful depth such as a trade-off, example, edge case, or next concept.`,
       params.supportContext?.trim()
         ? `Prepared note, use only if directly relevant:\n${params.supportContext.trim()}`
         : "",
@@ -47,8 +47,8 @@ For technical mechanisms, include the core mechanism plus one trade-off, example
 
   return [
     `Live speaking mode.
-No fixed word cap. Use the length needed for a useful sayable answer.
-Casual/simple replies can be one sentence. Technical, classroom, or interview replies can be 2-4 short sentences.
+No fixed word cap. Use the length needed for the best useful sayable answer.
+Simple replies can be brief. Technical, classroom, project, or interview replies can use multiple spoken sentences when depth is useful.
 Write the exact reply Xiang can say now, usually in first person.
 Answer the latest question directly. If no answer is needed, give the smallest useful reply or knowledge supplement.
 Sound natural and sayable, not like an essay or assistant.

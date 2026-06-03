@@ -108,7 +108,7 @@ test("g2 manual mode commits transcript and shows heard status without automatic
   expect(state.transcriptCount).toBe(1);
   expect(state.lastGeneratedCursor).toBeNull();
   expect(state.currentAnswer).toBeNull();
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | HEARD / TAP R1\n\nNew speech captured. Tap R1 for the next reply.");
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | HEARD / TAP R1\nNew speech captured. Tap R1 for the next reply.");
 });
 
 test("manual generate returns no_new_speech before any committed transcript", async () => {
@@ -136,7 +136,7 @@ test("manual clear cancels display state without advancing transcript cursor", a
   expect(result.state.transcriptCount).toBe(1);
   expect(result.state.lastGeneratedCursor).toBeNull();
   expect(session.clearCount).toBe(0);
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | LISTENING\n\nListening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | LISTENING\nListening. Tap R1 after speech.");
 });
 
 test("g2 manual mode shows heard status on glasses while preserving pinned answer text", async () => {
@@ -160,7 +160,7 @@ test("g2 manual mode shows heard status on glasses while preserving pinned answe
 
   await handler.processTranscript("What should I answer next?", Date.now(), "isFinal");
 
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | HEARD / TAP R1\n\nOld pinned answer.");
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | HEARD / TAP R1\nOld pinned answer.");
 });
 
 test("g2 single tap delays manual generation through gesture arbitration", async () => {
@@ -170,7 +170,7 @@ test("g2 single tap delays manual generation through gesture arbitration", async
   user.addSSEClient((data) => events.push(JSON.parse(data)));
 
   await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | LISTENING\n\nListening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | LISTENING\nListening. Tap R1 after speech.");
   session.touchHandler?.({ gesture: "single_tap" });
 
   expect(events.some((event) => event.type === "manual_gesture_pending")).toBe(true);
@@ -238,11 +238,11 @@ test("g2 scroll gestures page the pinned manual answer on glasses", async () => 
   };
 
   session.touchHandler?.({ gesture: "swipe_down" });
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | ANSWER / LISTENING 2/3\n\nSecond page.");
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | ANSWER / LISTENING 2/3\nSecond page.");
 
   session.touchHandler?.({ gesture: "swipe_up" });
   await sleep(20);
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | ANSWER / LISTENING 1/3\n\nFirst page.");
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | ANSWER / LISTENING 1/3\nFirst page.");
 
   expect(events.some((event) => event.reason === "manual_page_ok")).toBe(true);
   user.cleanup();

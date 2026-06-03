@@ -18,6 +18,8 @@ import {
   normalizeSpokenDisplayPunctuation,
 } from "./output-text-utils";
 
+const SAYNEXT_OUTPUT_MAX_CHARS = Number(process.env.SAYNEXT_OUTPUT_MAX_CHARS || 1200);
+
 export {
   countTelepromptWords,
   isGenericSpeakingPrompt,
@@ -133,9 +135,10 @@ export function sanitizeSayNextOutput(text: string): string {
     return "Sure, could you repeat the full question?";
   }
 
-  if (cleaned.length > 360) {
-    const firstSentence = cleaned.match(/^.{1,360}?[.!?](?:\s|$)/)?.[0]?.trim();
-    cleaned = firstSentence || `${cleaned.slice(0, 357).trim()}...`;
+  if (SAYNEXT_OUTPUT_MAX_CHARS > 0 && cleaned.length > SAYNEXT_OUTPUT_MAX_CHARS) {
+    const sentencePattern = new RegExp(`^.{1,${SAYNEXT_OUTPUT_MAX_CHARS}}?[.!?](?:\\s|$)`);
+    const firstSentence = cleaned.match(sentencePattern)?.[0]?.trim();
+    cleaned = firstSentence || `${cleaned.slice(0, Math.max(1, SAYNEXT_OUTPUT_MAX_CHARS - 3)).trim()}...`;
   }
 
   const openParens = (cleaned.match(/\(/g) ?? []).length;

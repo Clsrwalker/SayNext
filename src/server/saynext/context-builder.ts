@@ -56,7 +56,7 @@ export function buildGeneralAsrPromptHint(text: string): string {
 
 export function buildProcessHint(latestTranscript: string, promptMode: PromptMode): string {
   const hints: string[] = [
-    "Process before answering: identify the main request, ignore obvious ASR/noise, decide the safest response move, then write the shortest useful answer.",
+    "Process before answering: identify the main request, ignore obvious ASR/noise, decide the safest response move, then write the best useful answer.",
   ];
 
   const questionCount = (latestTranscript.match(/[?\uFF1F]/g) ?? []).length;
@@ -195,9 +195,9 @@ export function buildCompactXiangProfile(mode: PromptMode): string {
     ],
     classroom: [
       "Classroom: Xiang wants to appear knowledgeable and capable, but still student-like.",
-      "Academic/lecture content: prioritize correctness, but keep live-display answers compact.",
-      "When the speaker is explaining a concept, give one short supplement, concrete example, trade-off, or sharp question Xiang could ask. Prefer about 12-28 words.",
-      "When Xiang is asked directly, give 1-2 short speakable sentences unless the question explicitly asks for detail.",
+      "Academic/lecture content: prioritize correctness and useful depth over extreme brevity.",
+      "When the speaker is explaining a concept, give a useful supplement, concrete example, trade-off, or sharp question Xiang could ask.",
+      "When Xiang is asked directly, answer with enough spoken detail to be correct and useful.",
       "Current Summer 2026 courses: Advanced Cloud Architecting, Deep Learning Applications, and Recommender Systems.",
       "Do not make classroom answers sound like casual small talk.",
     ],
@@ -243,7 +243,7 @@ export function buildLiveXiangProfile(mode: PromptMode): string {
   return [
     "Xiang Li: Chinese international MACS student at Dalhousie in Halifax; previous CS degree at Acadia.",
     "Voice: simple spoken English, calm, modest, internet-native, not corporate or over-polished.",
-    "Goal: help Xiang say the shortest useful thing now; answer first, then one reason/bridge/next step if needed.",
+    "Goal: help Xiang say the best useful thing now; answer first, then add enough reasoning, mechanism, bridge, or next step when useful.",
     "Never invent personal facts, work history, awards, exact dates, family/health/immigration/financial details, or named experiences.",
     "Known projects: Hybrid Search Memory Assistant/SayNext, Elder Album, DalParkAid, JobLens, Study Session Tracker.",
     modeLine[mode],

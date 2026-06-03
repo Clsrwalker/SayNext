@@ -36,8 +36,7 @@ const MIN_ECHO_WORDS = 3;
 const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
 const MANUAL_GENERATION_TIMEOUT_MS = Number(process.env.MANUAL_GENERATION_TIMEOUT_MS || 35_000);
-const MANUAL_GLASSES_BODY_LINES = 3;
-const MANUAL_GLASSES_LINE_UNITS = 42;
+const MANUAL_TEXTWALL_PAGE_CHARS = Number(process.env.MENTRA_MANUAL_PAGE_CHARS || 480);
 const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
 const MANUAL_HEARD_TEXT = "New speech captured. Tap R1 for the next reply.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
@@ -375,87 +374,37 @@ function formatManualDisplay(status: string, body: string, pageIndex?: number, t
     .replace(/\s+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return `SAYNEXT | ${status}${page}\n\n${normalizedBody || "Ready."}`;
-}
-
-function manualDisplayCharUnits(char: string): number {
-  return /[\u1100-\u11ff\u2e80-\u9fff\uf900-\ufaff\uac00-\ud7af\uff00-\uffef]/u.test(char) ? 2 : 1;
-}
-
-function manualDisplayUnits(text: string): number {
-  return Array.from(text).reduce((sum, char) => sum + manualDisplayCharUnits(char), 0);
-}
-
-function splitManualToken(token: string, maxUnits: number): string[] {
-  const chunks: string[] = [];
-  let current = "";
-  let currentUnits = 0;
-
-  for (const char of Array.from(token)) {
-    const charUnits = manualDisplayCharUnits(char);
-    if (current && currentUnits + charUnits > maxUnits) {
-      chunks.push(current);
-      current = char;
-      currentUnits = charUnits;
-    } else {
-      current += char;
-      currentUnits += charUnits;
-    }
-  }
-
-  if (current) chunks.push(current);
-  return chunks;
-}
-
-function wrapManualDisplayText(text: string, maxUnits = MANUAL_GLASSES_LINE_UNITS): string[] {
-  const tokens = text.split(" ").filter(Boolean);
-  const lines: string[] = [];
-  let current = "";
-
-  const pushCurrent = () => {
-    if (!current) return;
-    lines.push(current);
-    current = "";
-  };
-
-  for (const token of tokens) {
-    const candidate = current ? `${current} ${token}` : token;
-    if (manualDisplayUnits(candidate) <= maxUnits) {
-      current = candidate;
-      continue;
-    }
-
-    pushCurrent();
-    if (manualDisplayUnits(token) <= maxUnits) {
-      current = token;
-      continue;
-    }
-
-    for (const chunk of splitManualToken(token, maxUnits)) {
-      if (!current) {
-        current = chunk;
-      } else {
-        pushCurrent();
-        current = chunk;
-      }
-    }
-  }
-
-  pushCurrent();
-  return lines;
+  return `SAYNEXT | ${status}${page}\n${normalizedBody || "Ready."}`;
 }
 
 function paginateManualAnswer(text: string): string[] {
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
   if (!cleaned) return [];
+  const maxChars = Math.max(120, Math.min(900, MANUAL_TEXTWALL_PAGE_CHARS));
+  if (cleaned.length <= maxChars) return [cleaned];
 
-  const lines = wrapManualDisplayText(cleaned);
-  const displayPages: string[] = [];
-  for (let index = 0; index < lines.length; index += MANUAL_GLASSES_BODY_LINES) {
-    displayPages.push(lines.slice(index, index + MANUAL_GLASSES_BODY_LINES).join("\n"));
+  const pages: string[] = [];
+  let remaining = cleaned;
+  while (remaining.length > maxChars) {
+    const window = remaining.slice(0, maxChars + 1);
+    const sentenceBreak = Math.max(
+      window.lastIndexOf(". "),
+      window.lastIndexOf("? "),
+      window.lastIndexOf("! "),
+      window.lastIndexOf("。"),
+      window.lastIndexOf("？"),
+      window.lastIndexOf("！"),
+    );
+    const softBreak = sentenceBreak > Math.floor(maxChars * 0.55)
+      ? sentenceBreak + 1
+      : Math.max(window.lastIndexOf(" "), window.lastIndexOf("，"), window.lastIndexOf(","));
+    const splitAt = softBreak > Math.floor(maxChars * 0.35) ? softBreak : maxChars;
+    pages.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
   }
+  pages.push(remaining);
 
-  const nonEmptyPages = displayPages
+  const nonEmptyPages = pages
     .map((page) => page.trim())
     .filter(Boolean);
 

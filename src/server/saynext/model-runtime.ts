@@ -76,14 +76,14 @@ export async function generateWithOllama(prompt: string, systemInstructions = sa
     signal: controller.signal,
     body: JSON.stringify({
       model: OLLAMA_MODEL,
-      system: `${systemInstructions}\n\nDo not return JSON. Return only one short display sentence.`,
-      prompt: `${prompt}\n\nReturn only one short answer. Obey the output language. No JSON. No labels. No reasoning.`,
+      system: `${systemInstructions}\n\nDo not return JSON. Return only the best display answer Xiang can say now.`,
+      prompt: `${prompt}\n\nReturn only the answer. Use enough detail to be useful. Obey the output language. No JSON. No labels. No reasoning.`,
       stream: false,
       options: {
         temperature: 0.35,
         top_p: 0.9,
         num_ctx: 4096,
-        num_predict: 120,
+        num_predict: 260,
       },
     }),
   }).finally(() => clearTimeout(timeout));
