@@ -15,6 +15,7 @@ import { normalizeKnownProjectAsrAliases } from '../../text/asr-corrections';
 import { detectPromptMode } from '../../saynext/context-builder';
 import { sayNextConversationStateInstructions } from '../../saynext/prompts';
 import { evenHubConversationStateInstructions } from '../../evenhub/prompts';
+import { renderManualBitmapDisplay } from './manual-bitmap-display';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 const SUGGESTION_ECHO_WINDOW_MS = 45 * 1000;
@@ -41,6 +42,7 @@ const MANUAL_TEXTWALL_BODY_LINES = Number(process.env.MENTRA_MANUAL_PAGE_LINES |
 const MANUAL_TEXTWALL_LINE_UNITS = Number(process.env.MENTRA_MANUAL_LINE_UNITS || 56);
 const MANUAL_PARTIAL_DISPLAY_INTERVAL_MS = Number(process.env.MENTRA_MANUAL_PARTIAL_DISPLAY_INTERVAL_MS || 700);
 const MANUAL_RECENT_ASR_WINDOW_MS = Number(process.env.MENTRA_MANUAL_RECENT_ASR_WINDOW_MS || 60_000);
+const MANUAL_BITMAP_DISPLAY_ENABLED = process.env.MENTRA_MANUAL_BITMAP_DISPLAY !== "false";
 const MANUAL_SPLIT_DISPLAY_ENABLED = process.env.MENTRA_MANUAL_SPLIT_DISPLAY !== "false";
 const MANUAL_LISTENING_TEXT = "Listening for speech.\nSay the question, then tap R1.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
@@ -404,6 +406,13 @@ function formatManualHeader(status: string, pageIndex?: number, totalPages?: num
     ? ` ${pageIndex + 1}/${totalPages}`
     : "";
   return `${compactManualStatus(status)}${page}`;
+}
+
+function formatManualBitmapAnswerHeader(pageIndex?: number, totalPages?: number): string {
+  const page = totalPages && totalPages > 1 && pageIndex !== undefined
+    ? ` ${pageIndex + 1}/${totalPages}`
+    : "";
+  return `ANSWER${page}`;
 }
 
 function normalizeManualDisplayBody(body: string): string {
@@ -1723,8 +1732,33 @@ export class MergeResponseHandler {
     this.lastInsightText = displayText;
 
     const layouts = this.session.layouts as typeof this.session.layouts & {
+      showBitmapView?: (base64Bitmap: string, options?: { padding?: { left: number; top: number } }) => Promise<void>;
       showDoubleTextWall?: (topText: string, bottomText: string, options?: { durationMs?: number }) => void;
     };
+    const canBitmapDisplay = MANUAL_BITMAP_DISPLAY_ENABLED && typeof layouts.showBitmapView === "function";
+    if (canBitmapDisplay) {
+      const answerHeader = hasPinnedAnswerBody
+        ? formatManualBitmapAnswerHeader(pageIndex, totalPages)
+        : "SAYNEXT";
+      const answerBody = displayBody || "Ready.";
+      const statusPanelBody = statusBody || header;
+      const bitmap = renderManualBitmapDisplay({
+        statusHeader: header,
+        statusBody: statusPanelBody,
+        answerHeader,
+        answerBody,
+      });
+      void layouts.showBitmapView?.(bitmap, { padding: { left: 0, top: 0 } }).catch((error) => {
+        console.error("[manual-display] bitmap display failed, falling back to text wall", error);
+        if (options.durationMs) {
+          this.session.layouts.showTextWall(displayText, { durationMs: options.durationMs });
+        } else {
+          this.session.layouts.showTextWall(displayText);
+        }
+      });
+      return;
+    }
+
     const canSplitDisplay = MANUAL_SPLIT_DISPLAY_ENABLED && typeof layouts.showDoubleTextWall === "function";
     if (canSplitDisplay) {
       const topText = hasPinnedAnswerBody && statusBody ? `${header}\n${statusBody}` : header;
