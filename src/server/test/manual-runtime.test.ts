@@ -281,29 +281,36 @@ test("manual no_new_speech shows the last raw ASR when only low-value partial ar
 
 test("manual split display keeps answer pinned while top area shows live transcript", () => {
   const { session, handler } = makeSplitManualHandler();
+  const previousSplit = process.env.MENTRA_MANUAL_SPLIT_DISPLAY;
+  process.env.MENTRA_MANUAL_SPLIT_DISPLAY = "true";
 
-  (handler as any).currentManualAnswer = {
-    answerGroupId: "manual_group_split",
-    answerId: "manual_answer_split",
-    requestId: "manual_req_split",
-    sourceRange: {
-      fromExclusive: null,
-      toInclusive: "seg_1",
-      segmentIds: ["seg_1"],
-      textDigest: "digest",
-    },
-    output: "Pinned answer page one.",
-    pages: ["Pinned answer page one.", "Pinned answer page two."],
-    pageIndex: 0,
-    createdAt: Date.now(),
-  };
+  try {
+    (handler as any).currentManualAnswer = {
+      answerGroupId: "manual_group_split",
+      answerId: "manual_answer_split",
+      requestId: "manual_req_split",
+      sourceRange: {
+        fromExclusive: null,
+        toInclusive: "seg_1",
+        segmentIds: ["seg_1"],
+        textDigest: "digest",
+      },
+      output: "Pinned answer page one.",
+      pages: ["Pinned answer page one.", "Pinned answer page two."],
+      pageIndex: 0,
+      createdAt: Date.now(),
+    };
 
-  handler.handlePartialTranscript("What is your biggest improvement area?", Date.now());
+    handler.handlePartialTranscript("What is your biggest improvement area?", Date.now());
 
-  const display = session.displays.at(-1);
-  expect(display?.kind).toBe("double");
-  expect(display?.topText).toBe("SN | HEARING 1/2\nHearing: What is your biggest improvement area?");
-  expect(display?.bottomText).toBe("Pinned answer page one.");
+    const display = session.displays.at(-1);
+    expect(display?.kind).toBe("double");
+    expect(display?.topText).toBe("SN | HEARING 1/2\nHearing: What is your biggest improvement area?");
+    expect(display?.bottomText).toBe("Pinned answer page one.");
+  } finally {
+    if (previousSplit === undefined) delete process.env.MENTRA_MANUAL_SPLIT_DISPLAY;
+    else process.env.MENTRA_MANUAL_SPLIT_DISPLAY = previousSplit;
+  }
 });
 
 test("g2 single tap delays manual generation through gesture arbitration", async () => {

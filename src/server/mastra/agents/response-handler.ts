@@ -41,7 +41,9 @@ const MANUAL_TEXTWALL_BODY_LINES = Number(process.env.MENTRA_MANUAL_PAGE_LINES |
 const MANUAL_TEXTWALL_LINE_UNITS = Number(process.env.MENTRA_MANUAL_LINE_UNITS || 56);
 const MANUAL_PARTIAL_DISPLAY_INTERVAL_MS = Number(process.env.MENTRA_MANUAL_PARTIAL_DISPLAY_INTERVAL_MS || 700);
 const MANUAL_RECENT_ASR_WINDOW_MS = Number(process.env.MENTRA_MANUAL_RECENT_ASR_WINDOW_MS || 60_000);
-const MANUAL_SPLIT_DISPLAY_ENABLED = process.env.MENTRA_MANUAL_SPLIT_DISPLAY !== "false";
+function isManualSplitDisplayEnabled(): boolean {
+  return process.env.MENTRA_MANUAL_SPLIT_DISPLAY === "true";
+}
 const MANUAL_LISTENING_TEXT = "Listening for speech.\nSay the question, then tap R1.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
 const MANUAL_BUSY_TEXT = "Still generating. Wait a moment.";
@@ -1725,10 +1727,13 @@ export class MergeResponseHandler {
     const layouts = this.session.layouts as typeof this.session.layouts & {
       showDoubleTextWall?: (topText: string, bottomText: string, options?: { durationMs?: number }) => void;
     };
-    const canSplitDisplay = MANUAL_SPLIT_DISPLAY_ENABLED && typeof layouts.showDoubleTextWall === "function";
+    const canSplitDisplay = isManualSplitDisplayEnabled() && typeof layouts.showDoubleTextWall === "function";
     if (canSplitDisplay) {
       const topText = hasPinnedAnswerBody && statusBody ? `${header}\n${statusBody}` : header;
       const bottomText = displayBody || "Ready.";
+      console.log(
+        `[SayNext] Manual display mode=split status=${status} topChars=${topText.length} bottomChars=${bottomText.length}`,
+      );
       if (options.durationMs) {
         layouts.showDoubleTextWall?.(topText, bottomText, { durationMs: options.durationMs });
       } else {
@@ -1737,6 +1742,7 @@ export class MergeResponseHandler {
       return;
     }
 
+    console.log(`[SayNext] Manual display mode=text status=${status} chars=${displayText.length}`);
     if (options.durationMs) {
       this.session.layouts.showTextWall(displayText, { durationMs: options.durationMs });
       return;
