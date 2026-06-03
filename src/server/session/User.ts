@@ -338,6 +338,7 @@ export class User {
 
     if (gesture.includes("hold") || gesture.includes("long")) {
       this.cancelPendingSingleTap();
+      this.responseHandler?.showManualLongPressProbe();
       this.broadcastInsightEvent({ type: 'manual_gesture_ignored', gesture, reason: 'long_press_reserved' });
       return;
     }

@@ -36,7 +36,8 @@ const MIN_ECHO_WORDS = 3;
 const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
 const MANUAL_GENERATION_TIMEOUT_MS = Number(process.env.MANUAL_GENERATION_TIMEOUT_MS || 35_000);
-const MANUAL_TEXTWALL_PAGE_CHARS = Number(process.env.MENTRA_MANUAL_PAGE_CHARS || 480);
+const MANUAL_TEXTWALL_BODY_LINES = Number(process.env.MENTRA_MANUAL_PAGE_LINES || 3);
+const MANUAL_TEXTWALL_LINE_UNITS = Number(process.env.MENTRA_MANUAL_LINE_UNITS || 56);
 const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
 const MANUAL_HEARD_TEXT = "New speech captured. Tap R1 for the next reply.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
@@ -366,50 +367,116 @@ function makeRuntimeId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function compactManualStatus(status: string): string {
+  switch (status) {
+    case "ANSWER / LISTENING":
+      return "ANS | LISTEN";
+    case "HEARD / TAP R1":
+      return "SN | HEARD TAP";
+    case "LISTENING":
+      return "SN | LISTEN";
+    case "GENERATING":
+      return "SN | GEN";
+    case "BUSY":
+      return "SN | BUSY";
+    case "NO NEW SPEECH":
+      return "SN | NO SPEECH";
+    case "LONG OK":
+      return "SN | LONG OK";
+    case "READY":
+      return "SN | READY";
+    default:
+      return `SN | ${status}`;
+  }
+}
+
 function formatManualDisplay(status: string, body: string, pageIndex?: number, totalPages?: number): string {
   const page = totalPages && totalPages > 1 && pageIndex !== undefined
     ? ` ${pageIndex + 1}/${totalPages}`
     : "";
+  const header = `${compactManualStatus(status)}${page}`;
   const normalizedBody = String(body || "")
     .replace(/\s+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return `SAYNEXT | ${status}${page}\n${normalizedBody || "Ready."}`;
+  return `${header}\n${normalizedBody || "Ready."}`;
 }
 
-function paginateManualAnswer(text: string): string[] {
+function manualDisplayCharUnits(char: string): number {
+  return /[\u1100-\u11ff\u2e80-\u9fff\uf900-\ufaff\uac00-\ud7af\uff00-\uffef]/u.test(char) ? 2 : 1;
+}
+
+function manualDisplayUnits(text: string): number {
+  return Array.from(text).reduce((sum, char) => sum + manualDisplayCharUnits(char), 0);
+}
+
+function splitManualDisplayToken(token: string, maxUnits: number): string[] {
+  const chunks: string[] = [];
+  let current = "";
+  let currentUnits = 0;
+
+  for (const char of Array.from(token)) {
+    const charUnits = manualDisplayCharUnits(char);
+    if (current && currentUnits + charUnits > maxUnits) {
+      chunks.push(current);
+      current = char;
+      currentUnits = charUnits;
+    } else {
+      current += char;
+      currentUnits += charUnits;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function wrapManualDisplayText(text: string, maxUnits: number): string[] {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+
+  const lines: string[] = [];
+  let current = "";
+
+  for (const token of normalized.split(" ").filter(Boolean)) {
+    const candidate = current ? `${current} ${token}` : token;
+    if (manualDisplayUnits(candidate) <= maxUnits) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) lines.push(current);
+
+    if (manualDisplayUnits(token) <= maxUnits) {
+      current = token;
+      continue;
+    }
+
+    const chunks = splitManualDisplayToken(token, maxUnits);
+    lines.push(...chunks.slice(0, -1));
+    current = chunks.at(-1) || "";
+  }
+
+  if (current) lines.push(current);
+  return lines;
+}
+
+export function paginateManualAnswer(text: string): string[] {
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
   if (!cleaned) return [];
-  const maxChars = Math.max(120, Math.min(900, MANUAL_TEXTWALL_PAGE_CHARS));
-  if (cleaned.length <= maxChars) return [cleaned];
 
+  const maxBodyLines = Math.max(1, Math.min(4, MANUAL_TEXTWALL_BODY_LINES));
+  const maxLineUnits = Math.max(24, Math.min(80, MANUAL_TEXTWALL_LINE_UNITS));
+  const wrappedLines = wrapManualDisplayText(cleaned, maxLineUnits);
   const pages: string[] = [];
-  let remaining = cleaned;
-  while (remaining.length > maxChars) {
-    const window = remaining.slice(0, maxChars + 1);
-    const sentenceBreak = Math.max(
-      window.lastIndexOf(". "),
-      window.lastIndexOf("? "),
-      window.lastIndexOf("! "),
-      window.lastIndexOf("。"),
-      window.lastIndexOf("？"),
-      window.lastIndexOf("！"),
-    );
-    const softBreak = sentenceBreak > Math.floor(maxChars * 0.55)
-      ? sentenceBreak + 1
-      : Math.max(window.lastIndexOf(" "), window.lastIndexOf("，"), window.lastIndexOf(","));
-    const splitAt = softBreak > Math.floor(maxChars * 0.35) ? softBreak : maxChars;
-    pages.push(remaining.slice(0, splitAt).trim());
-    remaining = remaining.slice(splitAt).trim();
+
+  for (let index = 0; index < wrappedLines.length; index += maxBodyLines) {
+    pages.push(wrappedLines.slice(index, index + maxBodyLines).join("\n"));
   }
-  pages.push(remaining);
 
-  const nonEmptyPages = pages
-    .map((page) => page.trim())
-    .filter(Boolean);
-
-  return nonEmptyPages.length > 0 ? nonEmptyPages : [cleaned];
+  return pages.map((page) => page.trim()).filter(Boolean);
 }
+
 
 async function withManualGenerationTimeout<T>(promise: Promise<T>, requestId: string): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -1330,6 +1397,14 @@ export class MergeResponseHandler {
   showManualListeningStatus(): void {
     if (this.interactionMode !== "g2_manual") return;
     this.showManualDisplay("LISTENING", MANUAL_LISTENING_TEXT, { preserveAnswer: true });
+  }
+
+  showManualLongPressProbe(): void {
+    if (this.interactionMode !== "g2_manual") return;
+    this.showManualDisplay("LONG OK", "Long press reached SayNext.", {
+      preserveAnswer: true,
+      durationMs: 1500,
+    });
   }
 
   setInteractionMode(mode: InteractionMode): void {

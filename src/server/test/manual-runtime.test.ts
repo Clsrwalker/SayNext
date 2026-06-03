@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { AppSession } from "@mentra/sdk";
 import { LocationManager } from "../manager/LocationManager";
-import { MergeResponseHandler } from "../mastra/agents/response-handler";
+import { MergeResponseHandler, paginateManualAnswer } from "../mastra/agents/response-handler";
 import { User } from "../session/User";
 
 type DisplayCall = {
@@ -108,7 +108,7 @@ test("g2 manual mode commits transcript and shows heard status without automatic
   expect(state.transcriptCount).toBe(1);
   expect(state.lastGeneratedCursor).toBeNull();
   expect(state.currentAnswer).toBeNull();
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | HEARD / TAP R1\nNew speech captured. Tap R1 for the next reply.");
+  expect(session.displays.at(-1)?.text).toBe("SN | HEARD TAP\nNew speech captured. Tap R1 for the next reply.");
 });
 
 test("manual generate returns no_new_speech before any committed transcript", async () => {
@@ -136,7 +136,7 @@ test("manual clear cancels display state without advancing transcript cursor", a
   expect(result.state.transcriptCount).toBe(1);
   expect(result.state.lastGeneratedCursor).toBeNull();
   expect(session.clearCount).toBe(0);
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | LISTENING\nListening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nListening. Tap R1 after speech.");
 });
 
 test("g2 manual mode shows heard status on glasses while preserving pinned answer text", async () => {
@@ -160,7 +160,7 @@ test("g2 manual mode shows heard status on glasses while preserving pinned answe
 
   await handler.processTranscript("What should I answer next?", Date.now(), "isFinal");
 
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | HEARD / TAP R1\nOld pinned answer.");
+  expect(session.displays.at(-1)?.text).toBe("SN | HEARD TAP\nOld pinned answer.");
 });
 
 test("g2 single tap delays manual generation through gesture arbitration", async () => {
@@ -170,7 +170,7 @@ test("g2 single tap delays manual generation through gesture arbitration", async
   user.addSSEClient((data) => events.push(JSON.parse(data)));
 
   await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | LISTENING\nListening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nListening. Tap R1 after speech.");
   session.touchHandler?.({ gesture: "single_tap" });
 
   expect(events.some((event) => event.type === "manual_gesture_pending")).toBe(true);
@@ -210,6 +210,8 @@ test("g2 long press is ignored by SayNext because the system may reserve it", as
   await sleep(20);
 
   expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "long_press_reserved")).toBe(true);
+  expect(session.displays.at(-1)?.text).toBe("SN | LONG OK\nLong press reached SayNext.");
+  expect(session.displays.at(-1)?.durationMs).toBe(1500);
   expect(session.clearCount).toBe(0);
   user.cleanup();
 });
@@ -238,14 +240,42 @@ test("g2 scroll gestures page the pinned manual answer on glasses", async () => 
   };
 
   session.touchHandler?.({ gesture: "swipe_down" });
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | ANSWER / LISTENING 2/3\nSecond page.");
+  expect(session.displays.at(-1)?.text).toBe("ANS | LISTEN 2/3\nSecond page.");
 
   session.touchHandler?.({ gesture: "swipe_up" });
   await sleep(20);
-  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | ANSWER / LISTENING 1/3\nFirst page.");
+  expect(session.displays.at(-1)?.text).toBe("ANS | LISTEN 1/3\nFirst page.");
 
   expect(events.some((event) => event.reason === "manual_page_ok")).toBe(true);
   user.cleanup();
+});
+
+test("manual answer pagination stays within visible lines and preserves text", () => {
+  const input = [
+    "Database indexes usually improve reads by giving the query planner a smaller search path.",
+    "The trade-off is slower writes and extra storage, because every insert or update may also update the index.",
+    "For deep interview answers, mention selectivity, access pattern fit, and whether the index matches the where and order by clauses.",
+  ].join(" ");
+
+  const pages = paginateManualAnswer(input);
+
+  expect(pages.length).toBeGreaterThan(1);
+  for (const page of pages) {
+    expect(page.split("\n").length).toBeLessThanOrEqual(3);
+  }
+  expect(pages.join(" ").replace(/\s+/g, " ").trim()).toBe(input);
+});
+
+test("manual answer pagination does not drop continuous CJK text", () => {
+  const input = "数据库索引的核心是让查询少扫描数据但是写入会变慢因为索引本身也要维护".repeat(4);
+  const pages = paginateManualAnswer(input);
+  const reconstructed = pages.join("").replace(/\s+/g, "");
+
+  expect(pages.length).toBeGreaterThan(1);
+  for (const page of pages) {
+    expect(page.split("\n").length).toBeLessThanOrEqual(3);
+  }
+  expect(reconstructed).toBe(input);
 });
 
 test("g2 two short button presses are treated as double tap", async () => {
