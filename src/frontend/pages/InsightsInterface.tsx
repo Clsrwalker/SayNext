@@ -370,8 +370,11 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             const reason = String(data.reason || '');
             if (reason === 'manual_ok') setRuntimeStatus('Answer ready');
             else if (reason.includes('manual_transcript_committed')) setRuntimeStatus('Speech captured');
+            else if (reason.includes('manual_busy')) setRuntimeStatus('Generating');
             else if (reason.includes('manual_no_') || reason.includes('manual_clear_')) setRuntimeStatus('Listening');
-            setStatusDetail(data.reason ? `Last event: ${data.reason}` : 'Processing finished.');
+            setStatusDetail(reason.includes('manual_busy')
+              ? 'A previous answer is still generating. Wait a moment or try again after it finishes.'
+              : data.reason ? `Last event: ${data.reason}` : 'Processing finished.');
           } else if (data.type === 'manual_pause') {
             setIsPausedForReading(Boolean(data.paused));
             setIsProcessing(false);

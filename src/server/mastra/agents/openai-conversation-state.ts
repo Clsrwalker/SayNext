@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_CONVERSATIONS_URL = "https://api.openai.com/v1/conversations";
+const OPENAI_CONVERSATION_CLEANUP_WAIT_TIMEOUT_MS = Number(process.env.OPENAI_CONVERSATION_CLEANUP_WAIT_TIMEOUT_MS || 1500);
+const OPENAI_CONVERSATION_CLEANUP_DELETE_TIMEOUT_MS = Number(process.env.OPENAI_CONVERSATION_CLEANUP_DELETE_TIMEOUT_MS || 5000);
 
 export type TranscriptCommitReason = "final" | "timeout";
 
@@ -169,6 +171,10 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class OpenAiConversationSession {
   private conversationId: string | null = null;
   private conversationCreatePromise: Promise<string> | null = null;
@@ -296,12 +302,16 @@ export class OpenAiConversationSession {
       .then(async () => {
         const apiKey = getOpenAiApiKey();
         for (const itemId of outputItemIds) {
-          const response = await fetch(`${OPENAI_CONVERSATIONS_URL}/${encodeURIComponent(conversationId)}/items/${encodeURIComponent(itemId)}`, {
-            method: "DELETE",
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
+          const response = await fetchWithTimeout(
+            `${OPENAI_CONVERSATIONS_URL}/${encodeURIComponent(conversationId)}/items/${encodeURIComponent(itemId)}`,
+            {
+              method: "DELETE",
+              headers: {
+                Authorization: `Bearer ${apiKey}`,
+              },
             },
-          });
+            OPENAI_CONVERSATION_CLEANUP_DELETE_TIMEOUT_MS,
+          );
           if (!response.ok) {
             console.warn(`OpenAI conversation output cleanup failed for ${itemId}: ${response.status} ${await response.text()}`);
           }
@@ -311,9 +321,14 @@ export class OpenAiConversationSession {
 
   private async waitForCleanup(): Promise<void> {
     try {
-      await this.cleanupQueue;
+      await Promise.race([
+        this.cleanupQueue,
+        sleep(OPENAI_CONVERSATION_CLEANUP_WAIT_TIMEOUT_MS).then(() => {
+          throw new Error(`cleanup wait timed out after ${OPENAI_CONVERSATION_CLEANUP_WAIT_TIMEOUT_MS}ms`);
+        }),
+      ]);
     } catch (error) {
-      console.warn(`OpenAI conversation cleanup queue failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`OpenAI conversation cleanup queue skipped: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }

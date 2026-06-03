@@ -35,6 +35,7 @@ const MAX_DISPLAYED_SUGGESTIONS = 12;
 const MIN_ECHO_WORDS = 3;
 const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
+const MANUAL_GENERATION_TIMEOUT_MS = Number(process.env.MANUAL_GENERATION_TIMEOUT_MS || 35_000);
 const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
 const MANUAL_NO_NEW_SPEECH_TEXT = "No new speech yet.";
@@ -376,6 +377,23 @@ function formatManualDisplay(status: string, body: string, pageIndex?: number, t
 function paginateManualAnswer(text: string): string[] {
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
   return cleaned ? [cleaned] : [];
+}
+
+async function withManualGenerationTimeout<T>(promise: Promise<T>, requestId: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Manual generation timed out after ${MANUAL_GENERATION_TIMEOUT_MS}ms (${requestId})`)),
+          MANUAL_GENERATION_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function isLikelyQuestionSuggestionPartialEcho(transcript: string, candidate: string, transcriptCoverage: number, candidateCoverage: number): boolean {
@@ -1358,6 +1376,7 @@ export class MergeResponseHandler {
     if (cached) return cached;
 
     if (this.pendingManualRequest) {
+      console.log(`[SayNext] Manual generate ignored busy pending=${this.pendingManualRequest.requestId} kind=${this.pendingManualRequest.kind}`);
       return this.cacheManualAction(clientEventId, {
         status: "busy",
         sessionId: this.sessionId,
@@ -1367,6 +1386,7 @@ export class MergeResponseHandler {
 
     const sourceRange = this.buildNewManualSourceRange();
     if (!sourceRange) {
+      console.log(`[SayNext] Manual generate has no new speech transcriptCount=${this.transcriptSegments.length} lastGeneratedCursor=${this.lastGeneratedCursor ?? "-"}`);
       this.showManualStatusIfNoAnswer(MANUAL_NO_NEW_SPEECH_TEXT);
       return this.cacheManualAction(clientEventId, {
         status: "no_new_speech",
@@ -1383,6 +1403,7 @@ export class MergeResponseHandler {
     if (cached) return cached;
 
     if (this.pendingManualRequest) {
+      console.log(`[SayNext] Manual regenerate ignored busy pending=${this.pendingManualRequest.requestId} kind=${this.pendingManualRequest.kind}`);
       return this.cacheManualAction(clientEventId, {
         status: "busy",
         sessionId: this.sessionId,
@@ -1391,6 +1412,7 @@ export class MergeResponseHandler {
     }
 
     if (!this.currentManualAnswer) {
+      console.log("[SayNext] Manual regenerate has no current answer");
       this.showManualStatusIfNoAnswer(MANUAL_NO_ANSWER_TEXT);
       return this.cacheManualAction(clientEventId, {
         status: "no_current_answer",
@@ -1528,8 +1550,10 @@ export class MergeResponseHandler {
       sourceRange,
       cancelled: false,
     };
+    const startedAt = Date.now();
     this.pendingManualRequest = pending;
     this.bumpManualState();
+    console.log(`[SayNext] Manual generation start request=${requestId} kind=${kind} segments=${sourceRange.segmentIds.length} digest=${sourceRange.textDigest}`);
     this.onStatus?.({ type: "manual_generating", requestId, kind, sourceRange, state: this.getManualState() });
     if (!this.currentManualAnswer) {
       this.session.layouts.showTextWall(formatManualDisplay("GENERATING", MANUAL_GENERATING_TEXT));
@@ -1581,24 +1605,28 @@ export class MergeResponseHandler {
         ? ""
         : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, sourceText, 3);
 
-      const response = await processConversation(
-        context,
-        this.frequency,
-        eventSnapshot,
-        this.outputLanguage,
-        activePrenoteContext,
-        activeSceneProfilePrompt,
-        relevantPersonalMemoryContext,
-        {
-          openAiConversationSession: this.openAiConversationSession,
-          transcriptCommitReason: "final",
-          responseStyle: "manual",
-          promptModeOverride: this.manualPromptModeOverride || undefined,
-          promptPreset: this.promptPreset,
-        },
+      const response = await withManualGenerationTimeout(
+        processConversation(
+          context,
+          this.frequency,
+          eventSnapshot,
+          this.outputLanguage,
+          activePrenoteContext,
+          activeSceneProfilePrompt,
+          relevantPersonalMemoryContext,
+          {
+            openAiConversationSession: this.openAiConversationSession,
+            transcriptCommitReason: "final",
+            responseStyle: "manual",
+            promptModeOverride: this.manualPromptModeOverride || undefined,
+            promptPreset: this.promptPreset,
+          },
+        ),
+        requestId,
       );
 
       if (pending.cancelled || this.pendingManualRequest?.requestId !== requestId) {
+        console.log(`[SayNext] Manual generation ignored request=${requestId} kind=${kind} reason=${pending.cancelled ? "cancelled" : "stale"} ms=${Date.now() - startedAt}`);
         return {
           status: "noop",
           sessionId: this.sessionId,
@@ -1616,6 +1644,7 @@ export class MergeResponseHandler {
           error: `Manual generation returned ${response.type}`,
         };
         this.onStatus?.({ type: "manual_error", requestId, error: result.error, state: result.state });
+        console.log(`[SayNext] Manual generation error request=${requestId} kind=${kind} reason=${result.error} ms=${Date.now() - startedAt}`);
         return this.cacheManualAction(clientEventId, result);
       }
 
@@ -1649,6 +1678,7 @@ export class MergeResponseHandler {
         answer: this.manualAnswerPayload(answer),
       };
       this.onStatus?.({ type: "manual_answer", requestId, state: result.state, answer: result.answer });
+      console.log(`[SayNext] Manual generation done request=${requestId} kind=${kind} words=${wordCountForEcho(response.output)} ms=${Date.now() - startedAt}`);
       return this.cacheManualAction(clientEventId, result);
     } catch (error) {
       if (this.pendingManualRequest?.requestId === requestId) {
@@ -1662,6 +1692,7 @@ export class MergeResponseHandler {
         error: error instanceof Error ? error.message : String(error),
       };
       this.onStatus?.({ type: "manual_error", requestId, error: result.error, state: result.state });
+      console.log(`[SayNext] Manual generation failed request=${requestId} kind=${kind} error=${result.error} ms=${Date.now() - startedAt}`);
       return this.cacheManualAction(clientEventId, result);
     }
   }
