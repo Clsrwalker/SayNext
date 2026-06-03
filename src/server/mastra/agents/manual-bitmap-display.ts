@@ -73,7 +73,7 @@ class MonoBitmap {
 
   constructor() {
     const fileSize = PIXEL_DATA_OFFSET + ROW_SIZE_BYTES * DISPLAY_HEIGHT;
-    this.buffer = Buffer.alloc(fileSize, 0xff);
+    this.buffer = Buffer.alloc(fileSize, 0x00);
     this.writeHeader(fileSize);
   }
 
@@ -81,15 +81,15 @@ class MonoBitmap {
     return this.buffer.toString("base64");
   }
 
-  setPixel(x: number, y: number, black: boolean): void {
+  setPixel(x: number, y: number, lit: boolean): void {
     if (x < 0 || y < 0 || x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT) return;
     const destY = DISPLAY_HEIGHT - 1 - y;
     const byteOffset = PIXEL_DATA_OFFSET + destY * ROW_SIZE_BYTES + Math.floor(x / 8);
     const bit = 7 - (x % 8);
-    if (black) {
-      this.buffer[byteOffset] &= ~(1 << bit);
-    } else {
+    if (lit) {
       this.buffer[byteOffset] |= 1 << bit;
+    } else {
+      this.buffer[byteOffset] &= ~(1 << bit);
     }
   }
 

@@ -390,6 +390,10 @@ test("manual bitmap renderer creates a Mentra-sized 1-bit BMP", () => {
   expect(buffer.readUInt32LE(22)).toBe(135);
   expect(buffer.readUInt16LE(28)).toBe(1);
   expect(buffer.length).toBe(9782);
+
+  const pixelData = buffer.subarray(62);
+  expect(pixelData.some((byte) => byte !== 0x00)).toBe(true);
+  expect(pixelData.filter((byte) => byte === 0xff).length).toBeLessThan(pixelData.length / 3);
 });
 
 test("g2 single tap delays manual generation through gesture arbitration", async () => {
