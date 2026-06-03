@@ -350,7 +350,7 @@ test("manual split display keeps answer pinned while top area shows live transcr
   expect(display?.bottomText).toBe("Pinned answer page one.");
 });
 
-test("manual bitmap display uses one custom Conversate-style frame when available", () => {
+test("manual display defaults to split text layout even when bitmap API is available", () => {
   const { session, handler } = makeBitmapManualHandler();
 
   (handler as any).currentManualAnswer = {
@@ -372,8 +372,9 @@ test("manual bitmap display uses one custom Conversate-style frame when availabl
   handler.handlePartialTranscript("What is your biggest improvement area?", Date.now());
 
   const display = session.displays.at(-1);
-  expect(display?.kind).toBe("bitmap");
-  expect(display?.bitmap?.startsWith("Qk")).toBe(true);
+  expect(display?.kind).toBe("double");
+  expect(display?.topText).toBe("SN | HEARING 1/2\nHearing: What is your biggest improvement area?");
+  expect(display?.bottomText).toBe("Pinned answer should stay in the answer panel.");
 });
 
 test("manual bitmap renderer creates a Mentra-sized 1-bit BMP", () => {
