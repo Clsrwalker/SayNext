@@ -7,6 +7,9 @@ import { User } from "../session/User";
 type DisplayCall = {
   text: string;
   durationMs?: number;
+  topText?: string;
+  bottomText?: string;
+  kind?: "text" | "double";
 };
 
 class MockSession {
@@ -15,7 +18,7 @@ class MockSession {
 
   layouts = {
     showTextWall: (text: string, options: { durationMs?: number } = {}) => {
-      this.displays.push({ text, durationMs: options.durationMs });
+      this.displays.push({ text, durationMs: options.durationMs, kind: "text" });
     },
     clearView: () => {
       this.clearCount += 1;
@@ -26,6 +29,26 @@ class MockSession {
     info: () => undefined,
     warn: () => undefined,
     error: () => undefined,
+  };
+}
+
+class SplitMockSession extends MockSession {
+  layouts = {
+    showTextWall: (text: string, options: { durationMs?: number } = {}) => {
+      this.displays.push({ text, durationMs: options.durationMs, kind: "text" });
+    },
+    showDoubleTextWall: (topText: string, bottomText: string, options: { durationMs?: number } = {}) => {
+      this.displays.push({
+        text: `${topText}\n---\n${bottomText}`,
+        topText,
+        bottomText,
+        durationMs: options.durationMs,
+        kind: "double",
+      });
+    },
+    clearView: () => {
+      this.clearCount += 1;
+    },
   };
 }
 
@@ -92,6 +115,21 @@ function makeManualHandler() {
       session as unknown as AppSession,
       "manual-test-user",
       new LocationManager("manual-test-user"),
+      "high",
+      "english",
+      "g2_manual",
+    );
+    return { session, handler };
+  });
+}
+
+function makeSplitManualHandler() {
+  return withConversationStateDisabled(() => {
+    const session = new SplitMockSession();
+    const handler = new MergeResponseHandler(
+      session as unknown as AppSession,
+      "manual-split-test-user",
+      new LocationManager("manual-split-test-user"),
       "high",
       "english",
       "g2_manual",
@@ -177,9 +215,7 @@ test("g2 manual mode shows heard transcript status on glasses when new speech ar
 
   await handler.processTranscript("What should I answer next?", Date.now(), "isFinal");
 
-  expect(session.displays.at(-1)?.text).toBe(
-    "SN | HEARD\nHeard: What should I answer next?\nTap R1 to answer.",
-  );
+  expect(session.displays.at(-1)?.text).toBe("SN | HEARD\nOld pinned answer.");
 });
 
 test("manual no_new_speech restores the pinned answer after the hint", async () => {
@@ -241,6 +277,33 @@ test("manual no_new_speech shows the last raw ASR when only low-value partial ar
 
   expect(result.status).toBe("no_new_speech");
   expect(session.displays.at(-1)?.text).toBe("SN | NO ASR\nNo new useful speech.\nLast ASR: And.");
+});
+
+test("manual split display keeps answer pinned while top area shows live transcript", () => {
+  const { session, handler } = makeSplitManualHandler();
+
+  (handler as any).currentManualAnswer = {
+    answerGroupId: "manual_group_split",
+    answerId: "manual_answer_split",
+    requestId: "manual_req_split",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "digest",
+    },
+    output: "Pinned answer page one.",
+    pages: ["Pinned answer page one.", "Pinned answer page two."],
+    pageIndex: 0,
+    createdAt: Date.now(),
+  };
+
+  handler.handlePartialTranscript("What is your biggest improvement area?", Date.now());
+
+  const display = session.displays.at(-1);
+  expect(display?.kind).toBe("double");
+  expect(display?.topText).toBe("SN | HEARING 1/2\nHearing: What is your biggest improvement area?");
+  expect(display?.bottomText).toBe("Pinned answer page one.");
 });
 
 test("g2 single tap delays manual generation through gesture arbitration", async () => {

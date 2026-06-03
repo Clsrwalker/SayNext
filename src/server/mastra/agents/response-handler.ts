@@ -41,6 +41,7 @@ const MANUAL_TEXTWALL_BODY_LINES = Number(process.env.MENTRA_MANUAL_PAGE_LINES |
 const MANUAL_TEXTWALL_LINE_UNITS = Number(process.env.MENTRA_MANUAL_LINE_UNITS || 56);
 const MANUAL_PARTIAL_DISPLAY_INTERVAL_MS = Number(process.env.MENTRA_MANUAL_PARTIAL_DISPLAY_INTERVAL_MS || 700);
 const MANUAL_RECENT_ASR_WINDOW_MS = Number(process.env.MENTRA_MANUAL_RECENT_ASR_WINDOW_MS || 60_000);
+const MANUAL_SPLIT_DISPLAY_ENABLED = process.env.MENTRA_MANUAL_SPLIT_DISPLAY !== "false";
 const MANUAL_LISTENING_TEXT = "Listening for speech.\nSay the question, then tap R1.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
 const MANUAL_BUSY_TEXT = "Still generating. Wait a moment.";
@@ -393,15 +394,23 @@ function compactManualStatus(status: string): string {
 }
 
 function formatManualDisplay(status: string, body: string, pageIndex?: number, totalPages?: number): string {
+  const header = formatManualHeader(status, pageIndex, totalPages);
+  const normalizedBody = normalizeManualDisplayBody(body);
+  return `${header}\n${normalizedBody || "Ready."}`;
+}
+
+function formatManualHeader(status: string, pageIndex?: number, totalPages?: number): string {
   const page = totalPages && totalPages > 1 && pageIndex !== undefined
     ? ` ${pageIndex + 1}/${totalPages}`
     : "";
-  const header = `${compactManualStatus(status)}${page}`;
-  const normalizedBody = String(body || "")
+  return `${compactManualStatus(status)}${page}`;
+}
+
+function normalizeManualDisplayBody(body: string): string {
+  return String(body || "")
     .replace(/\s+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return `${header}\n${normalizedBody || "Ready."}`;
 }
 
 function compactManualStatusSnippet(text: string, maxChars = 118): string {
@@ -733,7 +742,7 @@ export class MergeResponseHandler {
       this.lastManualCommittedAt = timestamp;
       this.lastManualPartialText = text;
       this.lastManualPartialAt = timestamp;
-      this.showManualDisplay("HEARD / TAP R1", manualHeardStatusText(text));
+      this.showManualDisplay("HEARD / TAP R1", manualHeardStatusText(text), { preserveAnswer: true });
       this.onStatus?.({
         type: "manual_status",
         reason: "transcript_committed",
@@ -899,7 +908,7 @@ export class MergeResponseHandler {
       const now = Date.now();
       if (!this.pendingManualRequest && now - this.lastManualPartialDisplayAt >= MANUAL_PARTIAL_DISPLAY_INTERVAL_MS) {
         this.lastManualPartialDisplayAt = now;
-        this.showManualDisplay("HEARING", manualHearingStatusText(normalized));
+        this.showManualDisplay("HEARING", manualHearingStatusText(normalized), { preserveAnswer: true });
       }
       return false;
     }
@@ -1693,26 +1702,47 @@ export class MergeResponseHandler {
       this.displayTimer = null;
     }
 
-    let displayBody = body;
+    const statusBody = normalizeManualDisplayBody(body);
+    let displayBody = statusBody;
     let pageIndex = options.pageIndex;
     let totalPages = options.totalPages;
+    let hasPinnedAnswerBody = false;
     if (options.preserveAnswer && this.currentManualAnswer) {
       const answer = this.currentManualAnswer;
-      displayBody = answer.pages[answer.pageIndex] || answer.output;
+      displayBody = normalizeManualDisplayBody(answer.pages[answer.pageIndex] || answer.output);
       pageIndex = answer.pageIndex;
       totalPages = answer.pages.length;
+      hasPinnedAnswerBody = true;
     }
 
-    const displayText = formatManualDisplay(status, displayBody, pageIndex, totalPages);
+    const header = formatManualHeader(status, pageIndex, totalPages);
+    const displayText = `${header}\n${displayBody || "Ready."}`;
     this.isDisplaying = true;
     this.currentDisplayText = displayText;
     this.currentDisplayExpiresAt = options.durationMs ? Date.now() + options.durationMs : Number.POSITIVE_INFINITY;
     this.lastInsightText = displayText;
+
+    const layouts = this.session.layouts as typeof this.session.layouts & {
+      showDoubleTextWall?: (topText: string, bottomText: string, options?: { durationMs?: number }) => void;
+    };
+    const canSplitDisplay = MANUAL_SPLIT_DISPLAY_ENABLED && typeof layouts.showDoubleTextWall === "function";
+    if (canSplitDisplay) {
+      const topText = hasPinnedAnswerBody && statusBody ? `${header}\n${statusBody}` : header;
+      const bottomText = displayBody || "Ready.";
+      if (options.durationMs) {
+        layouts.showDoubleTextWall?.(topText, bottomText, { durationMs: options.durationMs });
+      } else {
+        layouts.showDoubleTextWall?.(topText, bottomText);
+      }
+      return;
+    }
+
     if (options.durationMs) {
       this.session.layouts.showTextWall(displayText, { durationMs: options.durationMs });
-    } else {
-      this.session.layouts.showTextWall(displayText);
+      return;
     }
+
+    this.session.layouts.showTextWall(displayText);
   }
 
   private showManualTransientDisplay(
