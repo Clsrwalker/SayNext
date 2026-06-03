@@ -346,8 +346,8 @@ test("g2 double tap cancels pending single tap generation", async () => {
   await sleep(330);
 
   expect(events.some((event) => event.type === "manual_gesture_cancelled")).toBe(true);
-  expect(events.some((event) => event.reason === "manual_no_current_answer")).toBe(true);
-  expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(false);
+  expect(events.some((event) => event.reason === "manual_no_current_answer")).toBe(false);
+  expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(true);
   user.cleanup();
 });
 
@@ -446,7 +446,7 @@ test("g2 two short button presses are treated as double tap", async () => {
   await sleep(330);
 
   expect(events.some((event) => event.type === "manual_gesture_payload" && event.source === "button")).toBe(true);
-  expect(events.some((event) => event.reason === "manual_no_current_answer")).toBe(true);
-  expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(false);
+  expect(events.some((event) => event.reason === "manual_no_current_answer")).toBe(false);
+  expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(true);
   user.cleanup();
 });

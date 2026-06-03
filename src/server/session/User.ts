@@ -388,7 +388,7 @@ export class User {
     if (gesture.includes("double")) {
       this.cancelPendingSingleTap();
       this.broadcastInsightEvent({ type: 'processing' });
-      const result = await this.regenerateManualAnswer(eventId);
+      const result = await this.runManualDoubleTapAction(eventId);
       this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_${result.status}` });
       return;
     }
@@ -397,7 +397,7 @@ export class User {
       if (this.pendingSingleTapTimer) {
         this.cancelPendingSingleTap();
         this.broadcastInsightEvent({ type: 'processing' });
-        const result = await this.regenerateManualAnswer(eventId);
+        const result = await this.runManualDoubleTapAction(eventId);
         this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_${result.status}` });
         return;
       }
@@ -427,6 +427,14 @@ export class User {
       return;
     }
 
+  }
+
+  private async runManualDoubleTapAction(eventId: string): Promise<ManualActionResult> {
+    const state = this.getManualState();
+    if (state.currentAnswer) {
+      return this.regenerateManualAnswer(eventId);
+    }
+    return this.generateManualAnswer(eventId);
   }
 
   private normalizeManualGesture(event: any, source: "touch" | "button"): string {
