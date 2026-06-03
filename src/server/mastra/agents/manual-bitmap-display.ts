@@ -3,8 +3,8 @@ const DISPLAY_HEIGHT = 135;
 const ROW_SIZE_BYTES = Math.ceil(DISPLAY_WIDTH / 32) * 4;
 const PIXEL_DATA_OFFSET = 62;
 
-const TOP_BAR = { x: 6, y: 4, w: 564, h: 18 };
-const CUE_PANEL = { x: 6, y: 27, w: 564, h: 77 };
+const TOP_BAR = { x: 6, y: 4, w: 564, h: 23 };
+const CUE_PANEL = { x: 6, y: 32, w: 564, h: 72 };
 const TRANSCRIPT_BAR = { x: 6, y: 109, w: 564, h: 26 };
 
 const FONT: Record<string, string[]> = {
@@ -93,13 +93,17 @@ class MonoBitmap {
     }
   }
 
-  line(x1: number, y1: number, x2: number, y2: number): void {
+  line(x1: number, y1: number, x2: number, y2: number, thickness = 1): void {
     if (x1 === x2) {
-      for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) this.setPixel(x1, y, true);
+      for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) {
+        for (let offset = 0; offset < thickness; offset++) this.setPixel(x1 + offset, y, true);
+      }
       return;
     }
     if (y1 === y2) {
-      for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) this.setPixel(x, y1, true);
+      for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) {
+        for (let offset = 0; offset < thickness; offset++) this.setPixel(x, y1 + offset, true);
+      }
       return;
     }
 
@@ -111,7 +115,9 @@ class MonoBitmap {
     let x = x1;
     let y = y1;
     while (true) {
-      this.setPixel(x, y, true);
+      for (let ox = 0; ox < thickness; ox++) {
+        for (let oy = 0; oy < thickness; oy++) this.setPixel(x + ox, y + oy, true);
+      }
       if (x === x2 && y === y2) break;
       const e2 = 2 * err;
       if (e2 >= dy) {
@@ -126,17 +132,18 @@ class MonoBitmap {
   }
 
   rect(x: number, y: number, w: number, h: number): void {
-    this.line(x, y, x + w - 1, y);
-    this.line(x, y + h - 1, x + w - 1, y + h - 1);
-    this.line(x, y, x, y + h - 1);
-    this.line(x + w - 1, y, x + w - 1, y + h - 1);
+    this.line(x, y, x + w - 1, y, 2);
+    this.line(x, y + h - 2, x + w - 1, y + h - 2, 2);
+    this.line(x, y, x, y + h - 1, 2);
+    this.line(x + w - 2, y, x + w - 2, y + h - 1, 2);
   }
 
-  text(text: string, x: number, y: number, maxWidth: number, maxLines: number, options: { bold?: boolean } = {}): void {
-    const lines = wrapBitmapText(text, maxWidth);
+  text(text: string, x: number, y: number, maxWidth: number, maxLines: number, options: { bold?: boolean; scale?: number } = {}): void {
+    const scale = options.scale ?? 2;
+    const lines = wrapBitmapText(text, maxWidth, scale);
     const visible = lines.slice(0, maxLines);
     visible.forEach((line, lineIndex) => {
-      drawTextLine(this, line, x, y + lineIndex * 9, options);
+      drawTextLine(this, line, x, y + lineIndex * (8 * scale), { ...options, scale });
     });
   }
 
@@ -178,34 +185,33 @@ export function renderManualBitmapDisplay(input: ManualBitmapDisplayInput): stri
 
 function drawTopBar(bitmap: MonoBitmap, statusHeader: string, answerHeader: string): void {
   bitmap.rect(TOP_BAR.x, TOP_BAR.y, TOP_BAR.w, TOP_BAR.h);
-  bitmap.text("SAYNEXT", TOP_BAR.x + 7, TOP_BAR.y + 5, 72, 1, { bold: true });
-  drawStatusPill(bitmap, TOP_BAR.x + 89, TOP_BAR.y + 4, compactStatusLabel(statusHeader));
-  bitmap.text(cleanBitmapText(answerHeader).toUpperCase(), TOP_BAR.x + TOP_BAR.w - 92, TOP_BAR.y + 5, 82, 1);
+  bitmap.text("SAYNEXT", TOP_BAR.x + 8, TOP_BAR.y + 6, 92, 1, { bold: true, scale: 2 });
+  drawStatusPill(bitmap, TOP_BAR.x + 112, TOP_BAR.y + 5, compactStatusLabel(statusHeader));
+  bitmap.text(cleanBitmapText(answerHeader).toUpperCase(), TOP_BAR.x + TOP_BAR.w - 112, TOP_BAR.y + 7, 104, 1, { scale: 1 });
 }
 
 function drawCuePanel(bitmap: MonoBitmap, header: string, body: string): void {
   bitmap.rect(CUE_PANEL.x, CUE_PANEL.y, CUE_PANEL.w, CUE_PANEL.h);
-  bitmap.line(CUE_PANEL.x + 34, CUE_PANEL.y, CUE_PANEL.x + 34, CUE_PANEL.y + CUE_PANEL.h - 1);
+  bitmap.line(CUE_PANEL.x + 35, CUE_PANEL.y + 2, CUE_PANEL.x + 35, CUE_PANEL.y + CUE_PANEL.h - 3, 2);
   drawCueIcon(bitmap, CUE_PANEL.x + 11, CUE_PANEL.y + 10);
-  bitmap.text(cleanBitmapText(header).toUpperCase(), CUE_PANEL.x + 43, CUE_PANEL.y + 7, 120, 1, { bold: true });
-  bitmap.line(CUE_PANEL.x + 42, CUE_PANEL.y + 20, CUE_PANEL.x + CUE_PANEL.w - 8, CUE_PANEL.y + 20);
-  bitmap.text(cleanBitmapText(body), CUE_PANEL.x + 43, CUE_PANEL.y + 27, CUE_PANEL.w - 52, 5);
+  bitmap.text(cleanBitmapText(header).toUpperCase(), CUE_PANEL.x + 45, CUE_PANEL.y + 7, 132, 1, { bold: true, scale: 1 });
+  bitmap.line(CUE_PANEL.x + 44, CUE_PANEL.y + 20, CUE_PANEL.x + CUE_PANEL.w - 8, CUE_PANEL.y + 20, 2);
+  bitmap.text(cleanBitmapText(body), CUE_PANEL.x + 45, CUE_PANEL.y + 28, CUE_PANEL.w - 54, 3, { scale: 2 });
 }
 
 function drawTranscriptBar(bitmap: MonoBitmap, transcript: string): void {
   bitmap.rect(TRANSCRIPT_BAR.x, TRANSCRIPT_BAR.y, TRANSCRIPT_BAR.w, TRANSCRIPT_BAR.h);
-  bitmap.text("LIVE", TRANSCRIPT_BAR.x + 7, TRANSCRIPT_BAR.y + 8, 34, 1, { bold: true });
-  bitmap.line(TRANSCRIPT_BAR.x + 43, TRANSCRIPT_BAR.y + 5, TRANSCRIPT_BAR.x + 43, TRANSCRIPT_BAR.y + TRANSCRIPT_BAR.h - 6);
-  bitmap.text(cleanBitmapText(transcript) || "Listening for speech.", TRANSCRIPT_BAR.x + 52, TRANSCRIPT_BAR.y + 8, TRANSCRIPT_BAR.w - 61, 1);
+  bitmap.text("LIVE", TRANSCRIPT_BAR.x + 8, TRANSCRIPT_BAR.y + 7, 48, 1, { bold: true, scale: 2 });
+  bitmap.line(TRANSCRIPT_BAR.x + 57, TRANSCRIPT_BAR.y + 5, TRANSCRIPT_BAR.x + 57, TRANSCRIPT_BAR.y + TRANSCRIPT_BAR.h - 6, 2);
+  bitmap.text(cleanBitmapText(transcript) || "Listening for speech.", TRANSCRIPT_BAR.x + 66, TRANSCRIPT_BAR.y + 7, TRANSCRIPT_BAR.w - 74, 1, { scale: 2 });
 }
 
 function drawStatusPill(bitmap: MonoBitmap, x: number, y: number, text: string): void {
-  bitmap.rect(x, y, 86, 11);
-  bitmap.setPixel(x + 4, y + 5, true);
-  bitmap.setPixel(x + 5, y + 5, true);
-  bitmap.setPixel(x + 4, y + 6, true);
-  bitmap.setPixel(x + 5, y + 6, true);
-  bitmap.text(text, x + 10, y + 2, 74, 1);
+  bitmap.rect(x, y, 88, 13);
+  for (let dx = 0; dx < 4; dx++) {
+    for (let dy = 0; dy < 4; dy++) bitmap.setPixel(x + 5 + dx, y + 5 + dy, true);
+  }
+  bitmap.text(text, x + 14, y + 3, 72, 1, { scale: 1 });
 }
 
 function drawCueIcon(bitmap: MonoBitmap, x: number, y: number): void {
@@ -229,24 +235,29 @@ function compactStatusLabel(statusHeader: string): string {
   return "LIVE";
 }
 
-function drawTextLine(bitmap: MonoBitmap, text: string, x: number, y: number, options: { bold?: boolean }): void {
+function drawTextLine(bitmap: MonoBitmap, text: string, x: number, y: number, options: { bold?: boolean; scale?: number }): void {
+  const scale = options.scale ?? 2;
   let cursor = x;
   for (const char of text) {
     const glyph = FONT[char.toUpperCase()] || FONT[" "];
     for (let row = 0; row < glyph.length; row++) {
       for (let col = 0; col < glyph[row].length; col++) {
         if (glyph[row][col] === "1") {
-          bitmap.setPixel(cursor + col, y + row, true);
-          if (options.bold) bitmap.setPixel(cursor + col + 1, y + row, true);
+          for (let ox = 0; ox < scale; ox++) {
+            for (let oy = 0; oy < scale; oy++) {
+              bitmap.setPixel(cursor + col * scale + ox, y + row * scale + oy, true);
+              if (options.bold) bitmap.setPixel(cursor + col * scale + ox + 1, y + row * scale + oy, true);
+            }
+          }
         }
       }
     }
-    cursor += options.bold ? 7 : 6;
+    cursor += 6 * scale + (options.bold ? 1 : 0);
   }
 }
 
-function wrapBitmapText(text: string, maxWidth: number): string[] {
-  const maxChars = Math.max(1, Math.floor(maxWidth / 6));
+function wrapBitmapText(text: string, maxWidth: number, scale = 2): string[] {
+  const maxChars = Math.max(1, Math.floor(maxWidth / (6 * scale)));
   const normalized = cleanBitmapText(text).replace(/\s+/g, " ").trim();
   if (!normalized) return [];
   const words = normalized.split(" ");
