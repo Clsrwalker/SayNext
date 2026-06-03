@@ -1729,22 +1729,14 @@ export class MergeResponseHandler {
     if (canSplitDisplay) {
       const topText = hasPinnedAnswerBody && statusBody ? `${header}\n${statusBody}` : header;
       const bottomText = displayBody || "Ready.";
-      console.log(
-        `[SayNext] Manual display mode=split status=${status} topChars=${topText.length} bottomChars=${bottomText.length}`,
-      );
-      try {
-        if (options.durationMs) {
-          layouts.showDoubleTextWall?.(topText, bottomText, { durationMs: options.durationMs });
-        } else {
-          layouts.showDoubleTextWall?.(topText, bottomText);
-        }
-        return;
-      } catch (error) {
-        console.error("[SayNext] Manual split display failed; falling back to text wall", error);
+      if (options.durationMs) {
+        layouts.showDoubleTextWall?.(topText, bottomText, { durationMs: options.durationMs });
+      } else {
+        layouts.showDoubleTextWall?.(topText, bottomText);
       }
+      return;
     }
 
-    console.log(`[SayNext] Manual display mode=text status=${status} chars=${displayText.length}`);
     if (options.durationMs) {
       this.session.layouts.showTextWall(displayText, { durationMs: options.durationMs });
       return;

@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AppSession } from "@mentra/sdk";
 import { LocationManager } from "../manager/LocationManager";
-import { renderManualBitmapDisplay } from "../mastra/agents/manual-bitmap-display";
 import { MergeResponseHandler, paginateManualAnswer } from "../mastra/agents/response-handler";
 import { User } from "../session/User";
 
@@ -10,8 +9,7 @@ type DisplayCall = {
   durationMs?: number;
   topText?: string;
   bottomText?: string;
-  bitmap?: string;
-  kind?: "text" | "double" | "bitmap";
+  kind?: "text" | "double";
 };
 
 class MockSession {
@@ -46,33 +44,6 @@ class SplitMockSession extends MockSession {
         bottomText,
         durationMs: options.durationMs,
         kind: "double",
-      });
-    },
-    clearView: () => {
-      this.clearCount += 1;
-    },
-  };
-}
-
-class BitmapMockSession extends SplitMockSession {
-  layouts = {
-    showTextWall: (text: string, options: { durationMs?: number } = {}) => {
-      this.displays.push({ text, durationMs: options.durationMs, kind: "text" });
-    },
-    showDoubleTextWall: (topText: string, bottomText: string, options: { durationMs?: number } = {}) => {
-      this.displays.push({
-        text: `${topText}\n---\n${bottomText}`,
-        topText,
-        bottomText,
-        durationMs: options.durationMs,
-        kind: "double",
-      });
-    },
-    showBitmapView: async (bitmap: string) => {
-      this.displays.push({
-        text: "bitmap",
-        bitmap,
-        kind: "bitmap",
       });
     },
     clearView: () => {
@@ -159,21 +130,6 @@ function makeSplitManualHandler() {
       session as unknown as AppSession,
       "manual-split-test-user",
       new LocationManager("manual-split-test-user"),
-      "high",
-      "english",
-      "g2_manual",
-    );
-    return { session, handler };
-  });
-}
-
-function makeBitmapManualHandler() {
-  return withConversationStateDisabled(() => {
-    const session = new BitmapMockSession();
-    const handler = new MergeResponseHandler(
-      session as unknown as AppSession,
-      "manual-bitmap-test-user",
-      new LocationManager("manual-bitmap-test-user"),
       "high",
       "english",
       "g2_manual",
@@ -348,53 +304,6 @@ test("manual split display keeps answer pinned while top area shows live transcr
   expect(display?.kind).toBe("double");
   expect(display?.topText).toBe("SN | HEARING 1/2\nHearing: What is your biggest improvement area?");
   expect(display?.bottomText).toBe("Pinned answer page one.");
-});
-
-test("manual display defaults to split text layout even when bitmap API is available", () => {
-  const { session, handler } = makeBitmapManualHandler();
-
-  (handler as any).currentManualAnswer = {
-    answerGroupId: "manual_group_bitmap",
-    answerId: "manual_answer_bitmap",
-    requestId: "manual_req_bitmap",
-    sourceRange: {
-      fromExclusive: null,
-      toInclusive: "seg_1",
-      segmentIds: ["seg_1"],
-      textDigest: "digest",
-    },
-    output: "Pinned answer should stay in the answer panel.",
-    pages: ["Pinned answer should stay in the answer panel.", "Second answer page."],
-    pageIndex: 0,
-    createdAt: Date.now(),
-  };
-
-  handler.handlePartialTranscript("What is your biggest improvement area?", Date.now());
-
-  const display = session.displays.at(-1);
-  expect(display?.kind).toBe("double");
-  expect(display?.topText).toBe("SN | HEARING 1/2\nHearing: What is your biggest improvement area?");
-  expect(display?.bottomText).toBe("Pinned answer should stay in the answer panel.");
-});
-
-test("manual bitmap renderer creates a Mentra-sized 1-bit BMP", () => {
-  const bitmap = renderManualBitmapDisplay({
-    statusHeader: "SN | HEARING 1/2",
-    statusBody: "Hearing: database indexing question",
-    answerHeader: "ANSWER 1/2",
-    answerBody: "Indexes improve read latency when the access pattern matches the key.",
-  });
-  const buffer = Buffer.from(bitmap, "base64");
-
-  expect(buffer.toString("ascii", 0, 2)).toBe("BM");
-  expect(buffer.readUInt32LE(18)).toBe(576);
-  expect(buffer.readUInt32LE(22)).toBe(135);
-  expect(buffer.readUInt16LE(28)).toBe(1);
-  expect(buffer.length).toBe(9782);
-
-  const pixelData = buffer.subarray(62);
-  expect(pixelData.some((byte) => byte !== 0x00)).toBe(true);
-  expect(pixelData.filter((byte) => byte === 0xff).length).toBeLessThan(pixelData.length / 3);
 });
 
 test("g2 single tap delays manual generation through gesture arbitration", async () => {
