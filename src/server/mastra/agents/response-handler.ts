@@ -37,7 +37,9 @@ const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
 const MANUAL_GENERATION_TIMEOUT_MS = Number(process.env.MANUAL_GENERATION_TIMEOUT_MS || 35_000);
 const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
+const MANUAL_HEARD_TEXT = "New speech captured. Tap R1 for the next reply.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
+const MANUAL_BUSY_TEXT = "Still generating. Wait a moment.";
 const MANUAL_NO_NEW_SPEECH_TEXT = "No new speech yet.";
 const MANUAL_NO_ANSWER_TEXT = "No answer yet. Single tap after speech.";
 const STRONG_ECHO_SIMILARITY = 0.82;
@@ -605,6 +607,7 @@ export class MergeResponseHandler {
 
     if (this.interactionMode === "g2_manual") {
       this.logManualTranscriptSample(text, timestamp, reason);
+      this.showManualDisplay("HEARD / TAP R1", MANUAL_HEARD_TEXT, { preserveAnswer: true });
       this.onStatus?.({
         type: "manual_status",
         reason: "transcript_committed",
@@ -1295,13 +1298,8 @@ export class MergeResponseHandler {
   }
 
   showManualListeningStatus(): void {
-    if (this.interactionMode !== "g2_manual" || this.currentManualAnswer) return;
-    this.isDisplaying = true;
-    const displayText = formatManualDisplay("LISTENING", MANUAL_LISTENING_TEXT);
-    this.currentDisplayText = displayText;
-    this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
-    this.lastInsightText = displayText;
-    this.session.layouts.showTextWall(displayText);
+    if (this.interactionMode !== "g2_manual") return;
+    this.showManualDisplay("LISTENING", MANUAL_LISTENING_TEXT, { preserveAnswer: true });
   }
 
   setInteractionMode(mode: InteractionMode): void {
@@ -1377,6 +1375,7 @@ export class MergeResponseHandler {
 
     if (this.pendingManualRequest) {
       console.log(`[SayNext] Manual generate ignored busy pending=${this.pendingManualRequest.requestId} kind=${this.pendingManualRequest.kind}`);
+      this.showManualDisplay("BUSY", MANUAL_BUSY_TEXT, { preserveAnswer: true });
       return this.cacheManualAction(clientEventId, {
         status: "busy",
         sessionId: this.sessionId,
@@ -1387,7 +1386,7 @@ export class MergeResponseHandler {
     const sourceRange = this.buildNewManualSourceRange();
     if (!sourceRange) {
       console.log(`[SayNext] Manual generate has no new speech transcriptCount=${this.transcriptSegments.length} lastGeneratedCursor=${this.lastGeneratedCursor ?? "-"}`);
-      this.showManualStatusIfNoAnswer(MANUAL_NO_NEW_SPEECH_TEXT);
+      this.showManualDisplay("NO NEW SPEECH", MANUAL_NO_NEW_SPEECH_TEXT, { preserveAnswer: true });
       return this.cacheManualAction(clientEventId, {
         status: "no_new_speech",
         sessionId: this.sessionId,
@@ -1404,6 +1403,7 @@ export class MergeResponseHandler {
 
     if (this.pendingManualRequest) {
       console.log(`[SayNext] Manual regenerate ignored busy pending=${this.pendingManualRequest.requestId} kind=${this.pendingManualRequest.kind}`);
+      this.showManualDisplay("BUSY", MANUAL_BUSY_TEXT, { preserveAnswer: true });
       return this.cacheManualAction(clientEventId, {
         status: "busy",
         sessionId: this.sessionId,
@@ -1413,7 +1413,7 @@ export class MergeResponseHandler {
 
     if (!this.currentManualAnswer) {
       console.log("[SayNext] Manual regenerate has no current answer");
-      this.showManualStatusIfNoAnswer(MANUAL_NO_ANSWER_TEXT);
+      this.showManualDisplay("READY", MANUAL_NO_ANSWER_TEXT);
       return this.cacheManualAction(clientEventId, {
         status: "no_current_answer",
         sessionId: this.sessionId,
@@ -1429,7 +1429,7 @@ export class MergeResponseHandler {
     if (cached) return cached;
 
     if (!this.currentManualAnswer) {
-      this.showManualStatusIfNoAnswer(MANUAL_NO_ANSWER_TEXT);
+      this.showManualDisplay("READY", MANUAL_NO_ANSWER_TEXT);
       return this.cacheManualAction(clientEventId, {
         status: "no_current_answer",
         sessionId: this.sessionId,
@@ -1483,7 +1483,7 @@ export class MergeResponseHandler {
       this.pausedDisplayRefreshTimer = null;
     }
     this.bumpManualState();
-    this.session.layouts.clearView();
+    this.showManualDisplay("LISTENING", MANUAL_LISTENING_TEXT);
     this.onStatus?.({ type: "manual_cleared", state: this.getManualState() });
 
     return this.cacheManualAction(clientEventId, {
@@ -1497,18 +1497,36 @@ export class MergeResponseHandler {
     return this.teleprompt.isActive();
   }
 
-  private showManualStatusIfNoAnswer(text: string): void {
-    if (this.currentManualAnswer) return;
+  private showManualDisplay(
+    status: string,
+    body: string,
+    options: { preserveAnswer?: boolean; durationMs?: number } = {},
+  ): void {
     if (this.displayTimer) {
       clearTimeout(this.displayTimer);
       this.displayTimer = null;
     }
-    const displayText = formatManualDisplay("READY", text);
+
+    let displayBody = body;
+    let pageIndex: number | undefined;
+    let totalPages: number | undefined;
+    if (options.preserveAnswer && this.currentManualAnswer) {
+      const answer = this.currentManualAnswer;
+      displayBody = answer.pages[answer.pageIndex] || answer.output;
+      pageIndex = answer.pageIndex;
+      totalPages = answer.pages.length;
+    }
+
+    const displayText = formatManualDisplay(status, displayBody, pageIndex, totalPages);
     this.isDisplaying = true;
     this.currentDisplayText = displayText;
-    this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
+    this.currentDisplayExpiresAt = options.durationMs ? Date.now() + options.durationMs : Number.POSITIVE_INFINITY;
     this.lastInsightText = displayText;
-    this.session.layouts.showTextWall(displayText);
+    if (options.durationMs) {
+      this.session.layouts.showTextWall(displayText, { durationMs: options.durationMs });
+    } else {
+      this.session.layouts.showTextWall(displayText);
+    }
   }
 
   private buildNewManualSourceRange(): SourceRange | null {
@@ -1555,9 +1573,7 @@ export class MergeResponseHandler {
     this.bumpManualState();
     console.log(`[SayNext] Manual generation start request=${requestId} kind=${kind} segments=${sourceRange.segmentIds.length} digest=${sourceRange.textDigest}`);
     this.onStatus?.({ type: "manual_generating", requestId, kind, sourceRange, state: this.getManualState() });
-    if (!this.currentManualAnswer) {
-      this.session.layouts.showTextWall(formatManualDisplay("GENERATING", MANUAL_GENERATING_TEXT));
-    }
+    this.showManualDisplay("GENERATING", MANUAL_GENERATING_TEXT, { preserveAnswer: true });
 
     try {
       const segments = this.segmentsForSourceRange(sourceRange);
@@ -1567,6 +1583,7 @@ export class MergeResponseHandler {
           this.pendingManualRequest = null;
           this.bumpManualState();
         }
+        this.showManualDisplay("NO NEW SPEECH", MANUAL_NO_NEW_SPEECH_TEXT, { preserveAnswer: true });
         return this.cacheManualAction(clientEventId, {
           status: "no_new_speech",
           sessionId: this.sessionId,
@@ -1644,6 +1661,7 @@ export class MergeResponseHandler {
           error: `Manual generation returned ${response.type}`,
         };
         this.onStatus?.({ type: "manual_error", requestId, error: result.error, state: result.state });
+        this.showManualDisplay("ERROR", result.error || "Manual generation failed.");
         console.log(`[SayNext] Manual generation error request=${requestId} kind=${kind} reason=${result.error} ms=${Date.now() - startedAt}`);
         return this.cacheManualAction(clientEventId, result);
       }
@@ -1692,6 +1710,7 @@ export class MergeResponseHandler {
         error: error instanceof Error ? error.message : String(error),
       };
       this.onStatus?.({ type: "manual_error", requestId, error: result.error, state: result.state });
+      this.showManualDisplay("ERROR", result.error || "Manual generation failed.");
       console.log(`[SayNext] Manual generation failed request=${requestId} kind=${kind} error=${result.error} ms=${Date.now() - startedAt}`);
       return this.cacheManualAction(clientEventId, result);
     }
@@ -1717,13 +1736,8 @@ export class MergeResponseHandler {
     }
     const answer = this.currentManualAnswer;
     const pageText = answer.pages[answer.pageIndex] || answer.output;
-    const displayText = formatManualDisplay("ANSWER", pageText, answer.pageIndex, answer.pages.length);
-    this.isDisplaying = true;
-    this.currentDisplayText = displayText;
-    this.currentDisplayExpiresAt = Number.POSITIVE_INFINITY;
-    this.lastInsightText = displayText;
+    this.showManualDisplay("ANSWER / LISTENING", pageText);
     this.bumpManualState();
-    this.session.layouts.showTextWall(displayText);
     if (this.onInsight) {
       this.onInsight({
         text: pageText,

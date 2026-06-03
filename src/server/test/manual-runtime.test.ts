@@ -98,7 +98,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test("g2 manual mode commits transcript without automatic display generation", async () => {
+test("g2 manual mode commits transcript and shows heard status without automatic answer generation", async () => {
   const { session, handler } = makeManualHandler();
 
   await handler.processTranscript("Could you explain why database indexing changes query latency?", Date.now(), "isFinal");
@@ -108,7 +108,7 @@ test("g2 manual mode commits transcript without automatic display generation", a
   expect(state.transcriptCount).toBe(1);
   expect(state.lastGeneratedCursor).toBeNull();
   expect(state.currentAnswer).toBeNull();
-  expect(session.displays).toEqual([]);
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | HEARD / TAP R1\n\nNew speech captured. Tap R1 for the next reply.");
 });
 
 test("manual generate returns no_new_speech before any committed transcript", async () => {
@@ -135,7 +135,32 @@ test("manual clear cancels display state without advancing transcript cursor", a
   expect(replay).toEqual(result);
   expect(result.state.transcriptCount).toBe(1);
   expect(result.state.lastGeneratedCursor).toBeNull();
-  expect(session.clearCount).toBe(1);
+  expect(session.clearCount).toBe(0);
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | LISTENING\n\nListening. Tap R1 after speech.");
+});
+
+test("g2 manual mode shows heard status on glasses while preserving pinned answer text", async () => {
+  const { session, handler } = makeManualHandler();
+
+  (handler as any).currentManualAnswer = {
+    answerGroupId: "manual_group_test",
+    answerId: "manual_answer_test",
+    requestId: "manual_req_test",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "digest",
+    },
+    output: "Old pinned answer.",
+    pages: ["Old pinned answer."],
+    pageIndex: 0,
+    createdAt: Date.now(),
+  };
+
+  await handler.processTranscript("What should I answer next?", Date.now(), "isFinal");
+
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | HEARD / TAP R1\n\nOld pinned answer.");
 });
 
 test("g2 single tap delays manual generation through gesture arbitration", async () => {
