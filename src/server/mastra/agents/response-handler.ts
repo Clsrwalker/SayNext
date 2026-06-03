@@ -36,6 +36,8 @@ const MIN_ECHO_WORDS = 3;
 const MANUAL_MAX_SEGMENTS = 500;
 const MANUAL_ACTION_TTL_MS = 2 * 60 * 1000;
 const MANUAL_GENERATION_TIMEOUT_MS = Number(process.env.MANUAL_GENERATION_TIMEOUT_MS || 35_000);
+const MANUAL_GLASSES_BODY_LINES = 3;
+const MANUAL_GLASSES_LINE_UNITS = 42;
 const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
 const MANUAL_HEARD_TEXT = "New speech captured. Tap R1 for the next reply.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
@@ -376,9 +378,88 @@ function formatManualDisplay(status: string, body: string, pageIndex?: number, t
   return `SAYNEXT | ${status}${page}\n\n${normalizedBody || "Ready."}`;
 }
 
+function manualDisplayCharUnits(char: string): number {
+  return /[\u1100-\u11ff\u2e80-\u9fff\uf900-\ufaff\uac00-\ud7af\uff00-\uffef]/u.test(char) ? 2 : 1;
+}
+
+function manualDisplayUnits(text: string): number {
+  return Array.from(text).reduce((sum, char) => sum + manualDisplayCharUnits(char), 0);
+}
+
+function splitManualToken(token: string, maxUnits: number): string[] {
+  const chunks: string[] = [];
+  let current = "";
+  let currentUnits = 0;
+
+  for (const char of Array.from(token)) {
+    const charUnits = manualDisplayCharUnits(char);
+    if (current && currentUnits + charUnits > maxUnits) {
+      chunks.push(current);
+      current = char;
+      currentUnits = charUnits;
+    } else {
+      current += char;
+      currentUnits += charUnits;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function wrapManualDisplayText(text: string, maxUnits = MANUAL_GLASSES_LINE_UNITS): string[] {
+  const tokens = text.split(" ").filter(Boolean);
+  const lines: string[] = [];
+  let current = "";
+
+  const pushCurrent = () => {
+    if (!current) return;
+    lines.push(current);
+    current = "";
+  };
+
+  for (const token of tokens) {
+    const candidate = current ? `${current} ${token}` : token;
+    if (manualDisplayUnits(candidate) <= maxUnits) {
+      current = candidate;
+      continue;
+    }
+
+    pushCurrent();
+    if (manualDisplayUnits(token) <= maxUnits) {
+      current = token;
+      continue;
+    }
+
+    for (const chunk of splitManualToken(token, maxUnits)) {
+      if (!current) {
+        current = chunk;
+      } else {
+        pushCurrent();
+        current = chunk;
+      }
+    }
+  }
+
+  pushCurrent();
+  return lines;
+}
+
 function paginateManualAnswer(text: string): string[] {
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
-  return cleaned ? [cleaned] : [];
+  if (!cleaned) return [];
+
+  const lines = wrapManualDisplayText(cleaned);
+  const displayPages: string[] = [];
+  for (let index = 0; index < lines.length; index += MANUAL_GLASSES_BODY_LINES) {
+    displayPages.push(lines.slice(index, index + MANUAL_GLASSES_BODY_LINES).join("\n"));
+  }
+
+  const nonEmptyPages = displayPages
+    .map((page) => page.trim())
+    .filter(Boolean);
+
+  return nonEmptyPages.length > 0 ? nonEmptyPages : [cleaned];
 }
 
 async function withManualGenerationTimeout<T>(promise: Promise<T>, requestId: string): Promise<T> {
@@ -1500,7 +1581,7 @@ export class MergeResponseHandler {
   private showManualDisplay(
     status: string,
     body: string,
-    options: { preserveAnswer?: boolean; durationMs?: number } = {},
+    options: { preserveAnswer?: boolean; durationMs?: number; pageIndex?: number; totalPages?: number } = {},
   ): void {
     if (this.displayTimer) {
       clearTimeout(this.displayTimer);
@@ -1508,8 +1589,8 @@ export class MergeResponseHandler {
     }
 
     let displayBody = body;
-    let pageIndex: number | undefined;
-    let totalPages: number | undefined;
+    let pageIndex = options.pageIndex;
+    let totalPages = options.totalPages;
     if (options.preserveAnswer && this.currentManualAnswer) {
       const answer = this.currentManualAnswer;
       displayBody = answer.pages[answer.pageIndex] || answer.output;
@@ -1736,7 +1817,10 @@ export class MergeResponseHandler {
     }
     const answer = this.currentManualAnswer;
     const pageText = answer.pages[answer.pageIndex] || answer.output;
-    this.showManualDisplay("ANSWER / LISTENING", pageText);
+    this.showManualDisplay("ANSWER / LISTENING", pageText, {
+      pageIndex: answer.pageIndex,
+      totalPages: answer.pages.length,
+    });
     this.bumpManualState();
     if (this.onInsight) {
       this.onInsight({

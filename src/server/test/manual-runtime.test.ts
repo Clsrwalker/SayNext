@@ -214,19 +214,37 @@ test("g2 long press is ignored by SayNext because the system may reserve it", as
   user.cleanup();
 });
 
-test("g2 scroll gestures do not page or refresh the pinned manual answer", async () => {
+test("g2 scroll gestures page the pinned manual answer on glasses", async () => {
   const session = new MockUserSession();
   const user = new User("manual-scroll-gesture-user");
   const events: any[] = [];
   user.addSSEClient((data) => events.push(JSON.parse(data)));
 
   await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  (user as any).responseHandler.currentManualAnswer = {
+    answerGroupId: "manual_group_scroll",
+    answerId: "manual_answer_scroll",
+    requestId: "manual_req_scroll",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "digest",
+    },
+    output: "First page.\nSecond page.\nThird page.",
+    pages: ["First page.", "Second page.", "Third page."],
+    pageIndex: 0,
+    createdAt: Date.now(),
+  };
+
   session.touchHandler?.({ gesture: "swipe_down" });
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | ANSWER / LISTENING 2/3\n\nSecond page.");
+
   session.touchHandler?.({ gesture: "swipe_up" });
   await sleep(20);
+  expect(session.displays.at(-1)?.text).toBe("SAYNEXT | ANSWER / LISTENING 1/3\n\nFirst page.");
 
-  expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "manual_answer_is_single_scroll_box")).toBe(true);
-  expect(events.some((event) => String(event.reason || "").startsWith("manual_page_"))).toBe(false);
+  expect(events.some((event) => event.reason === "manual_page_ok")).toBe(true);
   user.cleanup();
 });
 
