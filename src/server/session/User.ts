@@ -225,6 +225,7 @@ export class User {
       const textToProcess = this.currentUtteranceBuffer.trim();
       if (textToProcess.length > 0) {
         if (isLowValueUtterance(textToProcess)) {
+          this.responseHandler?.noteManualRawAsr(textToProcess, Date.now(), "low_value_final");
           session.logger.info(`Skipping low-value utterance: "${textToProcess}"`);
           this.currentUtteranceBuffer = "";
           return;
@@ -337,6 +338,7 @@ export class User {
     }
 
     if (isLowValueUtterance(textToProcess)) {
+      this.responseHandler.noteManualRawAsr(textToProcess, Date.now(), "low_value_partial_flush");
       this.appSession?.logger.info(`Skipping low-value partial before manual generate: "${textToProcess}"`);
       this.currentUtteranceBuffer = "";
       return false;

@@ -39,12 +39,12 @@ const MANUAL_GENERATION_TIMEOUT_MS = Number(process.env.MANUAL_GENERATION_TIMEOU
 const MANUAL_TRANSIENT_STATUS_MS = Number(process.env.MENTRA_MANUAL_TRANSIENT_STATUS_MS || 1400);
 const MANUAL_TEXTWALL_BODY_LINES = Number(process.env.MENTRA_MANUAL_PAGE_LINES || 3);
 const MANUAL_TEXTWALL_LINE_UNITS = Number(process.env.MENTRA_MANUAL_LINE_UNITS || 56);
-const MANUAL_LISTENING_TEXT = "Listening. Tap R1 after speech.";
-const MANUAL_HEARD_TEXT = "New speech captured. Tap R1 for the next reply.";
+const MANUAL_PARTIAL_DISPLAY_INTERVAL_MS = Number(process.env.MENTRA_MANUAL_PARTIAL_DISPLAY_INTERVAL_MS || 700);
+const MANUAL_RECENT_ASR_WINDOW_MS = Number(process.env.MENTRA_MANUAL_RECENT_ASR_WINDOW_MS || 60_000);
+const MANUAL_LISTENING_TEXT = "Listening for speech.\nSay the question, then tap R1.";
 const MANUAL_GENERATING_TEXT = "Generating from the latest speech.";
 const MANUAL_BUSY_TEXT = "Still generating. Wait a moment.";
-const MANUAL_NO_NEW_SPEECH_TEXT = "No new speech yet.";
-const MANUAL_NO_ANSWER_TEXT = "No answer yet. Single tap after speech.";
+const MANUAL_NO_ANSWER_TEXT = "No pinned answer yet.\nSay something, then tap R1.";
 const SAYNEXT_PERSONAL_MEMORY_TOP_K = Number(process.env.SAYNEXT_PERSONAL_MEMORY_TOP_K || 5);
 const STRONG_ECHO_SIMILARITY = 0.82;
 const MEDIUM_ECHO_SIMILARITY = 0.68;
@@ -373,8 +373,10 @@ function compactManualStatus(status: string): string {
   switch (status) {
     case "ANSWER / LISTENING":
       return "ANS | LISTEN";
+    case "HEARING":
+      return "SN | HEARING";
     case "HEARD / TAP R1":
-      return "SN | HEARD TAP";
+      return "SN | HEARD";
     case "LISTENING":
       return "SN | LISTEN";
     case "GENERATING":
@@ -382,7 +384,7 @@ function compactManualStatus(status: string): string {
     case "BUSY":
       return "SN | BUSY";
     case "NO NEW SPEECH":
-      return "SN | NO SPEECH";
+      return "SN | NO ASR";
     case "READY":
       return "SN | READY";
     default:
@@ -400,6 +402,24 @@ function formatManualDisplay(status: string, body: string, pageIndex?: number, t
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return `${header}\n${normalizedBody || "Ready."}`;
+}
+
+function compactManualStatusSnippet(text: string, maxChars = 118): string {
+  const normalized = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 3)).trim()}...`;
+}
+
+function manualHeardStatusText(text: string): string {
+  const snippet = compactManualStatusSnippet(text);
+  return snippet ? `Heard: ${snippet}\nTap R1 to answer.` : "Speech captured.\nTap R1 to answer.";
+}
+
+function manualHearingStatusText(text: string): string {
+  const snippet = compactManualStatusSnippet(text);
+  return snippet ? `Hearing: ${snippet}` : "Receiving speech...";
 }
 
 function manualDisplayCharUnits(char: string): number {
@@ -633,6 +653,11 @@ export class MergeResponseHandler {
   private manualStateVersion: number = 0;
   private manualActionResults: Map<string, { expiresAt: number; result: ManualActionResult }> = new Map();
   private manualPromptModeOverride: PromptMode | null = null;
+  private lastManualPartialText: string = "";
+  private lastManualPartialAt: number = 0;
+  private lastManualPartialDisplayAt: number = 0;
+  private lastManualCommittedText: string = "";
+  private lastManualCommittedAt: number = 0;
   private promptPreset: PromptPreset;
   public frequency: 'low' | 'medium' | 'high';
   public outputLanguage: OutputLanguage;
@@ -704,10 +729,15 @@ export class MergeResponseHandler {
 
     if (this.interactionMode === "g2_manual") {
       this.logManualTranscriptSample(text, timestamp, reason);
-      this.showManualDisplay("HEARD / TAP R1", MANUAL_HEARD_TEXT, { preserveAnswer: true });
+      this.lastManualCommittedText = text;
+      this.lastManualCommittedAt = timestamp;
+      this.lastManualPartialText = text;
+      this.lastManualPartialAt = timestamp;
+      this.showManualDisplay("HEARD / TAP R1", manualHeardStatusText(text));
       this.onStatus?.({
         type: "manual_status",
         reason: "transcript_committed",
+        transcript: text,
         state: this.getManualState(),
       });
       this.onStatus?.({ type: "processing_done", reason: "manual_transcript_committed" });
@@ -862,7 +892,18 @@ export class MergeResponseHandler {
   }
 
   handlePartialTranscript(text: string, timestamp: number): boolean {
-    if (this.interactionMode === "g2_manual") return false;
+    if (this.interactionMode === "g2_manual") {
+      const normalized = this.noteManualRawAsr(text, timestamp, "partial");
+      if (!normalized) return false;
+
+      const now = Date.now();
+      if (!this.pendingManualRequest && now - this.lastManualPartialDisplayAt >= MANUAL_PARTIAL_DISPLAY_INTERVAL_MS) {
+        this.lastManualPartialDisplayAt = now;
+        this.showManualDisplay("HEARING", manualHearingStatusText(normalized));
+      }
+      return false;
+    }
+
     if (this.isPausedForReading || this.teleprompt.isActive()) return false;
 
     const suggestionEcho = this.getRecentDisplayedSuggestionEcho(text, timestamp);
@@ -873,6 +914,22 @@ export class MergeResponseHandler {
     });
     this.onStatus?.({ type: "readback_partial_echo" });
     return true;
+  }
+
+  noteManualRawAsr(text: string, timestamp: number, reason: string): string {
+    if (this.interactionMode !== "g2_manual") return "";
+    const normalized = normalizeKnownProjectAsrAliases(text).trim();
+    if (!normalized) return "";
+
+    this.lastManualPartialText = normalized;
+    this.lastManualPartialAt = timestamp;
+    this.onStatus?.({
+      type: "manual_asr_raw",
+      reason,
+      transcript: normalized,
+      state: this.getManualState(),
+    });
+    return normalized;
   }
 
   private resolveActiveSceneProfilePrompt(latestTranscript: string, timestamp: number, recentTranscripts: string[]): string {
@@ -1396,7 +1453,28 @@ export class MergeResponseHandler {
 
   showManualListeningStatus(): void {
     if (this.interactionMode !== "g2_manual") return;
-    this.showManualDisplay("LISTENING", MANUAL_LISTENING_TEXT, { preserveAnswer: true });
+    this.showManualDisplay(
+      this.currentManualAnswer ? "ANSWER / LISTENING" : "LISTENING",
+      MANUAL_LISTENING_TEXT,
+      { preserveAnswer: true },
+    );
+  }
+
+  private manualNoNewSpeechText(): string {
+    const now = Date.now();
+    const recentPartial = this.lastManualPartialText && now - this.lastManualPartialAt <= MANUAL_RECENT_ASR_WINDOW_MS
+      ? this.lastManualPartialText
+      : "";
+    const recentCommitted = this.lastManualCommittedText && now - this.lastManualCommittedAt <= MANUAL_RECENT_ASR_WINDOW_MS
+      ? this.lastManualCommittedText
+      : "";
+    const recentAsr = recentPartial || recentCommitted;
+
+    if (recentAsr) {
+      return `No new useful speech.\nLast ASR: ${compactManualStatusSnippet(recentAsr, 90)}`;
+    }
+
+    return "No speech reached SayNext.\nCheck mic/connection, then speak again.";
   }
 
   restoreManualDisplayAfterSystemPrompt(delayMs = 1200): void {
@@ -1492,7 +1570,9 @@ export class MergeResponseHandler {
     const sourceRange = this.buildNewManualSourceRange();
     if (!sourceRange) {
       console.log(`[SayNext] Manual generate has no new speech transcriptCount=${this.transcriptSegments.length} lastGeneratedCursor=${this.lastGeneratedCursor ?? "-"}`);
-      this.showManualTransientDisplay("NO NEW SPEECH", MANUAL_NO_NEW_SPEECH_TEXT, { preserveAnswer: true });
+      this.showManualTransientDisplay("NO NEW SPEECH", this.manualNoNewSpeechText(), {
+        preserveAnswer: Boolean(this.currentManualAnswer),
+      });
       return this.cacheManualAction(clientEventId, {
         status: "no_new_speech",
         sessionId: this.sessionId,
@@ -1705,7 +1785,9 @@ export class MergeResponseHandler {
           this.pendingManualRequest = null;
           this.bumpManualState();
         }
-        this.showManualTransientDisplay("NO NEW SPEECH", MANUAL_NO_NEW_SPEECH_TEXT, { preserveAnswer: true });
+        this.showManualTransientDisplay("NO NEW SPEECH", this.manualNoNewSpeechText(), {
+          preserveAnswer: Boolean(this.currentManualAnswer),
+        });
         return this.cacheManualAction(clientEventId, {
           status: "no_new_speech",
           sessionId: this.sessionId,

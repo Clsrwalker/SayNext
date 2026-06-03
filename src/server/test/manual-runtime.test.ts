@@ -114,7 +114,9 @@ test("g2 manual mode commits transcript and shows heard status without automatic
   expect(state.transcriptCount).toBe(1);
   expect(state.lastGeneratedCursor).toBeNull();
   expect(state.currentAnswer).toBeNull();
-  expect(session.displays.at(-1)?.text).toBe("SN | HEARD TAP\nNew speech captured. Tap R1 for the next reply.");
+  expect(session.displays.at(-1)?.text).toBe(
+    "SN | HEARD\nHeard: Could you explain why database indexing changes query latency?\nTap R1 to answer.",
+  );
 });
 
 test("manual generate returns no_new_speech briefly then restores listening", async () => {
@@ -126,9 +128,13 @@ test("manual generate returns no_new_speech briefly then restores listening", as
   expect(result.status).toBe("no_new_speech");
   expect(replay).toEqual(result);
   expect(result.state.lastGeneratedCursor).toBeNull();
-  expect(session.displays.at(-1)?.text).toBe("SN | NO SPEECH\nNo new speech yet.");
+  expect(session.displays.at(-1)?.text).toBe(
+    "SN | NO ASR\nNo speech reached SayNext.\nCheck mic/connection, then speak again.",
+  );
   await sleep(1450);
-  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nListening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe(
+    "SN | LISTEN\nListening for speech.\nSay the question, then tap R1.",
+  );
 });
 
 test("manual clear cancels display state without advancing transcript cursor", async () => {
@@ -145,10 +151,12 @@ test("manual clear cancels display state without advancing transcript cursor", a
   expect(result.state.transcriptCount).toBe(1);
   expect(result.state.lastGeneratedCursor).toBeNull();
   expect(session.clearCount).toBe(0);
-  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nListening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe(
+    "SN | LISTEN\nListening for speech.\nSay the question, then tap R1.",
+  );
 });
 
-test("g2 manual mode shows heard status on glasses while preserving pinned answer text", async () => {
+test("g2 manual mode shows heard transcript status on glasses when new speech arrives", async () => {
   const { session, handler } = makeManualHandler();
 
   (handler as any).currentManualAnswer = {
@@ -169,7 +177,9 @@ test("g2 manual mode shows heard status on glasses while preserving pinned answe
 
   await handler.processTranscript("What should I answer next?", Date.now(), "isFinal");
 
-  expect(session.displays.at(-1)?.text).toBe("SN | HEARD TAP\nOld pinned answer.");
+  expect(session.displays.at(-1)?.text).toBe(
+    "SN | HEARD\nHeard: What should I answer next?\nTap R1 to answer.",
+  );
 });
 
 test("manual no_new_speech restores the pinned answer after the hint", async () => {
@@ -194,9 +204,9 @@ test("manual no_new_speech restores the pinned answer after the hint", async () 
   const result = await handler.generateManualAnswer("no-speech-with-pinned-answer");
 
   expect(result.status).toBe("no_new_speech");
-  expect(session.displays.at(-1)?.text).toBe("SN | NO SPEECH\nPinned answer stays visible.");
+  expect(session.displays.at(-1)?.text).toBe("SN | NO ASR\nPinned answer stays visible.");
   await sleep(1450);
-  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nPinned answer stays visible.");
+  expect(session.displays.at(-1)?.text).toBe("ANS | LISTEN\nPinned answer stays visible.");
 });
 
 test("manual generate can commit the current partial transcript before final ASR", async () => {
@@ -216,9 +226,21 @@ test("manual generate can commit the current partial transcript before final ASR
 
   expect(committed).toBe(true);
   expect((user as any).responseHandler.getManualState().transcriptCount).toBe(1);
-  expect(session.displays.at(-1)?.text).toBe("SN | HEARD TAP\nNew speech captured. Tap R1 for the next reply.");
+  expect(session.displays.at(-1)?.text).toBe(
+    "SN | HEARD\nHeard: Can you explain B-tree index trade\nTap R1 to answer.",
+  );
   expect(events.some((event) => event.type === "manual_partial_committed" && event.trigger === "test_partial")).toBe(true);
   user.cleanup();
+});
+
+test("manual no_new_speech shows the last raw ASR when only low-value partial arrived", async () => {
+  const { session, handler } = makeManualHandler();
+
+  handler.handlePartialTranscript("And.", Date.now());
+  const result = await handler.generateManualAnswer("low-value-partial");
+
+  expect(result.status).toBe("no_new_speech");
+  expect(session.displays.at(-1)?.text).toBe("SN | NO ASR\nNo new useful speech.\nLast ASR: And.");
 });
 
 test("g2 single tap delays manual generation through gesture arbitration", async () => {
@@ -228,7 +250,9 @@ test("g2 single tap delays manual generation through gesture arbitration", async
   user.addSSEClient((data) => events.push(JSON.parse(data)));
 
   await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
-  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nListening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe(
+    "SN | LISTEN\nListening for speech.\nSay the question, then tap R1.",
+  );
   session.touchHandler?.({ gesture: "single_tap" });
 
   expect(events.some((event) => event.type === "manual_gesture_pending")).toBe(true);
@@ -271,7 +295,9 @@ test("g2 long press is ignored and restores the manual display after system conf
   expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "long_press_reserved")).toBe(true);
   expect(session.displays.length).toBe(initialDisplayCount);
   await sleep(1250);
-  expect(session.displays.at(-1)?.text).toBe("SN | LISTEN\nListening. Tap R1 after speech.");
+  expect(session.displays.at(-1)?.text).toBe(
+    "SN | LISTEN\nListening for speech.\nSay the question, then tap R1.",
+  );
   expect(session.clearCount).toBe(0);
   user.cleanup();
 });
