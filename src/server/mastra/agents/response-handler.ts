@@ -15,6 +15,7 @@ import { normalizeKnownProjectAsrAliases } from '../../text/asr-corrections';
 import { detectPromptMode } from '../../saynext/context-builder';
 import { sayNextConversationStateInstructions } from '../../saynext/prompts';
 import { evenHubConversationStateInstructions } from '../../evenhub/prompts';
+import { LLM_PROVIDER } from '../../saynext/model-runtime';
 
 const EVENT_IDLE_CLOSE_MS = 8 * 60 * 1000;
 const SUGGESTION_ECHO_WINDOW_MS = 45 * 1000;
@@ -143,6 +144,7 @@ type TranscriptSegment = {
   timestamp: number;
   reason: "isFinal" | "timeout";
   createdAt: number;
+  eventId: string;
 };
 
 type SourceRange = {
@@ -169,6 +171,21 @@ type PendingManualRequest = {
   sourceRange: SourceRange;
   cancelled: boolean;
 };
+
+export function promptModeOverrideForSceneBuiltinKey(builtinKey: string | null | undefined): PromptMode | null {
+  switch (builtinKey) {
+    case "daily_chat":
+      return "casual";
+    case "classroom":
+      return "classroom";
+    case "interview":
+      return "interview";
+    case "meeting_group":
+      return "general";
+    default:
+      return null;
+  }
+}
 
 export type ManualActionResult = {
   status:
@@ -368,6 +385,130 @@ function shortHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
+const MANUAL_PROMPT_LOW_VALUE_PATTERN = /^(?:\.?\s*)?(?:and|so|then|but|or|uh|um|erm|hmm|mm|ah|oh|okay|ok|right|yeah|yes|no|exactly|awesome|great|perfect|click|correct|let'?s see|all right|alright)[\s.,!?-]*$/i;
+const MANUAL_PROMPT_LOW_VALUE_TOKENS = new Set([
+  "and",
+  "so",
+  "then",
+  "but",
+  "or",
+  "uh",
+  "um",
+  "erm",
+  "hmm",
+  "mm",
+  "ah",
+  "oh",
+  "okay",
+  "ok",
+  "right",
+  "yeah",
+  "yes",
+  "no",
+  "exactly",
+  "awesome",
+  "great",
+  "perfect",
+  "click",
+  "correct",
+  "alright",
+  "all",
+  "let",
+  "me",
+]);
+
+function normalizeManualPromptText(text: string): string {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isManualPromptLowValue(text: string): boolean {
+  const normalized = String(text || "").trim();
+  if (!normalized) return true;
+  if (MANUAL_PROMPT_LOW_VALUE_PATTERN.test(normalized)) return true;
+  const tokens = normalizeManualPromptText(normalized).split(/\s+/).filter(Boolean);
+  if (!tokens.length) return true;
+  return tokens.length <= 5 && tokens.every((token) => MANUAL_PROMPT_LOW_VALUE_TOKENS.has(token));
+}
+
+function isManualPromptRevision(previous: string, current: string): boolean {
+  const left = normalizeManualPromptText(previous);
+  const right = normalizeManualPromptText(current);
+  if (!left || !right) return false;
+  if (left === right) return true;
+
+  const shorter = left.length < right.length ? left : right;
+  const longer = left.length < right.length ? right : left;
+  if (shorter.length < 40) return false;
+  return longer.startsWith(shorter) && shorter.length / Math.max(longer.length, 1) >= 0.45;
+}
+
+export function compactManualPromptSegmentsForTest<T extends Pick<TranscriptSegment, "text">>(segments: T[]): T[] {
+  const compacted: T[] = [];
+  for (const segment of segments) {
+    if (isManualPromptLowValue(segment.text)) continue;
+
+    const previous = compacted.at(-1);
+    if (previous && isManualPromptRevision(previous.text, segment.text)) {
+      const previousText = normalizeManualPromptText(previous.text);
+      const currentText = normalizeManualPromptText(segment.text);
+      if (currentText.length >= previousText.length) {
+        compacted[compacted.length - 1] = segment;
+      }
+      continue;
+    }
+
+    compacted.push(segment);
+  }
+
+  return compacted.slice(-8);
+}
+
+function findManualSegmentsAfterSourceRange<T extends Pick<TranscriptSegment, "id" | "createdAt">>(
+  segments: T[],
+  sourceRange: { segmentIds: string[] },
+  startedAt: number,
+): T[] {
+  const included = new Set(sourceRange.segmentIds);
+  return segments.filter((segment) => segment.createdAt >= startedAt && !included.has(segment.id));
+}
+
+export function findManualSegmentsAfterSourceRangeForTest<T extends Pick<TranscriptSegment, "id" | "createdAt">>(
+  segments: T[],
+  sourceRange: { segmentIds: string[] },
+  startedAt: number,
+): T[] {
+  return findManualSegmentsAfterSourceRange(segments, sourceRange, startedAt);
+}
+
+function buildManualTranscriptContextSinceCursor<T extends Pick<TranscriptSegment, "id" | "text">>(
+  segments: T[],
+  fromExclusive: string | null,
+): { text: string; toInclusive: string | null } {
+  let startIndex = 0;
+  if (fromExclusive) {
+    const cursorIndex = segments.findIndex((segment) => segment.id === fromExclusive);
+    startIndex = cursorIndex >= 0 ? cursorIndex + 1 : 0;
+  }
+
+  const selected = segments.slice(startIndex);
+  const compacted = compactManualPromptSegmentsForTest(selected);
+  return {
+    text: compacted.map((segment) => segment.text.trim()).filter(Boolean).join("\n").trim(),
+    toInclusive: selected.at(-1)?.id ?? null,
+  };
+}
+
+export function buildManualTranscriptContextSinceCursorForTest<T extends Pick<TranscriptSegment, "id" | "text">>(
+  segments: T[],
+  fromExclusive: string | null,
+): { text: string; toInclusive: string | null } {
+  return buildManualTranscriptContextSinceCursor(segments, fromExclusive);
+}
+
 function makeRuntimeId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -492,12 +633,66 @@ function wrapManualDisplayText(text: string, maxUnits: number): string[] {
   return lines;
 }
 
+function manualDisplayLineLooksLikeCode(line: string): boolean {
+  const trimmed = line.trim();
+  return /^\s*(class|def|return|if|elif|else|for|while|try|except|raise|import|from)\b/.test(line)
+    || /^\s*(self|this)\.[A-Za-z_][\w.]*\s*=/.test(line)
+    || /^\s*[A-Za-z_][\w.]*\s*=\s*.+/.test(line)
+    || /^\s*#\s+\S+/.test(line)
+    || /^[ \t]{2,}\S+/.test(line)
+    || /[{};]\s*$/.test(trimmed);
+}
+
+function manualAnswerLooksLikeCode(text: string): boolean {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim());
+  if (lines.length < 2) return false;
+  const codeLineCount = lines.filter(manualDisplayLineLooksLikeCode).length;
+  if (codeLineCount >= 2) return true;
+  return /\b(class|function|method|python|pseudocode|code skeleton)\b/i.test(text)
+    && /\b(def|return|self\.|this\.|class\s+[A-Za-z_]|function\s+[A-Za-z_])\b/i.test(text);
+}
+
+function wrapManualCodeLine(line: string, maxUnits: number): string[] {
+  const raw = line.replace(/\s+$/g, "");
+  if (!raw.trim()) return [];
+  if (manualDisplayUnits(raw) <= maxUnits) return [raw];
+
+  const indent = raw.match(/^\s*/)?.[0] ?? "";
+  const content = raw.slice(indent.length);
+  const continuationIndent = `${indent}  `;
+  const firstMaxUnits = Math.max(16, maxUnits - manualDisplayUnits(indent));
+  const continuationMaxUnits = Math.max(16, maxUnits - manualDisplayUnits(continuationIndent));
+  const firstChunks = wrapManualDisplayText(content, firstMaxUnits);
+  if (!firstChunks.length) return [raw];
+
+  return firstChunks.map((chunk, index) => `${index === 0 ? indent : continuationIndent}${chunk}`);
+}
+
+function paginateManualCodeAnswer(text: string, maxBodyLines: number, maxLineUnits: number): string[] {
+  const displayLines = String(text || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .flatMap((line) => wrapManualCodeLine(line, maxLineUnits));
+  const pages: string[] = [];
+
+  for (let index = 0; index < displayLines.length; index += maxBodyLines) {
+    pages.push(displayLines.slice(index, index + maxBodyLines).join("\n"));
+  }
+
+  return pages.map((page) => page.trimEnd()).filter((page) => page.trim());
+}
+
 export function paginateManualAnswer(text: string): string[] {
-  const cleaned = String(text || "").replace(/\s+/g, " ").trim();
-  if (!cleaned) return [];
+  const raw = String(text || "").replace(/\r\n/g, "\n").trim();
+  if (!raw) return [];
 
   const maxBodyLines = Math.max(1, Math.min(4, MANUAL_TEXTWALL_BODY_LINES));
   const maxLineUnits = Math.max(24, Math.min(80, MANUAL_TEXTWALL_LINE_UNITS));
+  if (manualAnswerLooksLikeCode(raw)) {
+    return paginateManualCodeAnswer(raw, maxBodyLines, maxLineUnits);
+  }
+
+  const cleaned = raw.replace(/\s+/g, " ").trim();
   const wrappedLines = wrapManualDisplayText(cleaned, maxLineUnits);
   const pages: string[] = [];
 
@@ -659,6 +854,7 @@ export class MergeResponseHandler {
   private transcriptSegments: TranscriptSegment[] = [];
   private transcriptSeq: number = 0;
   private lastGeneratedCursor: string | null = null;
+  private lastManualTranscriptContextCursor: string | null = null;
   private pendingManualRequest: PendingManualRequest | null = null;
   private currentManualAnswer: ManualAnswer | null = null;
   private manualStateVersion: number = 0;
@@ -804,7 +1000,8 @@ export class MergeResponseHandler {
         .filter((item) => item.type === "transcript")
         .map((item) => item.text),
     );
-    const promptMode = detectPromptMode(text, eventSnapshot);
+    const activeScenePromptModeOverride = this.resolveActiveScenePromptModeOverride();
+    const promptMode = activeScenePromptModeOverride || detectPromptMode(text, eventSnapshot);
     const isClassroomMode = promptMode === "classroom";
     const memoryQuery = eventSnapshot.recentTranscripts.slice(-4).join("\n") || text;
     const telepromptNeed = shouldStartTeleprompt(text, `${eventSnapshot.scene} ${activeSceneProfilePrompt}`);
@@ -858,6 +1055,7 @@ export class MergeResponseHandler {
       {
         openAiConversationSession: this.openAiConversationSession,
         transcriptCommitReason: reason === "timeout" ? "timeout" : "final",
+        promptModeOverride: activeScenePromptModeOverride || undefined,
       },
     );
 
@@ -945,7 +1143,7 @@ export class MergeResponseHandler {
 
   private resolveActiveSceneProfilePrompt(latestTranscript: string, timestamp: number, recentTranscripts: string[]): string {
     const activeProfile = conversationLogger.getActiveSceneProfile(this.userId);
-    if (activeProfile?.builtinKey !== "auto") {
+    if (activeProfile && activeProfile.builtinKey !== "auto") {
       return conversationLogger.formatSceneProfilePrompt(activeProfile);
     }
 
@@ -998,6 +1196,11 @@ export class MergeResponseHandler {
       : "";
   }
 
+  private resolveActiveScenePromptModeOverride(): PromptMode | null {
+    const activeProfile = conversationLogger.getActiveSceneProfile(this.userId);
+    return promptModeOverrideForSceneBuiltinKey(activeProfile?.builtinKey);
+  }
+
   private logConversationSample(text: string, timestamp: number, response: AgentResponse): void {
     try {
       const metadata = response.type === Action.INSIGHT ? response.metadata?.agentInput : undefined;
@@ -1032,6 +1235,7 @@ export class MergeResponseHandler {
       timestamp,
       reason,
       createdAt: Date.now(),
+      eventId: eventSnapshot.eventId,
     };
     this.transcriptSegments.push(segment);
     if (this.transcriptSegments.length > MANUAL_MAX_SEGMENTS) {
@@ -1507,6 +1711,7 @@ export class MergeResponseHandler {
       this.pendingManualRequest = null;
       this.currentManualAnswer = null;
       this.lastGeneratedCursor = this.transcriptSegments.at(-1)?.id ?? this.lastGeneratedCursor;
+      this.lastManualTranscriptContextCursor = this.lastGeneratedCursor;
       if (this.displayTimer) {
         clearTimeout(this.displayTimer);
         this.displayTimer = null;
@@ -1606,6 +1811,12 @@ export class MergeResponseHandler {
         sessionId: this.sessionId,
         state: this.getManualState(),
       });
+    }
+
+    const newSourceRange = this.buildNewManualSourceRange();
+    if (newSourceRange) {
+      console.log(`[SayNext] Manual regenerate rerouted to latest speech segments=${newSourceRange.segmentIds.length} digest=${newSourceRange.textDigest}`);
+      return this.runManualGeneration("generate", newSourceRange, clientEventId);
     }
 
     if (!this.currentManualAnswer) {
@@ -1768,17 +1979,24 @@ export class MergeResponseHandler {
   }
 
   private buildNewManualSourceRange(): SourceRange | null {
+    const currentEventId = this.eventMemory.getSnapshot().eventId;
+    const eligibleSegments = currentEventId
+      ? this.transcriptSegments.filter((segment) => segment.eventId === currentEventId)
+      : this.transcriptSegments;
+
     let startIndex = 0;
+    let fromExclusive: string | null = null;
     if (this.lastGeneratedCursor) {
-      const cursorIndex = this.transcriptSegments.findIndex((segment) => segment.id === this.lastGeneratedCursor);
+      const cursorIndex = eligibleSegments.findIndex((segment) => segment.id === this.lastGeneratedCursor);
       startIndex = cursorIndex >= 0 ? cursorIndex + 1 : 0;
+      fromExclusive = cursorIndex >= 0 ? this.lastGeneratedCursor : null;
     }
-    const segments = this.transcriptSegments.slice(startIndex);
+    const segments = eligibleSegments.slice(startIndex);
     if (!segments.length) return null;
 
     const text = segments.map((segment) => segment.text).join("\n");
     return {
-      fromExclusive: this.lastGeneratedCursor,
+      fromExclusive,
       toInclusive: segments[segments.length - 1].id,
       segmentIds: segments.map((segment) => segment.id),
       textDigest: shortHash(text),
@@ -1815,8 +2033,9 @@ export class MergeResponseHandler {
 
     try {
       const segments = this.segmentsForSourceRange(sourceRange);
-      const sourceText = this.textForSourceRange(sourceRange);
-      if (!segments.length || !sourceText) {
+      const promptSegments = compactManualPromptSegmentsForTest(segments);
+      const sourceText = promptSegments.map((segment) => segment.text).join("\n").trim();
+      if (!promptSegments.length || !sourceText) {
         if (this.pendingManualRequest?.requestId === requestId) {
           this.pendingManualRequest = null;
           this.bumpManualState();
@@ -1831,9 +2050,14 @@ export class MergeResponseHandler {
         });
       }
 
-      const latestText = segments[segments.length - 1].text;
+      const latestText = promptSegments[promptSegments.length - 1].text;
       const timestamp = Date.now();
-      const context: Conversation = segments.map((segment) => ({
+      const shouldSendTranscriptDelta = isOpenAiConversationStateEnabled(LLM_PROVIDER);
+      const transcriptContextCursor = shouldSendTranscriptDelta
+        ? (this.lastManualTranscriptContextCursor ?? this.lastGeneratedCursor)
+        : null;
+      const transcriptContext = buildManualTranscriptContextSinceCursor(this.transcriptSegments, transcriptContextCursor);
+      const context: Conversation = promptSegments.map((segment) => ({
         type: "transcript",
         text: segment.text,
         timestamp: segment.timestamp,
@@ -1842,12 +2066,14 @@ export class MergeResponseHandler {
       const activeSceneProfilePrompt = this.resolveActiveSceneProfilePrompt(
         latestText,
         timestamp,
-        segments.map((segment) => segment.text),
+        promptSegments.map((segment) => segment.text),
       );
-      const promptMode = this.manualPromptModeOverride || detectPromptMode(latestText, eventSnapshot);
+      const activeScenePromptModeOverride = this.manualPromptModeOverride || this.resolveActiveScenePromptModeOverride();
+      const promptMode = activeScenePromptModeOverride || detectPromptMode(latestText, eventSnapshot);
       const isClassroomMode = promptMode === "classroom";
       const telepromptNeed = "none";
       const prenoteQuery = [
+        transcriptContext.text,
         sourceText,
         eventSnapshot.title,
         eventSnapshot.summary,
@@ -1860,7 +2086,11 @@ export class MergeResponseHandler {
       );
       const relevantPersonalMemoryContext = isClassroomMode
         ? ""
-        : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, sourceText, SAYNEXT_PERSONAL_MEMORY_TOP_K);
+        : await conversationLogger.getRelevantPersonalMemoryContextAsync(
+          this.userId,
+          [transcriptContext.text, sourceText].filter(Boolean).join("\n"),
+          SAYNEXT_PERSONAL_MEMORY_TOP_K,
+        );
 
       const response = await withManualGenerationTimeout(
         processConversation(
@@ -1875,8 +2105,9 @@ export class MergeResponseHandler {
             openAiConversationSession: this.openAiConversationSession,
             transcriptCommitReason: "final",
             responseStyle: "manual",
-            promptModeOverride: this.manualPromptModeOverride || undefined,
+            promptModeOverride: activeScenePromptModeOverride || undefined,
             promptPreset: this.promptPreset,
+            transcriptContext: transcriptContext.text,
           },
         ),
         requestId,
@@ -1889,6 +2120,30 @@ export class MergeResponseHandler {
           sessionId: this.sessionId,
           state: this.getManualState(),
         };
+      }
+
+      const newerSegments = findManualSegmentsAfterSourceRange(this.transcriptSegments, sourceRange, startedAt);
+      if (newerSegments.length) {
+        this.pendingManualRequest = null;
+        this.bumpManualState();
+        const latestNewSegment = newerSegments.at(-1);
+        if (latestNewSegment) {
+          this.showManualDisplay("HEARD / TAP R1", manualHeardStatusText(latestNewSegment.text), { preserveAnswer: true });
+        }
+        const result: ManualActionResult = {
+          status: "noop",
+          sessionId: this.sessionId,
+          state: this.getManualState(),
+        };
+        this.onStatus?.({
+          type: "manual_status",
+          reason: "manual_generation_stale_new_speech",
+          requestId,
+          newSegmentIds: newerSegments.map((segment) => segment.id),
+          state: result.state,
+        });
+        console.log(`[SayNext] Manual generation ignored request=${requestId} kind=${kind} reason=new_speech_after_start newSegments=${newerSegments.map((segment) => segment.id).join(",")} ms=${Date.now() - startedAt}`);
+        return this.cacheManualAction(clientEventId, result);
       }
 
       this.pendingManualRequest = null;
@@ -1923,6 +2178,9 @@ export class MergeResponseHandler {
       this.currentManualAnswer = answer;
       if (kind === "generate") {
         this.lastGeneratedCursor = sourceRange.toInclusive;
+      }
+      if (transcriptContext.toInclusive) {
+        this.lastManualTranscriptContextCursor = transcriptContext.toInclusive;
       }
       this.conversation.push(response);
       this.eventMemory.addResponse(response);
@@ -2066,6 +2324,7 @@ export class MergeResponseHandler {
     this.transcriptSegments = [];
     this.transcriptSeq = 0;
     this.lastGeneratedCursor = null;
+    this.lastManualTranscriptContextCursor = null;
     this.pendingManualRequest = null;
     this.currentManualAnswer = null;
     this.manualActionResults.clear();
@@ -2090,6 +2349,7 @@ export class MergeResponseHandler {
     this.transcriptSegments = [];
     this.transcriptSeq = 0;
     this.lastGeneratedCursor = null;
+    this.lastManualTranscriptContextCursor = null;
     this.pendingManualRequest = null;
     this.currentManualAnswer = null;
     this.manualActionResults.clear();

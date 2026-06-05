@@ -20,6 +20,7 @@ export function buildEvenHubLiveTaskPrompt(params: {
   promptMode: PromptMode | string;
   supportContext?: string;
   routeHints?: string;
+  answerIntentHint?: string;
 }): string {
   if (params.promptMode === "classroom") {
     return [
@@ -29,6 +30,9 @@ No fixed word cap. Be compact but complete.
 If there is a question, answer it directly.
 If there is no question, add one relevant knowledge point from the transcript.
 For technical mechanisms, include the core mechanism plus one trade-off, example, or next concept when useful.`,
+      params.answerIntentHint?.trim()
+        ? `Answer strategy:\n${params.answerIntentHint.trim()}`
+        : "",
       params.supportContext?.trim()
         ? `Prepared note, use only if directly relevant:\n${params.supportContext.trim()}`
         : "",
@@ -36,6 +40,9 @@ For technical mechanisms, include the core mechanism plus one trade-off, example
   }
 
   const contextSections = [
+    params.answerIntentHint?.trim()
+      ? `Answer strategy:\n${params.answerIntentHint.trim()}`
+      : "",
     params.formattedSceneProfile?.trim()
       ? `Scene guidance:\n${params.formattedSceneProfile.trim()}`
       : "",

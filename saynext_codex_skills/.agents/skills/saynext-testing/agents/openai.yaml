@@ -1,0 +1,5 @@
+interface:
+  display_name: "SayNext Testing"
+  short_description: "Test SayNext prompt and routing drift"
+  brand_color: "#2563eb"
+  default_prompt: "Use $saynext-testing to add test-first coverage, verify routing/prompt/memory behavior, and report drift risk."

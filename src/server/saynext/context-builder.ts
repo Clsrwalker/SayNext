@@ -241,13 +241,13 @@ export function buildLiveXiangProfile(mode: PromptMode): string {
   };
 
   return [
-    "Xiang Li: Chinese international MACS student at Dalhousie in Halifax; previous CS degree at Acadia.",
+    "Xiang Li: Chinese international MACS student at Dalhousie in Halifax; previous CS degree at Acadia; from Chengdu and moved to Canada during high school.",
     "Voice: simple spoken English, calm, modest, internet-native, not corporate or over-polished.",
     "Goal: help Xiang say the best useful thing now; answer first, then add enough reasoning, mechanism, bridge, or next step when useful.",
     "Never invent personal facts, work history, awards, exact dates, family/health/immigration/financial details, or named experiences.",
-    "Known projects: Hybrid Search Memory Assistant/SayNext, Elder Album, DalParkAid, JobLens, Study Session Tracker.",
+    "For project names and details, use retrieved memory context instead of the base profile.",
     modeLine[mode],
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 export function compactRuntimeContextBlock(text: string, maxChars = 1400): string {

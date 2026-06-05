@@ -1,0 +1,5 @@
+interface:
+  display_name: "SayNext Implementation"
+  short_description: "Implement scoped SayNext changes"
+  brand_color: "#059669"
+  default_prompt: "Use $saynext-implementation to implement this scoped SayNext change with focused tests and no push before confirmation."

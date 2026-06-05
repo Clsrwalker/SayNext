@@ -8,6 +8,7 @@ import {
   isOpenAiConversationStateEnabled,
   shouldCommitTranscriptToOpenAiConversation,
 } from "./openai-conversation-state";
+import { buildAnswerIntentHint, classifyAnswerIntent } from "../../saynext/answer-intent";
 import { normalizeKnownProjectAsrAliases } from "../../text/asr-corrections";
 import { buildProcessTrace } from "../../saynext/process-router";
 import type { PromptMode } from "../../saynext/process-router";
@@ -104,6 +105,7 @@ export interface ProcessConversationOptions {
   responseStyle?: "auto" | "manual";
   promptModeOverride?: PromptMode;
   promptPreset?: "saynext" | "evenhub";
+  transcriptContext?: string;
 }
 
 export async function processConversation(
@@ -120,6 +122,13 @@ export async function processConversation(
   const rawLatestTranscript = getLatestTranscript(conversation);
   const latestTranscript = normalizeKnownProjectAsrAliases(rawLatestTranscript);
   const promptMode = options.promptModeOverride || detectPromptMode(latestTranscript, eventMemory);
+  const formattedTranscriptContext = options.transcriptContext?.trim() || "";
+  const transcriptForIntent = [
+    formattedTranscriptContext,
+    latestTranscript,
+  ].filter(Boolean).join("\n");
+  const answerIntent = classifyAnswerIntent(transcriptForIntent || latestTranscript, promptMode, eventMemory);
+  const answerIntentHint = buildAnswerIntentHint(answerIntent);
   const promptPreset = options.promptPreset === "evenhub" ? "evenhub" : "saynext";
   const systemInstructions = promptPreset === "evenhub" ? evenHubSystemInstructions : sayNextInstructions;
   const conversationStateInstructions = promptPreset === "evenhub" ? evenHubConversationStateInstructions : sayNextConversationStateInstructions;
@@ -203,15 +212,17 @@ export async function processConversation(
     promptMode,
     supportContext: isClassroomMode ? formattedPrenoteContext : compactRuntimeContextBlock(trustedSupportContext, 2600),
     routeHints: formattedImmediateRouteHints,
+    answerIntentHint,
   });
 
   const outputLanguageText = outputLanguage === "chinese" ? "Chinese" : "English";
   const manualResponseInstruction = options.responseStyle === "manual"
     ? promptPreset === "evenhub"
       ? evenHubManualResponseInstruction
-      : "Manual G2 display: write the exact words Xiang can say now, usually in first person. Prefer 25-80 English words; use more only for technical or interview depth. Do not use Markdown, labels, or advice about how to answer."
+      : "Manual G2 display: write the exact words Xiang can say now, usually in first person. No word-count target or minimum; use only the length needed. Technical or interview answers can use more detail when depth is useful. For explicit coding interview requests, include the actual code or pseudocode plus a short explanation, not only a verbal plan; code indentation and short comments are allowed. Do not use labels or advice about how to answer."
     : "";
   const conversationStateTaskHint = [
+    answerIntentHint,
     isClassroomMode
       ? "Classroom mode: if the transcript is a clear question, answer it directly using general knowledge; do not ask for repetition unless the transcript is genuinely unclear."
       : "",
@@ -228,13 +239,21 @@ export async function processConversation(
     `Output language: ${outputLanguageText}`,
     manualResponseInstruction,
   ].filter(Boolean).join("\n");
-  const dynamicPromptSuffix = `${dynamicPromptCore}\n\nCurrent transcript: ${latestTranscript}`;
+  const dynamicPromptSuffix = [
+    dynamicPromptCore,
+    formattedTranscriptContext
+      ? `Transcript context since last request, use as background only:\n${formattedTranscriptContext}`
+      : "",
+    `Current transcript: ${latestTranscript}`,
+  ].filter(Boolean).join("\n\n");
   const openAiConversationInput = buildOpenAiConversationInput(latestTranscript, {
     outputLanguage: outputLanguageText,
     promptMode,
+    answerIntent,
     supportContext: conversationStateSupportContext,
     preparedNote: formattedPrenoteContext,
     taskHint: conversationStateTaskHint,
+    transcriptContext: formattedTranscriptContext,
   });
 
   const prompt = `${stablePromptPrefix}\n\n${dynamicPromptSuffix}`;
@@ -276,7 +295,9 @@ export async function processConversation(
           latestTranscript,
           outputLanguage: outputLanguageText,
           promptMode,
+          answerIntent,
           taskHint: conversationStateTaskHint,
+          transcriptContext: formattedTranscriptContext,
           supportContext: conversationStateSupportContext,
           preparedNote: formattedPrenoteContext,
           timeoutMs: OPENAI_TIMEOUT_MS,
@@ -334,7 +355,7 @@ export async function processConversation(
         const reasoning = extractedOutput
           ? "Ollama returned partial JSON; extracted output field"
           : "Generated SayNext reply with Ollama";
-        const output = finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory, promptMode);
+        const output = finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory, promptMode, { answerIntent });
         return {
           type: Action.INSIGHT,
           reasoning,
@@ -366,7 +387,7 @@ export async function processConversation(
       const reasoning = extractedOutput
         ? "OpenAI returned structured text; extracted output field"
         : "Generated SayNext reply with OpenAI";
-      const output = finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory, promptMode);
+      const output = finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory, promptMode, { answerIntent });
       return {
         type: Action.INSIGHT,
         reasoning,

@@ -48,10 +48,15 @@ export function classifyScene(text: string): string {
   const hasCourseContext = /\b(course|courses)\b/.test(normalized) && !/\bof course\b/.test(normalized);
   const speakerLabelCount = (text.match(/\b[A-Z]:\s/g) ?? []).length;
   const hasLectureContext = /\b(professor|lecture|class|homework|exam|tutorial|students|any questions)\b/.test(normalized);
+  const hasCodingInterviewContext = isCodingInterviewText(text);
   const hasCollaborativeProjectContext = (
     /\b(?:we|our|team|xiang|i)\b.*\b(project|feature|demo|task|deadline|blocker|blocked|stuck|schema|api contract|settings endpoint|frontend|backend|integration|milestone|sprint|merge|pull request|pr|teleprompt|design|testing|deliverable)\b/.test(normalized)
     || /\b(blocker|blocked|stuck|action item|owner|deadline|standup|sprint|milestone|api contract|mock schema|frontend integration|backend integration)\b/.test(normalized)
   );
+
+  if (hasCodingInterviewContext) {
+    return "interview";
+  }
 
   if (speakerLabelCount >= 2 && /\b(team|meeting|project|whiteboard|tool training|design|prototype|remote control|manager|everybody)\b/.test(normalized)) {
     return "group_discussion";
@@ -88,6 +93,19 @@ export function classifyScene(text: string): string {
   return "daily_chat";
 }
 
+function isCodingInterviewText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return /\b(coderpad|coding interview|technical interview|interviewer|object[- ]oriented design|ood question|algorithm(?:s)? question|coding problem|share code|start coding|talk through your approach)\b/i.test(normalized)
+    || (
+      /\b(interview|candidate)\b/i.test(normalized)
+      && /\b(code|coding|algorithm|object[- ]oriented|ood|design|components?|classes?|implementation)\b/i.test(normalized)
+    )
+    || (
+      /\b(i'?m curious|i really want|what components|how you would structure|core foundation|core structure)\b/i.test(normalized)
+      && /\b(object[- ]oriented|ood|components?|classes?|structure|foundation|implementation)\b/i.test(normalized)
+    );
+}
+
 function isClearDailySwitchText(text: string): boolean {
   const normalized = text.toLowerCase();
   return CLEAR_DAILY_CHAT_PATTERN.test(normalized);
@@ -98,6 +116,11 @@ export function shouldStartNewEvent(current: Pick<ActiveEvent, "scene" | "lastTi
   if (timestamp - current.lastTimestamp > EVENT_IDLE_TIMEOUT_MS) return true;
 
   if (current.scene === scene) return false;
+  if (current.scene === "interview"
+    && (scene === "classroom" || scene === "group_discussion" || scene === "work_discussion")
+    && isCodingInterviewText(text)) {
+    return false;
+  }
   if (current.scene === "group_discussion" && scene === "interview" && /\b[A-Z]:\s/.test(text)) return false;
   if (current.scene === "classroom" && scene === "group_discussion" && /\b(lecture|algorithm|matrix|accuracy|method|code|pivot|elimination)\b/i.test(text)) return false;
   if (scene === "daily_chat") return isClearDailySwitchText(text);

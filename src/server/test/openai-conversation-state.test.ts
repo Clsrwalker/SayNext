@@ -78,6 +78,24 @@ test("conversation input can carry relevant support context for personal modes",
   ].join("\n"));
 });
 
+test("conversation input can carry transcript context before the latest trigger", () => {
+  expect(buildOpenAiConversationInput("  What components would be important?  ", {
+    outputLanguage: "English",
+    promptMode: "interview",
+    transcriptContext: [
+      "Imagine we're designing a book system similar to Kindle for short stories.",
+      "Users have a library of books, can set an active book, and the app remembers the last page.",
+    ].join("\n"),
+  })).toBe([
+    "Language: English",
+    "Mode: interview",
+    "Transcript context since last request, use as background only:",
+    "Imagine we're designing a book system similar to Kindle for short stories.",
+    "Users have a library of books, can set an active book, and the app remembers the last page.",
+    "Transcript: What components would be important?",
+  ].join("\n"));
+});
+
 test("conversation create payload seeds fixed instructions once", () => {
   const payload = buildOpenAiConversationCreatePayload({
     userId: "xiang@example.com",
@@ -137,6 +155,36 @@ test("conversation payload includes relevant support context when provided", () 
     "Xiang is a MACS student at Dalhousie.",
     "Transcript: What program are you in?",
   ].join("\n"));
+});
+
+test("conversation input exposes tagged top memory context for GPT selection", () => {
+  const supportContext = [
+    "Personal memory candidates:",
+    "[1] sourceRef=project:joblens facet=architecture",
+    "Title: JobLens backend architecture",
+    "Facts:",
+    "- JobLens used AWS Lambda, API Gateway, DynamoDB, S3, and resume/job matching workflow.",
+    "- Xiang worked on backend integration, data flow, and debugging.",
+    "[2] sourceRef=project:elderalbum facet=architecture",
+    "Title: ElderAlbum serverless backend",
+    "Facts:",
+    "- ElderAlbum used upload-triggered Lambda and metadata storage.",
+  ].join("\n");
+
+  const input = buildOpenAiConversationInput("How would you explain your backend experience?", {
+    outputLanguage: "English",
+    promptMode: "interview",
+    answerIntent: "personal_fact",
+    supportContext,
+    taskHint: "Personal fact question: use supported memory facts directly.",
+  });
+
+  expect(input).toContain("Intent: personal_fact");
+  expect(input).toContain("Relevant context candidates, use only if helpful:");
+  expect(input).toContain("JobLens backend architecture");
+  expect(input).toContain("AWS Lambda, API Gateway, DynamoDB, S3");
+  expect(input).toContain("ElderAlbum serverless backend");
+  expect(input).toContain("Transcript: How would you explain your backend experience?");
 });
 
 test("extracts response text from Responses API output_text first", () => {

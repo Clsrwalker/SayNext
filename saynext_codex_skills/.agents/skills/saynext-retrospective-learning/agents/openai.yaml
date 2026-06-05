@@ -1,0 +1,5 @@
+interface:
+  display_name: "SayNext Retrospective"
+  short_description: "Capture SayNext lessons safely"
+  brand_color: "#7C3AED"
+  default_prompt: "Use $saynext-retrospective-learning to summarize this SayNext failure and propose small persistent updates before editing."

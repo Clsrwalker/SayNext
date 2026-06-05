@@ -1,0 +1,5 @@
+interface:
+  display_name: "SayNext Product Interview"
+  short_description: "Clarify SayNext ideas before coding"
+  brand_color: "#2563EB"
+  default_prompt: "Use $saynext-product-interview to clarify this SayNext idea into an MVP and acceptance criteria before coding."

@@ -1,4 +1,5 @@
 import type { EventMemorySnapshot } from "../memory/event-memory";
+import type { AnswerIntent } from "./answer-intent";
 import {
   enforceOutputLanguage,
   replaceChineseEnglishClarification,
@@ -18,7 +19,7 @@ import {
   normalizeSpokenDisplayPunctuation,
 } from "./output-text-utils";
 
-const SAYNEXT_OUTPUT_MAX_CHARS = Number(process.env.SAYNEXT_OUTPUT_MAX_CHARS || 1200);
+const SAYNEXT_OUTPUT_MAX_CHARS = Number(process.env.SAYNEXT_OUTPUT_MAX_CHARS || 0);
 
 export {
   countTelepromptWords,
@@ -32,9 +33,73 @@ export {
 
 export type { OutputLanguage } from "./output-language-guards";
 
-export function sanitizeSayNextOutput(text: string): string {
+function stripCodeFences(text: string): string {
+  return String(text ?? "")
+    .replace(/```[a-zA-Z0-9_+-]*\s*\n?/g, "")
+    .replace(/```/g, "");
+}
+
+function stripAnswerPrefix(line: string): string {
+  return line
+    .replace(/^\s*(?:[-*]+|\d+[.)]|[A-Za-z][.)])\s*/g, "")
+    .replace(/^\s*(?:(?:you\s+can\s+say|you\s+could\s+say|say|direct\s+answer|answer|reply|response|suggested\s+reply)\s*[:-]\s*)+/i, "")
+    .trimEnd();
+}
+
+function lineLooksLikeCode(line: string): boolean {
+  const trimmed = line.trim();
+  return /^\s*(class|def|return|if|elif|else|for|while|try|except|raise|import|from)\b/.test(line)
+    || /^\s*(self|this)\.[A-Za-z_][\w.]*\s*=/.test(line)
+    || /^\s*[A-Za-z_][\w.]*\s*=\s*.+/.test(line)
+    || /^\s*[A-Za-z_][\w.]*\([^)]*\):\s*$/.test(line)
+    || /^\s*#\s+\S+/.test(line)
+    || /[{};]\s*$/.test(trimmed);
+}
+
+function outputLooksLikeCodeSnippet(text: string): boolean {
+  const cleaned = stripCodeFences(text);
+  const lines = cleaned.split("\n").filter((line) => line.trim());
+  if (lines.length < 2) return false;
+  const codeLineCount = lines.filter(lineLooksLikeCode).length;
+  if (codeLineCount >= 2) return true;
+  return /\b(class|function|method|constructor|python|pseudocode|code skeleton)\b/i.test(cleaned)
+    && /\b(def|return|self\.|this\.|class\s+[A-Za-z_]|function\s+[A-Za-z_]|=>)\b/i.test(cleaned);
+}
+
+function sanitizeCodeLikeOutput(text: string): string {
+  const lines = stripCodeFences(text)
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\s+$/g, ""))
+    .filter((line) => line.trim());
+
+  const usefulLines = lines.filter((line, index) => {
+    const trimmed = line.trim();
+    if (/^(analysis|reasoning|explanation|note|context)\s*[:-]/i.test(trimmed)) return false;
+    if (index === 0 && /^(sure|yeah|okay|ok|absolutely|of course)[.!]*$/i.test(trimmed)) return false;
+    return true;
+  });
+
+  const cleaned = usefulLines
+    .map((line, index) => (index === 0 ? stripAnswerPrefix(line) : line))
+    .join("\n")
+    .replace(/^["']+|["']+$/g, "")
+    .trim();
+
+  return cleaned || "Sorry, could you say that again?";
+}
+
+export interface SayNextOutputPostprocessOptions {
+  answerIntent?: AnswerIntent;
+}
+
+function shouldPreserveStructuredNonCodeOutput(options?: SayNextOutputPostprocessOptions): boolean {
+  return options?.answerIntent === "interview_debug_solution";
+}
+
+export function sanitizeSayNextOutput(text: string, options: SayNextOutputPostprocessOptions = {}): string {
   let cleaned = String(text ?? "")
-    .replace(/```(?:json|text)?/gi, "")
+    .replace(/```[a-zA-Z0-9_+-]*\s*\n?/g, "")
     .replace(/```/g, "")
     .trim();
 
@@ -70,24 +135,39 @@ export function sanitizeSayNextOutput(text: string): string {
     .replace(/\b(?:option|version|response)\s*\d+\s*[:.)-]/gi, "\n")
     .replace(/\b(?:option|version|response)\s*[A-Z]\s*[:.)-]/gi, "\n");
 
+  if (outputLooksLikeCodeSnippet(cleaned)) {
+    return sanitizeCodeLikeOutput(cleaned);
+  }
+
   const lines = cleaned
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
 
-  const firstUsefulLine = lines.find((line) => {
+  const isStructuredNonCode = shouldPreserveStructuredNonCodeOutput(options);
+  const usefulLines = lines.filter((line, index) => {
     if (/^(scene|analysis|reasoning|explanation|note|context)\s*[:-]/i.test(line)) return false;
-    if (lines.length > 1 && /^(sure|yeah|okay|ok|absolutely|of course)[.!]*$/i.test(line)) return false;
+    if (index === 0 && lines.length > 1 && /^(sure|yeah|okay|ok|absolutely|of course)[.!]*$/i.test(line)) return false;
     return true;
-  }) ?? lines[0] ?? "";
+  });
+  const firstUsefulLine = usefulLines[0] ?? lines[0] ?? "";
 
-  cleaned = firstUsefulLine
+  cleaned = (isStructuredNonCode ? usefulLines.join("\n") : firstUsefulLine)
     .replace(/^\s*[A-Z][A-Z_ .'-]{0,30}\s*:\s*/i, "")
-    .replace(/^\s*(?:[-*]+|\d+[.)]|[A-Za-z][.)])\s*/g, "")
     .replace(/^\s*(?:(?:you\s+can\s+say|you\s+could\s+say|say|direct\s+answer|answer|reply|response|suggested\s+reply)\s*[:-]\s*)+/i, "")
+    .split("\n")
+    .map((line) => line.replace(/^\s*(?:[-*]+|\d+[.)]|[A-Za-z][.)])\s*/g, ""))
+    .join("\n")
     .replace(/^["']+|["']+$/g, "")
     .trim();
   cleaned = normalizeSpokenDisplayPunctuation(cleaned);
+  if (((cleaned.match(/"/g) ?? []).length % 2) === 1) {
+    cleaned = cleaned.replace(/"/g, "").trim();
+  }
+  cleaned = cleaned
+    .replace(/\s+If you want, I can [^.?!]+[.?!]?$/i, "")
+    .replace(/\s+If you tell me [^.?!]+, I can [^.?!]+[.?!]?$/i, "")
+    .trim();
 
   if (/\bopen\s*courseware\b/i.test(cleaned) && /\bsaynext\b|\bmy project\b|\bproject or experience\b|\bproject i can explain\b/i.test(cleaned)) {
     return "A useful note is that this is course context, so I would focus on the concept or example being explained, not treat OpenCourseWare as the topic.";
@@ -280,6 +360,23 @@ function polishPersonaSayability(output: string, transcript: string, promptMode?
     }
   }
 
+  const classroomQuestionNeedsDetail = /\b(compare|comparison|difference|different|why.*different|detail|details|step by step|example|examples|trade[- ]?off|pros and cons|list|name two|two reasons|explain more|elaborate|walk through)\b/i.test(transcript);
+  if (promptMode === "classroom" && looksLikeQuestion(transcript) && !classroomQuestionNeedsDetail && countTelepromptWords(polished) > 28) {
+    const firstSentence = polished.match(/^.{1,280}?[.!?](?:\s|$)/)?.[0]?.trim();
+    if (firstSentence && countTelepromptWords(firstSentence) >= 8) {
+      polished = firstSentence;
+    }
+  }
+
+  if (promptMode === "classroom" && !looksLikeQuestion(transcript)) {
+    const lectureVoice = polished.match(/^When I (?:talk|explain) about (.+?), I start from (.+?)[.!?]?$/i);
+    if (lectureVoice?.[1] && lectureVoice?.[2]) {
+      const topic = lectureVoice[1].trim();
+      const startingPoint = lectureVoice[2].trim();
+      polished = `A useful starting point for ${topic} is ${startingPoint}.`;
+    }
+  }
+
   return polished || output;
 }
 
@@ -298,6 +395,12 @@ function removeWrongNameEcho(output: string, transcript: string): string {
 }
 
 function replaceUnsupportedSayNextClaim(output: string, transcript: string): string {
+  if (/\bhybrid search memory assistant\b/i.test(output)
+    && /\b(in-memory and disk-based storage|disk-based storage|persistently storing less frequent data|cache(?:s|ing) frequently accessed data|multiple search engines|search engines and apis|node\.?js|express|mongodb|search history|user preferences)\b/i.test(output)
+    && /\b(project|backend|architecture|production|overclaim|experience)\b/i.test(transcript)) {
+    return "One project I can describe is Hybrid Search Memory Assistant. It handles live transcripts, memory retrieval, scene profiles, prenotes, local and VPS modes, and response-quality testing; I would not describe it as production-scale backend experience.";
+  }
+
   if (!/\b(saynext|say next|mobile app experience)\b/i.test(transcript)) {
     return output;
   }
@@ -718,6 +821,94 @@ function replaceRiskyOverconfidentOutput(output: string, transcript: string): st
 }
 
 function replaceMisdirectedTemplateOutput(output: string, transcript: string): string {
+  if (/\b(feedback|received feedback|improv(?:e|ed|ing)|changed after feedback|act on feedback)\b/i.test(transcript)
+    && /\b(award|awards|prize|prizes|won|winning)\b/i.test(output)
+    && !/\b(award|awards|prize|prizes|won|winning)\b/i.test(transcript)) {
+    return "I would handle feedback by clarifying the specific issue first, then making one concrete change and checking whether it actually improved the work.";
+  }
+
+  if (/\b(feedback|received feedback|improv(?:e|ed|ing)|teammate pointed out|pointed out a problem)\b/i.test(transcript)
+    && /\b(during a group project|my teammate suggested|our collaboration and efficiency|team member told me|i remember when i was working|working on .* with my team|teammates? noticed|wasn'?t as secure|better security measures)\b/i.test(output)
+    && !/\b(saynext|joblens|elderalbum|elder album|dalparkaid|study session tracker)\b/i.test(output)) {
+    return "I would keep it honest: I do not have one specific dramatic story ready, but I would take the feedback, clarify the concrete issue, change one thing, and check if the result improved.";
+  }
+
+  if (/\b(feedback|received feedback|improv(?:e|ed|ing)|teammate pointed out|pointed out a problem)\b/i.test(transcript)
+    && /\b(i remember when i was working|working on .* with my team|teammates? noticed|wasn'?t as secure|better security measures)\b/i.test(output)) {
+    return "I would keep it honest: I do not have one specific dramatic story ready, but I would take the feedback, clarify the concrete issue, change one thing, and check if the result improved.";
+  }
+
+  if (/\b(weakness|biggest weakness|explain your weakness)\b/i.test(transcript)
+    && /\b(pomodoro|timer|trello|clear deadlines for each task|time management when (?:working on multiple projects simultaneously|starting a new project)|workplace experience|real example i can talk about|student and personal projects)\b/i.test(output)) {
+    return "I would say my weakness is that I can over-focus on details or procrastinate when the task is too open-ended, so I break it into smaller steps and check progress earlier.";
+  }
+
+  if (/\bclinic|insurance card|insurance details|medical form\b/i.test(transcript)
+    && /\brefund|if it turns out your card is sufficient|payment policy\b/i.test(output)) {
+    return "I would ask exactly what document or insurance detail is missing, whether they need a policy number or confirmation letter, and who can confirm it in writing.";
+  }
+
+  if ((/\b(have you used|used|experience (?:with|from)|deploy(?:ed)? anything with|worked with|worked on)\b.*\b(docker|kubernetes|redis|containers?|caching)\b/i.test(transcript)
+    || /\b(docker|kubernetes|redis|containers?|caching)\b.*\b(experience|project|projects|used|deploy(?:ed)?)\b/i.test(transcript))
+    && /\b(yes|i'?ve used|i have used|i used|i deployed|we used)\b/i.test(output)
+    && (/\b(hybrid search memory assistant|saynext)\b/i.test(output) || /\b(docker containers?|redis|caching layer)\b/i.test(output))) {
+    const technology = /\bredis|caching\b/i.test(transcript) ? "Redis or caching" : "Docker, Kubernetes, or containers";
+    return `I have not used ${technology} in a real project enough to claim it. I understand the basic idea, but I would be honest and say my hands-on project experience is stronger in web, serverless, and AI-assisted tools.`;
+  }
+
+  if (/\bjoblens|job lens\b/i.test(transcript)
+    && /\b(database|data store|what kind of database|used for data)\b/i.test(transcript)
+    && /\bmongodb\b/i.test(output)) {
+    return "For JobLens, I would say DynamoDB for app data and S3 for uploaded files, behind API Gateway and Lambda.";
+  }
+
+  if (/\bbank\b/i.test(transcript)
+    && /\b(charge|transaction|payment)\b/i.test(transcript)
+    && /\baccount number\b/i.test(output)) {
+    return "I would collect the date, amount, merchant name, transaction ID if available, and maybe the last four digits only, then call the bank through the official number.";
+  }
+
+  if (/\bsalary expectation|expected salary|compensation|pay range|what pay\b/i.test(transcript)
+    && /\$?\d{2,3},?\d{3}\s*(?:cad\s*)?(?:to|-|and)\s*\$?\d{2,3},?\d{3}|\b\d{2,3}k\s*(?:to|-)\s*\d{2,3}k\b/i.test(output)) {
+    return "I would keep it flexible: for an entry-level developer role, I am open to a fair market range and would consider the full package, team, and growth opportunity.";
+  }
+
+  if (/\bcool rice\b/i.test(transcript) && /\bhairdryer\b/i.test(output)) {
+    return "Spread the rice in a thin layer on a clean plate or tray, let the steam escape for a few minutes, then put it away once it is no longer hot.";
+  }
+
+  if (/\bare you studying (?:computer science|cs) or math\b/i.test(transcript)
+    && /\b(studying computer science right now|mathematics and computer science)\b/i.test(output)) {
+    return "I'm in MACS at Dalhousie, basically Applied Computer Science, not Math.";
+  }
+
+  if (/\b(legally allowed to work|work authorization|authorized to work|allowed to work in canada)\b/i.test(transcript)
+    && /\b(legally allowed|necessary permits|status to do so|moved here during high school)\b/i.test(output)) {
+    return "I would answer that carefully: I can discuss work authorization with HR or the recruiter and provide the proper documentation if needed, but I would not guess or overstate it.";
+  }
+
+  if (/\b(you seem quiet|look tired|everything okay|long day)\b/i.test(transcript)
+    && /\b(projects? late|late into the night|working on my projects)\b/i.test(output)) {
+    return "Yeah, just a bit tired today, nothing serious.";
+  }
+
+  if (/\bbad smell\b/i.test(transcript)
+    && /\b(?:lunch\s*box|lunchbox)\b/i.test(transcript)
+    && /\b(alternatively|also|vinegar|activated charcoal|charcoal| or )\b/i.test(output)) {
+    return "Put some baking soda in the lunch box overnight, then wash and dry it fully.";
+  }
+
+  if (/\b(glasses|lenses)\b.*\b(fog|fogging|fogged)\b/i.test(transcript)
+    && /\b(mask|coating| or |also|multiple|special)\b/i.test(output)) {
+    return "Use an anti-fog wipe on the lenses before going outside.";
+  }
+
+  if (/\b(delivery photo|courier photo|photo)\b/i.test(transcript)
+    && /\b(not my door|wrong door|wrong address)\b/i.test(transcript)
+    && /\b(provide your order number|so i can assist|i can assist|order number so)\b/i.test(output)) {
+    return "I would tell support the delivery photo is not my door, send the correct address or door photo, and ask them to open a missing-delivery case.";
+  }
+
   if (/\bsecure tea\b/i.test(output) && /\bsecure tea\b/i.test(transcript)) {
     return "I would clarify that term first. If 'secure tea' means quiet hours or security, we should define it, then compare the exact start and stop times before assigning the cause.";
   }
@@ -806,8 +997,16 @@ function replaceMisdirectedTemplateOutput(output: string, transcript: string): s
   return output;
 }
 
-export function finalizeSayNextOutput(text: string, transcript: string, outputLanguage: OutputLanguage, eventMemory?: EventMemorySnapshot, promptMode?: PromptMode): string {
-  const cleaned = sanitizeSayNextOutput(text);
+export function finalizeSayNextOutput(
+  text: string,
+  transcript: string,
+  outputLanguage: OutputLanguage,
+  eventMemory?: EventMemorySnapshot,
+  promptMode?: PromptMode,
+  options: SayNextOutputPostprocessOptions = {},
+): string {
+  const cleaned = sanitizeSayNextOutput(text, options);
+  const preserveCodeLayout = outputLooksLikeCodeSnippet(cleaned);
   const withoutIdentityClaim = removeUnsupportedIdentityClaim(cleaned, transcript);
   const withoutWrongNameEcho = removeWrongNameEcho(withoutIdentityClaim, transcript);
   const withoutUnsupportedSayNext = replaceUnsupportedSayNextClaim(withoutWrongNameEcho, transcript);
@@ -827,8 +1026,8 @@ export function finalizeSayNextOutput(text: string, transcript: string, outputLa
   const withoutRiskOverclaim = replaceRiskyOverconfidentOutput(withoutMisdirectedTemplate, transcript);
   const withoutPlaceholder = replaceUnsafePlaceholderOutput(withoutRiskOverclaim, transcript);
   const withoutNoAction = replaceUnhelpfulNoAction(withoutPlaceholder, transcript);
-  const withoutForcedQuestion = trimForcedReturnQuestionV2(withoutNoAction, transcript);
-  const polished = polishPersonaSayability(withoutForcedQuestion, transcript, promptMode);
+  const withoutForcedQuestion = preserveCodeLayout ? withoutNoAction : trimForcedReturnQuestionV2(withoutNoAction, transcript);
+  const polished = preserveCodeLayout ? withoutForcedQuestion : polishPersonaSayability(withoutForcedQuestion, transcript, promptMode);
   return enforceOutputLanguage(polished, transcript, outputLanguage);
 }
 

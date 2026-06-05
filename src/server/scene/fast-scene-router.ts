@@ -48,6 +48,18 @@ function isGenericSpeakingPrompt(text: string): boolean {
   return /\b(describe|do you|did you|have you|what kind of|what type of|what is the difference|what do you usually|what do you learn from|who is|where do you|when was|how often|why do you|should you)\b/.test(normalized);
 }
 
+function isCodingInterviewSignal(text: string): boolean {
+  return has(text, /\b(coderpad|coding interview|technical interview|object oriented|object oriented design|ood|ood question|algorithms? question|coding problem|share code|start coding|talk through your approach|before you start coding)\b/i)
+    || (
+      has(text, /\b(interview|interviewer|candidate)\b/i)
+      && has(text, /\b(code|coding|algorithm|object oriented|ood|design|components?|classes?|implementation|data structures?)\b/i)
+    )
+    || (
+      has(text, /\b(i m curious|i am curious|i really want|what components?|how would you structure|core foundation|core classes|base classes)\b/i)
+      && has(text, /\b(object oriented|ood|components?|classes?|structure|foundation|implementation|reading app|online reading|book)\b/i)
+    );
+}
+
 function confidenceFromMargin(top: number, second: number): number {
   const margin = top - second;
   if (top >= 5 && margin >= 2.2) return 0.94;
@@ -134,6 +146,17 @@ export function routeFastScene(input: FastSceneRouteInput): FastSceneRouteResult
   }
   if (has(latest, /\b(code review feedback|harsh feedback|dramatic conflict|answer .*feedback|answer .*conflict)\b/i)) {
     add(scores, "interview", 2.4);
+  }
+  const codingInterviewSignal = isCodingInterviewSignal(`${recent} ${latest}`.trim());
+  if (codingInterviewSignal) {
+    add(scores, "interview", 3.8);
+    scores.classroom = Math.max(0, scores.classroom - 1.7);
+    scores.meeting_group = Math.max(0, scores.meeting_group - 1.2);
+  }
+  if (input.previousSceneKey === "interview" && has(latest, /\b(object oriented|ood|components?|classes?|core structure|core foundation|algorithm(?:s)? question|coding problem|implement|write (?:a )?function|data structures?)\b/i)) {
+    add(scores, "interview", 2.4);
+    scores.classroom = Math.max(0, scores.classroom - 1.0);
+    scores.meeting_group = Math.max(0, scores.meeting_group - 0.8);
   }
   if (isGenericSpeakingPrompt(latest)) {
     add(scores, "daily_chat", 1.7);

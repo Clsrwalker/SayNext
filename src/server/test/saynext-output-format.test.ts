@@ -54,6 +54,86 @@ test("keeps simple direct answer unchanged", () => {
     .toBe("I used Firebase Authentication and Firestore for that project.");
 });
 
+test("preserves multi-step interview debugging answers when that intent is selected", () => {
+  const output = [
+    "First, I would reproduce the deployed 500 with the exact route and request body.",
+    "Then I would check the server logs and stack trace for that request id.",
+    "After that, I would compare local and deployed environment variables, schema version, and query parameters.",
+  ].join("\n");
+
+  expect(finalizeSayNextOutput(
+    output,
+    "Walk me through how you would debug it and what you would check first.",
+    "english",
+    undefined,
+    "interview",
+    { answerIntent: "interview_debug_solution" },
+  )).toContain("schema version");
+
+  expect(finalizeSayNextOutput(
+    output,
+    "Walk me through how you would debug it and what you would check first.",
+    "english",
+    undefined,
+    "interview",
+  )).toBe("First, I would reproduce the deployed 500 with the exact route and request body.");
+});
+
+test("trims classroom direct-question mini textbook answers to the first useful sentence", () => {
+  expect(finalizeSayNextOutput(
+    "Batch normalization helps training because it stabilizes the activation distribution and makes optimization less sensitive to initialization. It also lets gradients stay better scaled, supports higher learning rates, and can add a small regularization effect.",
+    "Why does batch normalization help training?",
+    "english",
+    undefined,
+    "classroom",
+  )).toBe("Batch normalization helps training because it stabilizes the activation distribution and makes optimization less sensitive to initialization.");
+
+  expect(finalizeSayNextOutput(
+    "Residual connections help deep networks because they give gradients a shorter path backward, so early layers are easier to train and the vanishing-gradient problem gets smaller. Mechanism-wise, they let each block learn a smaller adjustment instead of rebuilding the whole representation.",
+    "Why do residual connections help deep networks?",
+    "english",
+    undefined,
+    "classroom",
+  )).toBe("Residual connections help deep networks because they give gradients a shorter path backward, so early layers are easier to train and the vanishing-gradient problem gets smaller.");
+});
+
+test("does not trim classroom comparison questions that need multiple sentences", () => {
+  const output = "Batch normalization normalizes across a minibatch, so its statistics depend on other examples in the batch. Layer normalization normalizes across features within one example, so it is more stable for sequence models and transformers.";
+  expect(finalizeSayNextOutput(
+    output,
+    "What is the difference between batch normalization and layer normalization?",
+    "english",
+    undefined,
+    "classroom",
+  )).toBe(output);
+
+  expect(finalizeSayNextOutput(
+    output,
+    "Compare batch normalization and layer normalization.",
+    "english",
+    undefined,
+    "classroom",
+  )).toBe(output);
+});
+
+test("classroom lecture notes avoid first-person teacher voice", () => {
+  expect(finalizeSayNextOutput(
+    "When I talk about attention scores in Transformers, I start from queries, keys, and values.",
+    "The professor is explaining attention scores in transformers.",
+    "english",
+    undefined,
+    "classroom",
+  )).toBe("A useful starting point for attention scores in Transformers is queries, keys, and values.");
+
+  expect(finalizeSayNextOutput(
+    "When I talk about attention scores in Transformers, I start from queries, keys, and values.",
+    "Can you explain attention scores?",
+    "english",
+    undefined,
+    "technical",
+  )).toBe("When I talk about attention scores in Transformers, I start from queries, keys, and values.");
+});
+
 test("replaces bare acknowledgement with clarification", () => {
   expect(sanitizeSayNextOutput("Sure!"))
     .toBe("Sure, could you repeat the full question?");
@@ -62,6 +142,41 @@ test("replaces bare acknowledgement with clarification", () => {
 test("skips bare opener before useful answer", () => {
   expect(sanitizeSayNextOutput("Sure!\nDalParkAid was a React Native parking app for Dalhousie that used weather and timetable context."))
     .toBe("DalParkAid was a React Native parking app for Dalhousie that used weather and timetable context.");
+});
+
+test("keeps coding interview snippets instead of truncating to the first sentence", () => {
+  const output = finalizeSayNextOutput(
+    [
+      "I would start with Book and Library like this:",
+      "class Book:",
+      "    def __init__(self, book_id, title, pages):",
+      "        self.id = book_id",
+      "        self.title = title",
+      "        self.pages = pages",
+      "",
+      "class Library:",
+      "    def __init__(self):",
+      "        self.books = {}",
+      "        self.active_book_id = None",
+      "",
+      "    def add_book(self, book):",
+      "        self.books[book.id] = book",
+      "",
+      "    def set_active_book(self, book_id):",
+      "        if book_id not in self.books:",
+      "            raise ValueError('missing book')",
+      "        self.active_book_id = book_id",
+    ].join("\n"),
+    "I would love to see some Python pseudocode to flesh out one of these classes.",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output).toContain("class Book:");
+  expect(output).toContain("class Library:");
+  expect(output).toContain("    def add_book");
+  expect(output).not.toBe("I would start with Book and Library like this.");
 });
 
 test("resolves separate live and long OpenAI models", () => {
@@ -293,6 +408,377 @@ test("normalizes optional plural technical text without comma artifacts", () => 
     .toBe("A composite index works when queries use the leftmost columns.");
 });
 
+test("normalizes classroom formula punctuation into readable spoken text", () => {
+  expect(sanitizeSayNextOutput("Precision = TP / (TP + FP). F1 = 2 * precision * recall / (precision + recall)."))
+    .toBe("Precision = TP divided by TP + FP. F1 = 2 times precision times recall divided by precision + recall.");
+  expect(sanitizeSayNextOutput("Redis lookups are usually O(1)."))
+    .toBe("Redis lookups are usually O one.");
+});
+
+test("removes dangling unmatched quotes", () => {
+  expect(sanitizeSayNextOutput('It is more like nostalgia than "I want to go back immediately.'))
+    .toBe("It is more like nostalgia than I want to go back immediately.");
+});
+
+test("keeps feedback interview answers away from award templates", () => {
+  const output = finalizeSayNextOutput(
+    "I have not won any big prize that I would confidently talk about. I would keep it honest and say I am more proud of finishing real projects than receiving awards.",
+    "Tell me about a time you received feedback and improved something.",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output.toLowerCase()).toContain("feedback");
+  expect(output.toLowerCase()).toContain("improved");
+  expect(output.toLowerCase()).not.toMatch(/\baward|prize|won\b/);
+});
+
+test("keeps behavioral interview answers from inventing generic group-project stories", () => {
+  const output = finalizeSayNextOutput(
+    "During a group project, my teammate suggested I could be more proactive in sharing my ideas early on instead of waiting until meetings. This feedback helped me realize the importance of communicating my thoughts sooner, which improved our collaboration and efficiency.",
+    "Tell me about a time you had to improve after a teammate pointed out a problem.",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output.toLowerCase()).toContain("feedback");
+  expect(output.toLowerCase()).toContain("improved");
+  expect(output.toLowerCase()).not.toContain("during a group project");
+  expect(output.toLowerCase()).not.toContain("my teammate suggested");
+
+  const projectStory = finalizeSayNextOutput(
+    "I remember when I was working on the Hybrid Search Memory Assistant project with my team at Dalhousie. One of my teammates noticed that my initial approach to handling user data wasn't as secure as it could be, which could have posed a risk. After discussing this with them, I revised my code to implement better security measures and followed best practices for data protection.",
+    "Tell me about a time you had to improve after a teammate pointed out a problem.",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(projectStory.toLowerCase()).toContain("feedback");
+  expect(projectStory.toLowerCase()).not.toContain("dalhousie");
+  expect(projectStory.toLowerCase()).not.toContain("better security measures");
+});
+
+test("keeps weakness interview answers away from invented productivity tools", () => {
+  const output = finalizeSayNextOutput(
+    "In an interview, I would say something like, I sometimes struggle with time management when working on multiple projects simultaneously. To address this, I've been using tools and techniques like Pomodoro timers and prioritizing tasks to stay organized and meet deadlines effectively.",
+    "How would you explain your weakness in an interview?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output.toLowerCase()).toContain("weakness");
+  expect(output.toLowerCase()).not.toContain("pomodoro");
+  expect(output.toLowerCase()).not.toContain("multiple projects simultaneously");
+
+  const trelloOutput = finalizeSayNextOutput(
+    "In an interview, I would say something like, I sometimes struggle with time management when starting a new project because there are so many things to consider and prioritize. To address this, I've been using tools like Trello and setting clear deadlines for each task to stay organized and on track.",
+    "How would you explain your weakness in an interview?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(trelloOutput.toLowerCase()).toContain("weakness");
+  expect(trelloOutput.toLowerCase()).not.toContain("trello");
+  expect(trelloOutput.toLowerCase()).not.toContain("deadlines");
+
+  const workExperienceOutput = finalizeSayNextOutput(
+    "I do not want to frame this as workplace experience. A real example I can talk about is from student and personal projects like Hybrid Search Memory Assistant, where I handled practical engineering problems, tested edge cases, and improved the design based on what actually broke.",
+    "How would you explain your weakness in an interview?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(workExperienceOutput.toLowerCase()).toContain("weakness");
+  expect(workExperienceOutput.toLowerCase()).not.toContain("workplace experience");
+  expect(workExperienceOutput.toLowerCase()).not.toContain("hybrid search memory assistant");
+});
+
+test("keeps clinic insurance service answer on missing document details", () => {
+  const output = finalizeSayNextOutput(
+    "Ask them what additional information they need from you to process your insurance claim. You might also want to confirm their policy on payment and whether there's a possibility of getting a refund if it turns out your card is sufficient after all.",
+    "The clinic says my insurance card is not enough. What should I ask them for?",
+    "english",
+    undefined,
+    "service",
+  );
+
+  expect(output.toLowerCase()).toContain("insurance");
+  expect(output.toLowerCase()).toContain("missing");
+  expect(output.toLowerCase()).not.toContain("refund");
+});
+
+test("keeps Hybrid Search Memory Assistant backend answer within supported facts", () => {
+  const output = finalizeSayNextOutput(
+    "I worked on a project called Hybrid Search Memory Assistant, which integrates both in-memory and disk-based storage for efficient data retrieval. The backend handles caching frequently accessed data in memory while persistently storing less frequent data on disk to optimize performance and cost.",
+    "Can you describe one backend project without overclaiming production experience?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output).toContain("Hybrid Search Memory Assistant");
+  expect(output).toContain("live transcripts");
+  expect(output.toLowerCase()).not.toContain("disk-based storage");
+  expect(output.toLowerCase()).not.toMatch(/\bproduction backend\b|\bproduction-scale system\b/);
+
+  const inventedStackOutput = finalizeSayNextOutput(
+    "I worked on a project called Hybrid Search Memory Assistant, which involved developing a backend system that integrated multiple search engines and APIs to provide users with comprehensive search results. The backend was built using Node.js and Express for handling requests and responses efficiently. We used MongoDB as the primary database to store user preferences and search history data.",
+    "Can you describe one backend project without overclaiming production experience?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(inventedStackOutput).toContain("Hybrid Search Memory Assistant");
+  expect(inventedStackOutput).toContain("memory retrieval");
+  expect(inventedStackOutput.toLowerCase()).not.toContain("mongodb");
+  expect(inventedStackOutput.toLowerCase()).not.toContain("node.js");
+  expect(inventedStackOutput.toLowerCase()).not.toContain("search history");
+});
+
+test("does not fake Docker or Kubernetes real-project experience", () => {
+  const output = finalizeSayNextOutput(
+    "Yes, I've used Docker in my Hybrid Search Memory Assistant and Hybrid Search Memory Assistant project. It helped manage dependencies and environment consistency across different development stages.",
+    "Have you used Docker in a real project?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output.toLowerCase()).toContain("not used docker");
+  expect(output.toLowerCase()).toContain("real project");
+  expect(output.toLowerCase()).not.toContain("yes");
+  expect(output.toLowerCase()).not.toContain("environment consistency");
+
+  const containerOutput = finalizeSayNextOutput(
+    "Yes, I deployed a project using Docker containers. It helped manage dependencies and ensured consistency across different environments.",
+    "Did you deploy anything with containers?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(containerOutput.toLowerCase()).toContain("not used docker");
+  expect(containerOutput.toLowerCase()).toContain("real project");
+  expect(containerOutput.toLowerCase()).not.toContain("yes");
+
+  const redisOutput = finalizeSayNextOutput(
+    "Yes, I have used Redis in the Hybrid Search Memory Assistant and Hybrid Search Memory Assistant project. It was used as a caching layer to improve query response times and manage session data efficiently.",
+    "Have you ever used Redis in a project?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(redisOutput.toLowerCase()).toContain("not used redis");
+  expect(redisOutput.toLowerCase()).toContain("real project");
+  expect(redisOutput.toLowerCase()).not.toContain("caching layer");
+  expect(redisOutput.toLowerCase()).not.toContain("yes");
+
+  const cachingOutput = finalizeSayNextOutput(
+    "In my previous project, Hybrid Search Memory Assistant and Hybrid Search Memory Assistant, we used Redis as a caching layer to improve query response times and reduce database load.",
+    "Any Redis or caching experience from your projects?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(cachingOutput.toLowerCase()).toContain("not used redis or caching");
+  expect(cachingOutput.toLowerCase()).not.toContain("database load");
+
+  const elderAlbumRedisOutput = finalizeSayNextOutput(
+    "In my project Elder Album, I used Redis for caching user session data and frequently accessed media thumbnails to improve performance and reduce database load.",
+    "Any Redis or caching experience from your projects?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(elderAlbumRedisOutput.toLowerCase()).toContain("not used redis or caching");
+  expect(elderAlbumRedisOutput.toLowerCase()).not.toContain("elder album");
+  expect(elderAlbumRedisOutput.toLowerCase()).not.toContain("media thumbnails");
+});
+
+test("keeps bank charge service answer from asking for full account number", () => {
+  const output = finalizeSayNextOutput(
+    "Before you call, make sure to gather your account number, the date of the transaction, and any details about the charge that seem incorrect. Also note down why you think it's wrong and keep a copy of your statement handy.",
+    "The bank charge looks wrong, what information should I collect before calling?",
+    "english",
+    undefined,
+    "service",
+  );
+
+  expect(output.toLowerCase()).toContain("last four");
+  expect(output.toLowerCase()).toContain("official number");
+  expect(output.toLowerCase()).not.toContain("account number");
+});
+
+test("keeps salary expectation answer flexible without unsupported exact ranges", () => {
+  const output = finalizeSayNextOutput(
+    "For an entry-level developer position, I expect a competitive salary that reflects my skills and experience as a recent graduate with relevant project work. Something in the range of $50,000 to $60,000 CAD would be reasonable for Halifax, considering cost of living and industry standards.",
+    "What is your salary expectation for an entry-level developer role?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output.toLowerCase()).toContain("flexible");
+  expect(output.toLowerCase()).toContain("market range");
+  expect(output).not.toMatch(/\$?\d{2,3},?\d{3}/);
+
+  const payOutput = finalizeSayNextOutput(
+    "I'm open to a starting salary around $50,000 CAD to $60,000 CAD. I believe this range reflects my current experience and skills as a junior developer.",
+    "What pay range would you be comfortable with?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(payOutput.toLowerCase()).toContain("flexible");
+  expect(payOutput).not.toMatch(/\$?\d{2,3},?\d{3}/);
+});
+
+test("keeps ordinary rice cooling answer on the simple common method", () => {
+  const output = finalizeSayNextOutput(
+    "To cool rice quickly, spread it out in a thin layer on a large plate or pan and fan it with a piece of paper or use a hairdryer on cold setting. This helps evaporate moisture faster without making the rice weird.",
+    "How do I cool rice quickly without making it weird?",
+    "english",
+    undefined,
+    "casual",
+  );
+
+  expect(output.toLowerCase()).toContain("thin layer");
+  expect(output.toLowerCase()).not.toContain("hairdryer");
+});
+
+test("keeps ordinary lunchbox smell answer to one common method", () => {
+  const output = finalizeSayNextOutput(
+    "Sprinkle baking soda at the bottom of the lunch box and let it sit overnight. This helps absorb the odor. Alternatively, wipe the inside with vinegar and then rinse thoroughly before drying completely.",
+    "How do I get rid of a bad smell in a lunch box?",
+    "english",
+    undefined,
+    "casual",
+  );
+
+  expect(output.toLowerCase()).toContain("baking soda");
+  expect(output.toLowerCase()).not.toContain("alternatively");
+  expect(output.toLowerCase()).not.toContain("vinegar");
+});
+
+test("collapses realistic ordinary lunchbox smell variants to one method", () => {
+  const output = finalizeSayNextOutput(
+    "Use baking soda or activated charcoal packets to absorb the odor. You can also rinse the lunch box with vinegar water and let it dry completely.",
+    "How do I get rid of a bad smell in a lunch box?",
+    "english",
+    undefined,
+    "casual",
+  );
+
+  expect(output).toBe("Put some baking soda in the lunch box overnight, then wash and dry it fully.");
+  expect(output.toLowerCase()).not.toContain("charcoal");
+  expect(output.toLowerCase()).not.toContain("vinegar");
+  expect(output.toLowerCase()).not.toContain("also");
+});
+
+test("keeps ordinary glasses fogging answer to one common method", () => {
+  const output = finalizeSayNextOutput(
+    "You can try wearing a mask or a special anti-fog coating on your lenses to prevent them from fogging up.",
+    "My glasses keep fogging up when I walk outside, what should I do?",
+    "english",
+    undefined,
+    "casual",
+  );
+
+  expect(output).toBe("Use an anti-fog wipe on the lenses before going outside.");
+  expect(output.toLowerCase()).not.toContain("mask");
+  expect(output.toLowerCase()).not.toMatch(/\bor\b/);
+});
+
+test("keeps delivery photo support wording as Xiang's line instead of support roleplay", () => {
+  const output = finalizeSayNextOutput(
+    "I would tell them that the package was delivered to a wrong address and ask how to get it redirected or rescheduled for delivery to my correct location. Can you please provide your order number so I can assist further?",
+    "The delivery photo is not my door, what should I tell support?",
+    "english",
+    undefined,
+    "service",
+  );
+
+  expect(output).toContain("delivery photo is not my door");
+  expect(output).toContain("missing-delivery case");
+  expect(output.toLowerCase()).not.toContain("provide your order number");
+  expect(output.toLowerCase()).not.toContain("assist further");
+});
+
+test("keeps JobLens database answer on supported AWS data stores", () => {
+  const output = finalizeSayNextOutput(
+    "In JobLens, I used MongoDB as the database because it is a NoSQL database that can handle unstructured job data efficiently and scale easily.",
+    "What kind of database did you use in JobLens?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output).toContain("DynamoDB");
+  expect(output).toContain("S3");
+  expect(output.toLowerCase()).not.toContain("mongodb");
+});
+
+test("keeps sensitive identity and casual status answers from inventing unsupported details", () => {
+  const currentProgram = finalizeSayNextOutput(
+    "I'm studying computer science right now at Dalhousie University in Halifax, Canada. I have a previous degree in Computer Science from Acadia University as well.",
+    "Are you studying computer science or math right now?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(currentProgram).toContain("MACS");
+  expect(currentProgram).toContain("not Math");
+  expect(currentProgram.toLowerCase()).not.toContain("computer science right now");
+
+  const wrongAcronym = finalizeSayNextOutput(
+    "I am studying MACS, which is Mathematics and Computer Science, at Dalhousie University in Halifax. Before this, I had a degree in Computer Science from Acadia University.",
+    "Are you studying computer science or math right now?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(wrongAcronym).toContain("Applied Computer Science");
+  expect(wrongAcronym).toContain("not Math");
+  expect(wrongAcronym).not.toContain("Mathematics and Computer Science");
+
+  const workAuth = finalizeSayNextOutput(
+    "I am legally allowed to work in Canada as I have the necessary permits and status to do so since I moved here during high school and completed my education.",
+    "Are you legally allowed to work in Canada?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(workAuth.toLowerCase()).toContain("work authorization");
+  expect(workAuth.toLowerCase()).toContain("documentation");
+  expect(workAuth.toLowerCase()).not.toContain("necessary permits");
+
+  const quietToday = finalizeSayNextOutput(
+    "I'm just a bit tired from working on my projects late into the night.",
+    "You seem quiet today, everything okay?",
+    "english",
+    undefined,
+    "casual",
+  );
+
+  expect(quietToday.toLowerCase()).toContain("tired");
+  expect(quietToday.toLowerCase()).not.toContain("projects");
+  expect(quietToday.toLowerCase()).not.toContain("late into the night");
+});
+
 test("removes unnecessary cooking follow-up question", () => {
   expect(finalizeSayNextOutput(
     "Sure thing! I'll wash the veggies and prep the chicken while you cook. Any specific way you want the chicken cut?",
@@ -347,6 +833,25 @@ test("removes sports filler question tail", () => {
     "english",
   ))
     .toBe("Yeah, he's definitely tall and built. Must be from all that training.");
+});
+
+test("removes generic if-you-want offer tail", () => {
+  expect(finalizeSayNextOutput(
+    "One example I can explain is JobLens. The client hits API Gateway, Lambda processes the request, and DynamoDB stores the data. If you want, I can also walk through one specific endpoint end-to-end.",
+    "Can you explain your school project architecture?",
+    "english",
+    undefined,
+    "interview",
+  ))
+    .toBe("One example I can explain is JobLens. The client hits API Gateway, Lambda processes the request, and DynamoDB stores the data.");
+  expect(finalizeSayNextOutput(
+    "Check whether this is Express/FastAPI/Spring behind a proxy. If you tell me what stack you're using, I can tell you exactly what config to change.",
+    "My API works in localhost but CORS blocks it in the browser after deploy.",
+    "english",
+    undefined,
+    "technical",
+  ))
+    .toBe("Check whether this is Express, FastAPI, or Spring behind a proxy.");
 });
 
 test("routes JavaScript ASR wording without financial template", () => {

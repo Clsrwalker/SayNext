@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { AppSession } from "@mentra/sdk";
 import { LocationManager } from "../manager/LocationManager";
-import { MergeResponseHandler, paginateManualAnswer } from "../mastra/agents/response-handler";
+import { MergeResponseHandler, buildManualTranscriptContextSinceCursorForTest, compactManualPromptSegmentsForTest, findManualSegmentsAfterSourceRangeForTest, paginateManualAnswer, promptModeOverrideForSceneBuiltinKey } from "../mastra/agents/response-handler";
 import { User } from "../session/User";
 
 type DisplayCall = {
@@ -141,6 +141,15 @@ function makeSplitManualHandler() {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+test("selected scene profile maps to prompt mode override while auto stays dynamic", () => {
+  expect(promptModeOverrideForSceneBuiltinKey("interview")).toBe("interview");
+  expect(promptModeOverrideForSceneBuiltinKey("classroom")).toBe("classroom");
+  expect(promptModeOverrideForSceneBuiltinKey("daily_chat")).toBe("casual");
+  expect(promptModeOverrideForSceneBuiltinKey("meeting_group")).toBe("general");
+  expect(promptModeOverrideForSceneBuiltinKey("auto")).toBeNull();
+  expect(promptModeOverrideForSceneBuiltinKey(null)).toBeNull();
+});
 
 test("g2 manual mode commits transcript and shows heard status without automatic answer generation", async () => {
   const { session, handler } = makeManualHandler();
@@ -432,6 +441,123 @@ test("manual answer pagination does not drop continuous CJK text", () => {
     expect(page.split("\n").length).toBeLessThanOrEqual(3);
   }
   expect(reconstructed).toBe(input);
+});
+
+test("manual answer pagination preserves code line breaks and indentation", () => {
+  const input = [
+    "I would start with the Book class.",
+    "# Book owns ordered pages.",
+    "class Book:",
+    "    def __init__(self, book_id, title, pages):",
+    "        self.book_id = book_id",
+    "        self.title = title",
+    "        self.pages = pages",
+    "",
+    "# Library tracks books by id.",
+    "class Library:",
+    "    def __init__(self):",
+    "        self.books = {}",
+    "        self.active_book_id = None",
+  ].join("\n");
+
+  const pages = paginateManualAnswer(input);
+  const reconstructed = pages.join("\n").replace(/\n{2,}/g, "\n").trim();
+
+  expect(pages.length).toBeGreaterThan(1);
+  for (const page of pages) {
+    expect(page.split("\n").length).toBeLessThanOrEqual(3);
+  }
+  expect(reconstructed).toContain("# Book owns ordered pages.\nclass Book:");
+  expect(reconstructed).toContain("    def __init__(self, book_id, title, pages):");
+  expect(reconstructed).toContain("        self.active_book_id = None");
+  expect(reconstructed).not.toContain("class Book: def __init__");
+});
+
+test("manual prompt compaction removes repeated ASR revisions and filler before coding answer", () => {
+  const compacted = compactManualPromptSegmentsForTest([
+    { id: "seg_1", text: "You don't necessarily have to accomplish everything. Imagine that we're designing a book system", timestamp: 1, reason: "timeout", createdAt: 1, eventId: "event_interview" },
+    { id: "seg_2", text: "You don't necessarily have to accomplish everything. Imagine that we're designing a book system, so an online cloud reading application similar to Kindle for short stories.", timestamp: 2, reason: "timeout", createdAt: 2, eventId: "event_interview" },
+    { id: "seg_3", text: "Exactly.", timestamp: 3, reason: "isFinal", createdAt: 3, eventId: "event_interview" },
+    { id: "seg_4", text: "Awesome.", timestamp: 4, reason: "isFinal", createdAt: 4, eventId: "event_interview" },
+    { id: "seg_5", text: "I'm curious how you would structure the core classes and components for this object-oriented design question.", timestamp: 5, reason: "isFinal", createdAt: 5, eventId: "event_interview" },
+    { id: "seg_6", text: "Right, right. So let me", timestamp: 6, reason: "timeout", createdAt: 6, eventId: "event_interview" },
+  ]);
+
+  const text = compacted.map((segment) => segment.text).join("\n");
+  expect(compacted.map((segment) => segment.id)).toEqual(["seg_2", "seg_5"]);
+  expect(text).toContain("online cloud reading application");
+  expect(text).toContain("core classes and components");
+  expect(text).not.toContain("Exactly");
+  expect(text).not.toContain("Awesome");
+  expect(text).not.toContain("Right, right. So let me");
+  expect(text).not.toContain("book system\nYou don't necessarily");
+});
+
+test("manual transcript context carries all substantive speech since the last LLM request", () => {
+  const context = buildManualTranscriptContextSinceCursorForTest([
+    { id: "seg_1", text: "Previous answer already handled this part." },
+    { id: "seg_2", text: "Imagine we're designing a book system similar to Kindle for short stories." },
+    { id: "seg_3", text: "Users have a library of books, can set one active, and the app remembers the last page." },
+    { id: "seg_4", text: "So I really want to think about what components would be important for this object-oriented design." },
+    { id: "seg_5", text: "Right, right. So let me" },
+  ], "seg_1");
+
+  expect(context.toInclusive).toBe("seg_5");
+  expect(context.text).toContain("book system similar to Kindle");
+  expect(context.text).toContain("library of books");
+  expect(context.text).toContain("components would be important");
+  expect(context.text).not.toContain("Previous answer already handled");
+  expect(context.text).not.toContain("Right, right. So let me");
+});
+
+test("manual generation detects newer speech that arrived after source range was chosen", () => {
+  const newer = findManualSegmentsAfterSourceRangeForTest([
+    { id: "seg_1", createdAt: 1000 },
+    { id: "seg_2", createdAt: 1100 },
+    { id: "seg_3", createdAt: 1500 },
+  ], {
+    segmentIds: ["seg_1", "seg_2"],
+  }, 1200);
+
+  expect(newer.map((segment) => segment.id)).toEqual(["seg_3"]);
+});
+
+test("manual regenerate prefers new speech over the previous pinned answer", async () => {
+  const { handler } = makeManualHandler();
+  const captured: Array<{ kind: string; segmentIds: string[] }> = [];
+
+  (handler as any).transcriptSegments = [
+    { id: "seg_1", text: "How would you structure the core classes?", timestamp: 1, reason: "isFinal", createdAt: 1, eventId: "event_interview" },
+    { id: "seg_2", text: "I would love to see some Python pseudocode to flesh out one of these classes.", timestamp: 2, reason: "isFinal", createdAt: 2, eventId: "event_interview" },
+  ];
+  (handler as any).lastGeneratedCursor = "seg_1";
+  (handler as any).currentManualAnswer = {
+    answerGroupId: "manual_group_old",
+    answerId: "manual_answer_old",
+    requestId: "manual_req_old",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "old",
+    },
+    output: "Old pinned answer.",
+    pages: ["Old pinned answer."],
+    pageIndex: 0,
+    createdAt: 1,
+  };
+  (handler as any).runManualGeneration = async (kind: string, sourceRange: any) => {
+    captured.push({ kind, segmentIds: sourceRange.segmentIds });
+    return {
+      status: "ok",
+      sessionId: "manual-test-user",
+      state: handler.getManualState(),
+    };
+  };
+
+  await handler.regenerateManualAnswer("double-tap-after-new-speech");
+
+  expect(captured[0]).toEqual({ kind: "generate", segmentIds: ["seg_2"] });
 });
 
 test("g2 two short button presses are treated as double tap", async () => {

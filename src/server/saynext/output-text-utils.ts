@@ -7,7 +7,7 @@ export function countTelepromptWords(text: string): number {
 
 export function looksLikeQuestion(text: string): boolean {
   const normalized = text.trim().toLowerCase();
-  return /[?？]\s*$/.test(normalized) || /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|tell me|describe|explain)\b/.test(normalized);
+  return /[?\uFF1F]\s*$/.test(normalized) || /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|have|has|tell me|describe|explain|compare|contrast|differentiate)\b/.test(normalized);
 }
 
 export function isLikelySpeakerLabelTranscript(text: string): boolean {
@@ -61,6 +61,7 @@ export function normalizeSpokenDisplayPunctuation(text: string): string {
     .replace(/\\\s*/g, "")
     .replace(/\bA\^T\s*A\b/g, "A transpose A")
     .replace(/\bA\^T\b/g, "A transpose")
+    .replace(/\bO\s*\(\s*1\s*\)/g, "O one")
     .replace(/`([^`\n]{1,80})`/g, "$1")
     .replace(/"([^"\n]{1,80})"/g, "$1")
     .replace(/\b([A-Za-z]+)\(s\)(?=\W|$)/g, "$1s")
@@ -69,7 +70,11 @@ export function normalizeSpokenDisplayPunctuation(text: string): string {
     .replace(/\(\s*for example,?\s*([^()]{1,60})\s*\)/gi, ", for example $1,")
     .replace(/\(\s*([^()]{1,45})\s*\)/g, ", $1,")
     .replace(/\be\.g\.,?/gi, "for example")
+    .replace(/\b([A-Za-z][A-Za-z0-9+#.-]+)\/([A-Za-z][A-Za-z0-9+#.-]+)\/([A-Za-z][A-Za-z0-9+#.-]+)\b/g, "$1, $2, or $3")
     .replace(/\b([A-Za-z]+)\/([A-Za-z]+)\b/g, "$1 and $2")
+    .replace(/\s*\/\s*,\s*([^,.!?]{1,80}),/g, " divided by $1")
+    .replace(/\s*\/\s*/g, " divided by ")
+    .replace(/\s*\*\s*/g, " times ")
     .replace(/\s+,/g, ",")
     .replace(/,\s*,/g, ",")
     .replace(/,\s*([.!?])/g, "$1")

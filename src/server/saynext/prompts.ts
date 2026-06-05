@@ -1,12 +1,15 @@
 import type { PromptMode } from "./process-router";
 
 export const sayNextInstructions = `Output only the best exact text Xiang should say now.
-No labels, no analysis, no options, no Markdown.`;
+No labels, no analysis, no options.
+Do not use Markdown, except compact code or pseudocode is allowed when the interviewer explicitly asks for code.`;
 
 export const sayNextConversationStateInstructions = `You write the best live display answer that Xiang can say out loud immediately.
-Return only the answer. No labels, analysis, options, or Markdown.
+Return only the answer. No labels, analysis, or options.
+Do not use Markdown, except compact code or pseudocode is allowed when the interviewer explicitly asks for code.
 Do not follow a fixed word count. Use the length needed for the best useful spoken answer.
 For simple moments, be brief. For classroom, technical, project, or interview questions, use enough detail to be correct and useful.
+For explicit coding interview requests, include the actual code or pseudocode plus a short explanation, not only a verbal plan.
 Use the latest Transcript as the trigger; older conversation items are background only.
 If the latest transcript looks partial or unfinished, infer the likely intent from the available words and give the most useful answer or knowledge supplement. Ask for repetition only when it is genuinely too unclear.
 Write as Xiang speaking to the other person, usually in first person. Do not answer as an assistant.
@@ -19,6 +22,7 @@ export function buildSayNextLiveTaskPrompt(params: {
   promptMode: PromptMode | string;
   supportContext?: string;
   routeHints?: string;
+  answerIntentHint?: string;
 }): string {
   if (params.promptMode === "classroom") {
     return [
@@ -29,6 +33,9 @@ If there is a question, answer it directly.
 If there is no question, add one relevant knowledge point from the transcript.
 If the transcript is partial or unfinished, infer the likely concept/question from the visible words and answer usefully instead of waiting for a perfect sentence.
 For technical mechanisms, include the core mechanism plus useful depth such as a trade-off, example, edge case, or next concept.`,
+      params.answerIntentHint?.trim()
+        ? `Answer strategy:\n${params.answerIntentHint.trim()}`
+        : "",
       params.supportContext?.trim()
         ? `Prepared note, use only if directly relevant:\n${params.supportContext.trim()}`
         : "",
@@ -36,6 +43,9 @@ For technical mechanisms, include the core mechanism plus useful depth such as a
   }
 
   const contextSections = [
+    params.answerIntentHint?.trim()
+      ? `Answer strategy:\n${params.answerIntentHint.trim()}`
+      : "",
     params.formattedSceneProfile?.trim()
       ? `Scene guidance:\n${params.formattedSceneProfile.trim()}`
       : "",
@@ -51,6 +61,7 @@ For technical mechanisms, include the core mechanism plus useful depth such as a
     `Live speaking mode.
 No fixed word cap. Use the length needed for the best useful sayable answer.
 Simple replies can be brief. Technical, classroom, project, or interview replies can use multiple spoken sentences when depth is useful.
+For explicit coding interview requests, include the actual code or pseudocode plus a short explanation, not only a verbal plan. Code indentation and short comments are allowed.
 Write the exact reply Xiang can say now, usually in first person.
 Answer the latest question directly. If no answer is needed, give the smallest useful reply or knowledge supplement.
 If the transcript is partial or unfinished, infer the likely intent from the available words and produce the most useful sayable answer; ask for clarification only when the text is too unclear to help.
