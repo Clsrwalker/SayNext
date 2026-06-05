@@ -29,6 +29,7 @@ export interface ConversationSampleRecord {
   model: string | null;
   profileVersion: string | null;
   retrievedSampleIds: string[];
+  answerPlannerJson: string;
   natural: number | null;
   short: number | null;
   fitsXiang: number | null;
@@ -53,6 +54,7 @@ export interface CreateConversationSampleInput {
   model?: string | null;
   profileVersion?: string | null;
   retrievedSampleIds?: string[];
+  answerPlannerJson?: string | null;
 }
 
 export interface UpdateConversationSampleInput {
@@ -4043,6 +4045,7 @@ function mapRecord(row: any): ConversationSampleRecord {
     model: row.model,
     profileVersion: row.profile_version,
     retrievedSampleIds: JSON.parse(row.retrieved_sample_ids || "[]"),
+    answerPlannerJson: row.answer_planner_json || "",
     natural: row.rating_natural,
     short: row.rating_short,
     fitsXiang: row.rating_fits_xiang,
@@ -4730,6 +4733,7 @@ class ConversationLogger {
         model TEXT,
         profile_version TEXT,
         retrieved_sample_ids TEXT NOT NULL DEFAULT '[]',
+        answer_planner_json TEXT NOT NULL DEFAULT '',
         rating_natural INTEGER,
         rating_short INTEGER,
         rating_fits_xiang INTEGER,
@@ -4744,6 +4748,12 @@ class ConversationLogger {
     `);
 
     db.run("CREATE INDEX IF NOT EXISTS idx_conversation_samples_user_time ON conversation_samples(user_id, timestamp DESC)");
+
+    try {
+      db.run("ALTER TABLE conversation_samples ADD COLUMN answer_planner_json TEXT NOT NULL DEFAULT ''");
+    } catch {
+      // Existing database already has this migration.
+    }
 
     db.run(`
       CREATE TABLE IF NOT EXISTS conversation_events (
@@ -5023,9 +5033,9 @@ class ConversationLogger {
       .query(`
         INSERT INTO conversation_samples (
           user_id, session_id, timestamp, language, transcript, ai_reply,
-          action_type, reasoning, model, profile_version, retrieved_sample_ids
+          action_type, reasoning, model, profile_version, retrieved_sample_ids, answer_planner_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.userId,
@@ -5039,6 +5049,7 @@ class ConversationLogger {
         input.model ?? null,
         input.profileVersion ?? null,
         JSON.stringify(input.retrievedSampleIds ?? []),
+        input.answerPlannerJson ?? "",
       );
 
     return this.getSample(Number(result.lastInsertRowid));

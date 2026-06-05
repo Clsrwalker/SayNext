@@ -187,6 +187,20 @@ test("conversation input exposes tagged top memory context for GPT selection", (
   expect(input).toContain("Transcript: How would you explain your backend experience?");
 });
 
+test("conversation input prefers planner strategy over legacy intent when both are present", () => {
+  const input = buildOpenAiConversationInput("Could you write the class skeleton?", {
+    outputLanguage: "English",
+    promptMode: "interview",
+    answerIntent: "ordinary_practical",
+    answerStrategy: "planner; task=code_solution; shape=code_with_explanation; depth=deep; memory=yes; code=yes; risk=low",
+    taskHint: "Planner policy: include code.",
+  });
+
+  expect(input).toContain("Strategy: planner; task=code_solution; shape=code_with_explanation");
+  expect(input).toContain("Task: Planner policy: include code.");
+  expect(input).not.toContain("Intent: ordinary_practical");
+});
+
 test("extracts response text from Responses API output_text first", () => {
   expect(extractResponseText({ output_text: "  Sure, that makes sense. " })).toBe("Sure, that makes sense.");
 });

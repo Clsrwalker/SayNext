@@ -15,6 +15,7 @@ export function createAgentInputMetadata(params: {
   retrievedSampleIds?: string[];
   processTrace: ProcessTrace;
   openAiConversation?: Record<string, unknown>;
+  answerPlanner?: unknown;
 }): Record<string, unknown> {
   return {
     model: params.model || ACTIVE_MODEL_NAME,
@@ -22,6 +23,7 @@ export function createAgentInputMetadata(params: {
     retrievedSampleIds: params.retrievedSampleIds || [],
     processTrace: params.processTrace,
     ...(params.openAiConversation ? { openAiConversation: params.openAiConversation } : {}),
+    ...(params.answerPlanner ? { answerPlanner: params.answerPlanner } : {}),
   };
 }
 

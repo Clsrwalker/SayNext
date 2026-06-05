@@ -322,7 +322,7 @@ test("manual split display keeps answer pinned while top area shows live transcr
   }
 });
 
-test("g2 single tap delays manual generation through gesture arbitration", async () => {
+test("g2 single tap generates after a short double-tap window", async () => {
   const session = new MockUserSession();
   const user = new User("manual-gesture-user");
   const events: any[] = [];
@@ -339,24 +339,44 @@ test("g2 single tap delays manual generation through gesture arbitration", async
 
   await sleep(330);
 
+  expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "single_tap_disabled")).toBe(false);
   expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(true);
   user.cleanup();
 });
 
-test("g2 double tap cancels pending single tap generation", async () => {
+test("g2 double tap regenerates the current pinned answer", async () => {
   const session = new MockUserSession();
   const user = new User("manual-double-gesture-user");
   const events: any[] = [];
   user.addSSEClient((data) => events.push(JSON.parse(data)));
 
   await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
-  session.touchHandler?.({ gesture: "single_tap" });
+  (user as any).responseHandler.currentManualAnswer = {
+    answerGroupId: "manual_group_double",
+    answerId: "manual_answer_double",
+    requestId: "manual_req_double",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "digest",
+    },
+    sourceText: "Explain this answer again.",
+    output: "Old pinned answer.",
+    pages: ["Old pinned answer."],
+    pageIndex: 0,
+    createdAt: Date.now(),
+  };
+  (user as any).regenerateManualAnswer = async () => ({
+    status: "ok",
+    sessionId: "manual-double-gesture-user",
+    state: (user as any).responseHandler.getManualState(),
+  });
   session.touchHandler?.({ gesture: "double_tap" });
-  await sleep(330);
+  await sleep(20);
 
-  expect(events.some((event) => event.type === "manual_gesture_cancelled")).toBe(true);
-  expect(events.some((event) => event.reason === "manual_no_current_answer")).toBe(false);
-  expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(true);
+  expect(events.some((event) => event.reason === "manual_ok")).toBe(true);
+  expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(false);
   user.cleanup();
 });
 
@@ -413,6 +433,124 @@ test("g2 scroll gestures page the pinned manual answer on glasses", async () => 
 
   expect(events.some((event) => event.reason === "manual_page_ok")).toBe(true);
   user.cleanup();
+});
+
+test("g2 single tap right after paging can still generate", async () => {
+  const session = new MockUserSession();
+  const user = new User("manual-scroll-tap-guard-user");
+  const events: any[] = [];
+  user.addSSEClient((data) => events.push(JSON.parse(data)));
+
+  await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  (user as any).responseHandler.currentManualAnswer = {
+    answerGroupId: "manual_group_scroll_tap_guard",
+    answerId: "manual_answer_scroll_tap_guard",
+    requestId: "manual_req_scroll_tap_guard",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "digest",
+    },
+    output: "First page.\nSecond page.",
+    pages: ["First page.", "Second page."],
+    pageIndex: 0,
+    createdAt: Date.now(),
+  };
+
+  session.touchHandler?.({ gesture: "swipe_down" });
+  session.touchHandler?.({ gesture: "single_tap" });
+  await sleep(330);
+
+  expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "single_tap_disabled")).toBe(false);
+  expect(events.some((event) => event.reason === "manual_no_new_speech")).toBe(true);
+  user.cleanup();
+});
+
+test("g2 double tap after paging regenerates the previous pinned answer", async () => {
+  const session = new MockUserSession();
+  const user = new User("manual-scroll-tap-with-speech-user");
+  const events: any[] = [];
+  user.addSSEClient((data) => events.push(JSON.parse(data)));
+
+  await withConversationStateDisabled(() => user.setAppSession(session as unknown as AppSession));
+  (user as any).responseHandler.currentManualAnswer = {
+    answerGroupId: "manual_group_scroll_tap_speech",
+    answerId: "manual_answer_scroll_tap_speech",
+    requestId: "manual_req_scroll_tap_speech",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "digest",
+    },
+    output: "First page.\nSecond page.",
+    pages: ["First page.", "Second page."],
+    pageIndex: 0,
+    createdAt: Date.now(),
+  };
+  let generated = false;
+  let regenerated = false;
+  (user as any).generateManualAnswer = async () => {
+    generated = true;
+    return {
+      status: "ok",
+      sessionId: "manual-scroll-tap-with-speech-user",
+      state: (user as any).responseHandler.getManualState(),
+    };
+  };
+  (user as any).regenerateManualAnswer = async () => {
+    regenerated = true;
+    return {
+    status: "ok",
+    sessionId: "manual-scroll-tap-with-speech-user",
+    state: (user as any).responseHandler.getManualState(),
+    };
+  };
+
+  session.touchHandler?.({ gesture: "swipe_down" });
+  session.touchHandler?.({ gesture: "single_tap" });
+  session.touchHandler?.({ gesture: "single_tap" });
+  await sleep(330);
+
+  expect(events.some((event) => event.type === "manual_gesture_ignored" && event.reason === "single_tap_disabled")).toBe(false);
+  expect(events.some((event) => event.reason === "manual_ok")).toBe(true);
+  expect(generated).toBe(false);
+  expect(regenerated).toBe(true);
+  user.cleanup();
+});
+
+test("manual answer history stores full answers once and does not duplicate page changes", () => {
+  const { handler } = makeManualHandler();
+  const insights: any[] = [];
+  handler.onInsight = (insight) => insights.push(insight);
+  (handler as any).currentManualAnswer = {
+    answerGroupId: "manual_group_history",
+    answerId: "manual_answer_history",
+    requestId: "manual_req_history",
+    sourceRange: {
+      fromExclusive: null,
+      toInclusive: "seg_1",
+      segmentIds: ["seg_1"],
+      textDigest: "digest",
+    },
+    sourceText: "What is the best way to explain database indexes in an interview?",
+    output: "Full answer first page.\nFull answer second page.",
+    pages: ["Full answer first page.", "Full answer second page."],
+    pageIndex: 0,
+    createdAt: Date.now(),
+  };
+
+  (handler as any).renderManualAnswer("manual_answer");
+  handler.pageManualAnswer("next", "history-page-next");
+
+  expect(insights).toHaveLength(1);
+  expect(insights[0]).toMatchObject({
+    text: "Full answer first page.\nFull answer second page.",
+    agentType: "Manual",
+    reasoning: "manual_answer",
+    sourceText: "What is the best way to explain database indexes in an interview?",
+  });
 });
 
 test("manual answer pagination stays within visible lines and preserves text", () => {
@@ -522,7 +660,7 @@ test("manual generation detects newer speech that arrived after source range was
   expect(newer.map((segment) => segment.id)).toEqual(["seg_3"]);
 });
 
-test("manual regenerate prefers new speech over the previous pinned answer", async () => {
+test("manual regenerate uses the previous pinned answer even when newer speech exists", async () => {
   const { handler } = makeManualHandler();
   const captured: Array<{ kind: string; segmentIds: string[] }> = [];
 
@@ -557,7 +695,7 @@ test("manual regenerate prefers new speech over the previous pinned answer", asy
 
   await handler.regenerateManualAnswer("double-tap-after-new-speech");
 
-  expect(captured[0]).toEqual({ kind: "generate", segmentIds: ["seg_2"] });
+  expect(captured[0]).toEqual({ kind: "regenerate", segmentIds: ["seg_1"] });
 });
 
 test("g2 two short button presses are treated as double tap", async () => {

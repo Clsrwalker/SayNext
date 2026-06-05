@@ -15,6 +15,7 @@ export interface OpenAiConversationGenerateOptions {
   outputLanguage?: string;
   promptMode?: string;
   answerIntent?: string;
+  answerStrategy?: string;
   taskHint?: string;
   preparedNote?: string;
   supportContext?: string;
@@ -54,6 +55,7 @@ export interface OpenAiConversationInputOptions {
   outputLanguage?: string;
   promptMode?: string;
   answerIntent?: string;
+  answerStrategy?: string;
   taskHint?: string;
   transcriptContext?: string;
   preparedNote?: string;
@@ -78,7 +80,11 @@ export function buildOpenAiConversationInput(latestTranscript: string, options: 
   const lines = [
     options.outputLanguage?.trim() ? `Language: ${options.outputLanguage.trim()}` : "",
     options.promptMode?.trim() ? `Mode: ${options.promptMode.trim()}` : "",
-    options.answerIntent?.trim() ? `Intent: ${options.answerIntent.trim()}` : "",
+    options.answerStrategy?.trim()
+      ? `Strategy: ${options.answerStrategy.trim()}`
+      : options.answerIntent?.trim()
+        ? `Intent: ${options.answerIntent.trim()}`
+        : "",
     options.taskHint?.trim() ? `Task: ${options.taskHint.trim()}` : "",
     options.supportContext?.trim() ? `Relevant context candidates, use only if helpful:\n${options.supportContext.trim()}` : "",
     options.preparedNote?.trim() ? `Prepared note:\n${options.preparedNote.trim()}` : "",
@@ -214,6 +220,7 @@ export class OpenAiConversationSession {
         outputLanguage: options.outputLanguage,
         promptMode: options.promptMode,
         answerIntent: options.answerIntent,
+        answerStrategy: options.answerStrategy,
         taskHint: options.taskHint,
         transcriptContext: options.transcriptContext,
         supportContext: options.supportContext,

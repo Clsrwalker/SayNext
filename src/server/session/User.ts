@@ -68,6 +68,7 @@ export class User {
   private currentUtteranceBuffer: string = "";
   private utteranceTimer: NodeJS.Timeout | null = null;
   private pendingSingleTapTimer: NodeJS.Timeout | null = null;
+  private lastManualPageGestureAt: number = 0;
   private lastProcessedUtterance: string = "";
   private lastProcessedAt: number = 0;
   private lastProcessedReason: 'isFinal' | 'timeout' | null = null;
@@ -93,7 +94,8 @@ export class User {
       const entry = this.insightHistory.addInsight(
         insight.text,
         insight.agentType,
-        insight.reasoning
+        insight.reasoning,
+        { sourceText: insight.sourceText }
       );
       this.broadcastInsightEvent({
         type: 'insight',
@@ -102,6 +104,7 @@ export class User {
         timestamp: entry.timestamp.toISOString(),
         agentType: entry.agentType,
         reasoning: entry.reasoning,
+        sourceText: entry.sourceText,
       });
     };
     this.responseHandler.onStatus = (event) => {
@@ -416,12 +419,16 @@ export class User {
     }
 
     if (gesture.includes("down") || gesture.includes("next")) {
+      this.cancelPendingSingleTap();
+      this.lastManualPageGestureAt = Date.now();
       const result = this.pageManualAnswer("next", eventId);
       this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_page_${result.status}` });
       return;
     }
 
     if (gesture.includes("up") || gesture.includes("previous") || gesture.includes("prev")) {
+      this.cancelPendingSingleTap();
+      this.lastManualPageGestureAt = Date.now();
       const result = this.pageManualAnswer("previous", eventId);
       this.broadcastInsightEvent({ type: 'processing_done', reason: `manual_page_${result.status}` });
       return;

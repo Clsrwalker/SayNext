@@ -79,6 +79,70 @@ test("preserves multi-step interview debugging answers when that intent is selec
   )).toBe("First, I would reproduce the deployed 500 with the exact route and request body.");
 });
 
+test("planner debug_steps output shape preserves multi-step answers without legacy intent", () => {
+  const output = [
+    "First, I would reproduce the issue with the same deployed route and payload.",
+    "Then I would check the logs for the request id and compare the failing stack trace with local behavior.",
+    "After that, I would verify environment variables, database schema version, and downstream timeout settings.",
+  ].join("\n");
+
+  expect(finalizeSayNextOutput(
+    output,
+    "The API works locally but fails after deploy. Walk me through how you would debug it.",
+    "english",
+    undefined,
+    "interview",
+    { answerOutputShape: "debug_steps" },
+  )).toContain("database schema version");
+});
+
+test("planner output shape overrides legacy debug intent during validation", () => {
+  const output = [
+    "First, I would reproduce the issue with the same deployed route and payload.",
+    "Then I would check logs and traces.",
+  ].join("\n");
+
+  expect(finalizeSayNextOutput(
+    output,
+    "Just give the short answer.",
+    "english",
+    undefined,
+    "interview",
+    {
+      answerIntent: "interview_debug_solution",
+      answerOutputShape: "direct_answer",
+    },
+  )).toBe("First, I would reproduce the issue with the same deployed route and payload.");
+});
+
+test("planner code_with_explanation output shape preserves readable code blocks without legacy intent", () => {
+  const output = [
+    "I would keep the state in the Library class and make pagination a method.",
+    "class Library:",
+    "    def __init__(self):",
+    "        self.books = {}",
+    "        self.active_book_id = None",
+    "",
+    "    def set_active_book(self, book_id):",
+    "        if book_id not in self.books:",
+    "            raise ValueError('unknown book')",
+    "        self.active_book_id = book_id",
+  ].join("\n");
+
+  const cleaned = finalizeSayNextOutput(
+    output,
+    "For this library design, can you write the code shape?",
+    "english",
+    undefined,
+    "interview",
+    { answerOutputShape: "code_with_explanation" },
+  );
+
+  expect(cleaned).toContain("class Library:");
+  expect(cleaned).toContain("    def __init__(self):");
+  expect(cleaned).toContain("self.active_book_id = book_id");
+});
+
 test("trims classroom direct-question mini textbook answers to the first useful sentence", () => {
   expect(finalizeSayNextOutput(
     "Batch normalization helps training because it stabilizes the activation distribution and makes optimization less sensitive to initialization. It also lets gradients stay better scaled, supports higher learning rates, and can add a small regularization effect.",

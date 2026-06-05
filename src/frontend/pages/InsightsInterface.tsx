@@ -34,6 +34,7 @@ interface Insight {
   timestamp: string;
   agentType?: string;
   reasoning?: string;
+  sourceText?: string;
 }
 
 interface InsightsInterfaceProps {
@@ -111,6 +112,31 @@ function dedupeInsightsById(items: Insight[]): Insight[] {
   return output;
 }
 
+function appendManualAnswerHistory(history: Insight[], next: Insight): Insight[] {
+  const text = String(next.text || '').trim();
+  if (!text) return history;
+
+  const withoutDuplicate = history.filter((item) => {
+    return item.id !== next.id && String(item.text || '').trim() !== text;
+  });
+  return dedupeInsightsById([...withoutDuplicate, { ...next, text }]).slice(-30);
+}
+
+function manualInsightFromAnswer(answer: any, fallbackPrefix = 'manual-answer'): Insight | null {
+  const text = manualAnswerTextFromPayload(answer);
+  if (!text) return null;
+  const answerId = String(answer?.answerId || '').trim();
+  const answerGroupId = String(answer?.answerGroupId || '').trim();
+  return {
+    id: answerId || answerGroupId || `${fallbackPrefix}-${Date.now()}-${hashInsightText(text)}`,
+    text,
+    timestamp: new Date().toISOString(),
+    agentType: 'Manual',
+    reasoning: 'manual_answer',
+    sourceText: String(answer?.sourceText || '').trim() || undefined,
+  };
+}
+
 function summarizeManualState(state: any): ManualUiSummary {
   const currentAnswer = state?.currentAnswer;
   const pageIndex = Number(currentAnswer?.pageIndex ?? 0);
@@ -125,6 +151,116 @@ function summarizeManualState(state: any): ManualUiSummary {
 
 function manualAnswerTextFromPayload(answer: any): string {
   return String(answer?.output || answer?.text || '').trim();
+}
+
+function compactManualSourceText(text?: string, maxChars = 1600): string {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 3).trim()}...`;
+}
+
+function answerLooksCodeLike(text: string): boolean {
+  return /(^|\n)\s*(class|def|function|return|if|for|while|#|\/\/|public|private|const|let|var)\b/.test(text)
+    || /(^|\n)\s{2,}\S/.test(text)
+    || /[{};]\s*(\n|$)/.test(text);
+}
+
+function manualAnswerTextClass(text: string, compact = false): string {
+  const length = String(text || '').length;
+  if (answerLooksCodeLike(text)) return compact ? 'text-[12px] leading-[1.4] font-mono' : 'text-[13px] leading-[1.45] font-mono';
+  if (length > 1600) return compact ? 'text-[12px] leading-[1.42]' : 'text-[13px] leading-[1.45]';
+  if (length > 900) return compact ? 'text-[13px] leading-[1.45]' : 'text-[14px] leading-[1.5]';
+  return compact ? 'text-[14px] leading-[1.5]' : 'text-[16px] leading-[1.55]';
+}
+
+function ManualAnswerCard({
+  answer,
+  sourceText,
+  title,
+  subtitle,
+  pinned = false,
+}: {
+  answer: string;
+  sourceText?: string;
+  title: string;
+  subtitle: string;
+  pinned?: boolean;
+}) {
+  const compactSource = compactManualSourceText(sourceText);
+  const answerText = String(answer || '').trim();
+  const maxAnswerHeight = pinned ? '44vh' : '30vh';
+
+  return (
+    <motion.section
+      key={title + subtitle + hashInsightText(answerText)}
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25 }}
+      className={`${pinned ? 'rounded-[24px]' : 'rounded-[20px]'} border shadow-sm overflow-hidden w-full max-w-full`}
+      style={{
+        backgroundColor: 'var(--primary-foreground)',
+        borderColor: 'var(--border)',
+      }}
+    >
+      <div
+        className="flex items-center justify-between gap-3 px-4 py-3 border-b min-w-0"
+        style={{ borderColor: 'var(--border)' }}
+      >
+        <div className="min-w-0">
+          <div className="text-[12px] font-semibold text-muted-foreground">{title}</div>
+          <div className="text-[16px] font-bold truncate" style={{ color: 'var(--secondary-foreground)' }}>
+            {subtitle}
+          </div>
+        </div>
+        <span
+          className="shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold"
+          style={{
+            color: 'var(--secondary-foreground)',
+            borderColor: 'var(--border)',
+          }}
+        >
+          Scroll
+        </span>
+      </div>
+
+      {compactSource && (
+        <div className="px-4 pt-3">
+          <div className="rounded-[14px] border px-3 py-2" style={{ borderColor: 'var(--border)' }}>
+            <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Question</div>
+            <div
+              className="max-h-[22vh] overflow-y-auto text-[12px] sm:text-[13px] leading-[1.35] text-muted-foreground whitespace-pre-wrap"
+              style={{
+                overflowWrap: 'anywhere',
+                wordBreak: 'break-word',
+                WebkitOverflowScrolling: 'touch',
+              }}
+            >
+              {compactSource}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="px-4 py-3">
+        <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Answer</div>
+        <div
+          className={`overflow-y-auto whitespace-pre-wrap ${manualAnswerTextClass(answerText, !pinned)}`}
+          style={{
+            maxHeight: maxAnswerHeight,
+            color: 'var(--secondary-foreground)',
+            scrollbarWidth: 'thin',
+            overscrollBehaviorY: 'contain',
+            WebkitOverflowScrolling: 'touch',
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
+          }}
+        >
+          {answerText}
+        </div>
+      </div>
+    </motion.section>
+  );
 }
 
 function manualStatusMessage(status: string): string {
@@ -253,6 +389,8 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     hasAnswer: false,
   });
   const [manualAnswerText, setManualAnswerText] = useState('');
+  const [manualAnswerSourceText, setManualAnswerSourceText] = useState('');
+  const [manualAnswerHistory, setManualAnswerHistory] = useState<Insight[]>([]);
   const [thinkingWord, setThinkingWord] = useState(() =>
     THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)]
   );
@@ -276,6 +414,8 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     setStatusDetail('Screen cleared. Listening continues if glasses are connected.');
     setManualSummary({ transcriptCount: 0, answerLabel: 'None', pendingLabel: 'None', hasAnswer: false });
     setManualAnswerText('');
+    setManualAnswerSourceText('');
+    setManualAnswerHistory([]);
     setIsLoadingHistory(false);
     setHasConnectedBefore(false);
     renderedIdsRef.current.clear();
@@ -347,7 +487,17 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             setStatusDetail(isManualInsight ? 'Answer is pinned on display.' : 'New display cue received.');
 
             if (isManualInsight) {
-              setManualAnswerText(String(data.text || '').trim());
+              const manualInsight = {
+                id: data.id || `${data.timestamp || new Date().toISOString()}-${hashInsightText(data.text || '')}`,
+                text: String(data.text || '').trim(),
+                timestamp: data.timestamp || new Date().toISOString(),
+                agentType: 'Manual',
+                reasoning: data.reasoning || 'manual_answer',
+                sourceText: String(data.sourceText || '').trim() || undefined,
+              };
+              setManualAnswerText(manualInsight.text);
+              setManualAnswerSourceText(manualInsight.sourceText || '');
+              setManualAnswerHistory((prev) => appendManualAnswerHistory(prev, manualInsight));
               return;
             }
 
@@ -417,13 +567,24 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             // Instant scroll, no animation — mark all IDs as already rendered
             scrollInstantRef.current = true;
             const rawHistory = data.insights || [];
-            const latestManual = [...rawHistory]
-              .reverse()
-              .find((ins: any) => String(ins.agentType || '').toLowerCase() === 'manual');
+            const manualHistory = dedupeInsightsById(rawHistory
+              .filter((ins: any) => String(ins.agentType || '').toLowerCase() === 'manual')
+              .map((ins: any) => ({
+                id: ins.id,
+                text: String(ins.text || '').trim(),
+                timestamp: ins.timestamp,
+                agentType: ins.agentType || 'Manual',
+                reasoning: ins.reasoning || 'manual_answer',
+                sourceText: String(ins.sourceText || '').trim() || undefined,
+              }))
+              .filter((ins: Insight) => ins.text));
+            const latestManual = manualHistory.at(-1);
             if (latestManual?.text) {
               setManualAnswerText(String(latestManual.text).trim());
+              setManualAnswerSourceText(String(latestManual.sourceText || '').trim());
               setManualSummary((current) => ({ ...current, hasAnswer: true, answerLabel: 'Ready' }));
             }
+            setManualAnswerHistory(manualHistory.slice(-30));
             const historyInsights = dedupeInsightsById(rawHistory
               .filter((ins: any) => String(ins.agentType || '').toLowerCase() !== 'manual')
               .map((ins: any) => ({
@@ -458,6 +619,9 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             setRuntimeStatus('Disconnected');
             setStatusDetail('Session ended.');
             setInsights([]);
+            setManualAnswerText('');
+            setManualAnswerSourceText('');
+            setManualAnswerHistory([]);
             renderedIdsRef.current.clear();
             setHasConnectedBefore(false);
             sessionStorage.removeItem('merge-session-connected');
@@ -486,18 +650,26 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
             setIsProcessing(false);
             setRuntimeStatus('Answer ready');
             setStatusDetail('Answer is pinned on display.');
-            setManualAnswerText(manualAnswerTextFromPayload(data.answer));
+            const manualInsight = manualInsightFromAnswer(data.answer, 'manual-answer-sse');
+            const answerText = manualInsight?.text || manualAnswerTextFromPayload(data.answer);
+            setManualAnswerText(answerText);
+            setManualAnswerSourceText(manualInsight?.sourceText || String(data.answer?.sourceText || '').trim());
+            if (manualInsight) {
+              setManualAnswerHistory((prev) => appendManualAnswerHistory(prev, manualInsight));
+            }
           } else if (data.type === 'manual_page') {
             applyManualState(data.state);
             setRuntimeStatus('Answer ready');
             setStatusDetail('Answer is pinned on display.');
             setManualAnswerText(manualAnswerTextFromPayload(data.answer));
+            setManualAnswerSourceText(String(data.answer?.sourceText || '').trim());
           } else if (data.type === 'manual_cleared') {
             applyManualState(data.state);
             setIsProcessing(false);
             setRuntimeStatus('Listening');
             setStatusDetail('Display cleared. Listening continues.');
             setManualAnswerText('');
+            setManualAnswerSourceText('');
           } else if (data.type === 'manual_error') {
             applyManualState(data.state);
             setIsProcessing(false);
@@ -508,7 +680,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
               ? 'Use the phone answer box to scroll the full response.'
               : 'Long press ignored by SayNext; it may be reserved by the glasses system.');
           } else if (data.type === 'manual_gesture_pending') {
-            setStatusDetail('Tap received. Waiting briefly to detect double tap.');
+            setStatusDetail('Tap received. Waiting briefly for a second tap; single tap will generate.');
           } else if (data.type === 'manual_gesture') {
             setStatusDetail(`Gesture: ${data.gesture}`);
           }
@@ -632,11 +804,18 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
       if (result.status === 'ok' && result.answer) {
         setRuntimeStatus('Answer ready');
         setStatusDetail('Answer is pinned on display.');
-        setManualAnswerText(manualAnswerTextFromPayload(result.answer));
+        const manualInsight = manualInsightFromAnswer(result.answer, 'manual-answer-action');
+        const answerText = manualInsight?.text || manualAnswerTextFromPayload(result.answer);
+        setManualAnswerText(answerText);
+        setManualAnswerSourceText(manualInsight?.sourceText || String(result.answer?.sourceText || '').trim());
+        if (manualInsight) {
+          setManualAnswerHistory((prev) => appendManualAnswerHistory(prev, manualInsight));
+        }
       } else if (result.status === 'cleared') {
         setRuntimeStatus('Listening');
         setStatusDetail('Display cleared. Listening continues.');
         setManualAnswerText('');
+        setManualAnswerSourceText('');
         setInsights([]);
         renderedIdsRef.current.clear();
       } else if (result.status === 'busy') {
@@ -660,7 +839,12 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
     : isProcessing || runtimeStatus.includes('Generating') || runtimeStatus.includes('Regenerating') || runtimeStatus.includes('Preparing') || runtimeStatus === 'Clearing'
       ? 'bg-amber-500/10 text-amber-500 border-amber-500/20'
       : 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20';
-  const showManualControls = sessionActive !== false || Boolean(manualAnswerText) || insights.length > 0 || hasConnectedBefore;
+  const previousManualAnswers = manualAnswerHistory
+    .filter((answer) => String(answer.text || '').trim() && String(answer.text || '').trim() !== manualAnswerText.trim())
+    .slice()
+    .reverse();
+  const hasVisibleMessages = Boolean(manualAnswerText) || previousManualAnswers.length > 0 || insights.length > 0;
+  const showManualControls = sessionActive !== false || hasVisibleMessages || hasConnectedBefore;
 
   // Render Settings page if on settings
   if (currentPage === 'settings') {
@@ -838,7 +1022,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
         >
           {/* Empty States: Welcome / Disconnected / Loading */}
           <AnimatePresence mode="wait">
-            {isLoadingHistory && insights.length === 0 && !manualAnswerText && (
+            {isLoadingHistory && !hasVisibleMessages && (
               <motion.div
                 key="loading-screen"
                 initial={{ opacity: 0 }}
@@ -856,7 +1040,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                 </div>
               </motion.div>
             )}
-            {!isLoadingHistory && insights.length === 0 && !manualAnswerText && sessionActive === false && (
+            {!isLoadingHistory && !hasVisibleMessages && sessionActive === false && (
               <motion.div
                 key="disconnected-screen"
                 initial={{ opacity: 0 }}
@@ -878,7 +1062,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                 </div>
               </motion.div>
             )}
-            {!isLoadingHistory && insights.length === 0 && !manualAnswerText && sessionActive !== false && !isProcessing && (
+            {!isLoadingHistory && !hasVisibleMessages && sessionActive !== false && !isProcessing && (
               <motion.div
                 key="welcome-screen"
                 initial={{ opacity: 0 }}
@@ -941,58 +1125,39 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
           </AnimatePresence>
 
           {/* Insight List */}
-          {(manualAnswerText || insights.length > 0 || isProcessing) && (
+          {(hasVisibleMessages || isProcessing) && (
             <motion.div
               initial={hasConnectedBefore ? { opacity: 1, y: 0 } : { opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: hasConnectedBefore ? 0 : 0.5, ease: 'easeOut' }}
-              className="px-[24px] py-6 pb-[210px] relative z-20"
+              className="px-3 sm:px-[24px] py-4 sm:py-6 pb-[210px] relative z-20 min-w-0 overflow-x-hidden"
             >
-              <div className="max-w-3xl mx-auto space-y-6">
+              <div className="w-full max-w-3xl mx-auto space-y-5 sm:space-y-6 min-w-0">
                 {manualAnswerText && (
-                  <motion.section
-                    key="manual-answer-card"
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.25 }}
-                    className="rounded-[28px] border shadow-sm overflow-hidden"
-                    style={{
-                      backgroundColor: 'var(--primary-foreground)',
-                      borderColor: 'var(--border)',
-                    }}
-                  >
-                    <div
-                      className="flex items-center justify-between px-5 py-3 border-b"
-                      style={{ borderColor: 'var(--border)' }}
-                    >
-                      <div>
-                        <div className="text-[13px] font-semibold text-muted-foreground">Pinned answer</div>
-                        <div className="text-[18px] font-bold" style={{ color: 'var(--secondary-foreground)' }}>
-                          Latest response
-                        </div>
-                      </div>
-                      <span
-                        className="rounded-full border px-3 py-1 text-[12px] font-semibold"
-                        style={{
-                          color: 'var(--secondary-foreground)',
-                          borderColor: 'var(--border)',
-                        }}
-                      >
-                        Scroll
-                      </span>
+                  <ManualAnswerCard
+                    answer={manualAnswerText}
+                    sourceText={manualAnswerSourceText}
+                    title="Pinned answer"
+                    subtitle="Latest response"
+                    pinned
+                  />
+                )}
+
+                {previousManualAnswers.length > 0 && (
+                  <section className="space-y-3">
+                    <div className="px-1 text-[13px] font-semibold text-muted-foreground">
+                      Previous answers
                     </div>
-                    <div
-                      className="max-h-[54vh] overflow-y-auto px-5 py-4 text-[18px] leading-[1.55] whitespace-pre-wrap"
-                      style={{
-                        color: 'var(--secondary-foreground)',
-                        scrollbarWidth: 'thin',
-                        overscrollBehaviorY: 'contain',
-                        WebkitOverflowScrolling: 'touch',
-                      }}
-                    >
-                      {manualAnswerText}
-                    </div>
-                  </motion.section>
+                    {previousManualAnswers.map((answer) => (
+                      <ManualAnswerCard
+                        key={answer.id}
+                        answer={answer.text}
+                        sourceText={answer.sourceText}
+                        title={new Date(answer.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        subtitle="Previous answer"
+                      />
+                    ))}
+                  </section>
                 )}
 
                 {insights.map((insight) => {
@@ -1124,7 +1289,7 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                   Generate
                 </button>
                 <button
-                  onClick={() => handleManualAction(manualSummary.hasAnswer ? 'regenerate' : 'clear')}
+                  onClick={() => handleManualAction('clear')}
                   className="col-span-3 min-h-[54px] px-2 rounded-[18px] text-[18px] font-bold shadow-sm transition active:scale-[0.99]"
                   style={{
                     backgroundColor: 'var(--primary-foreground)',
@@ -1132,28 +1297,15 @@ function InsightsInterface({ userId }: InsightsInterfaceProps) {
                     border: '1px solid var(--border)',
                   }}
                 >
-                  {manualSummary.hasAnswer ? 'Retry' : 'Clear'}
+                  Clear display
                 </button>
-                {manualSummary.hasAnswer && (
-                  <button
-                    onClick={() => handleManualAction('clear')}
-                    className="col-span-3 min-h-[46px] px-4 rounded-[16px] text-[16px] font-bold shadow-sm transition active:scale-[0.99]"
-                    style={{
-                      backgroundColor: 'var(--primary-foreground)',
-                      color: '#b91c1c',
-                      border: '1px solid var(--border)',
-                    }}
-                  >
-                    Clear display
-                  </button>
-                )}
               </div>
             )}
           </div>
         )}
 
         {/* Bottom Header */}
-        <BottomHeader isVisible={Boolean(manualAnswerText) || insights.length > 0} />
+        <BottomHeader isVisible={hasVisibleMessages} />
       </div>
     </div>
   );

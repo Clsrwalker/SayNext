@@ -54,6 +54,7 @@ export const insightStream = (c: Context) => {
           timestamp: insight.timestamp.toISOString(),
           agentType: insight.agentType,
           reasoning: insight.reasoning,
+          sourceText: insight.sourceText,
         }));
         send(JSON.stringify({ type: 'history', insights: insightMessages }));
 

@@ -1,5 +1,6 @@
 import type { EventMemorySnapshot } from "../memory/event-memory";
 import type { AnswerIntent } from "./answer-intent";
+import type { AnswerPlanOutputShape } from "./answer-plan";
 import {
   enforceOutputLanguage,
   replaceChineseEnglishClarification,
@@ -91,9 +92,11 @@ function sanitizeCodeLikeOutput(text: string): string {
 
 export interface SayNextOutputPostprocessOptions {
   answerIntent?: AnswerIntent;
+  answerOutputShape?: AnswerPlanOutputShape;
 }
 
 function shouldPreserveStructuredNonCodeOutput(options?: SayNextOutputPostprocessOptions): boolean {
+  if (options?.answerOutputShape) return options.answerOutputShape === "debug_steps";
   return options?.answerIntent === "interview_debug_solution";
 }
 
@@ -135,7 +138,8 @@ export function sanitizeSayNextOutput(text: string, options: SayNextOutputPostpr
     .replace(/\b(?:option|version|response)\s*\d+\s*[:.)-]/gi, "\n")
     .replace(/\b(?:option|version|response)\s*[A-Z]\s*[:.)-]/gi, "\n");
 
-  if (outputLooksLikeCodeSnippet(cleaned)) {
+  if (outputLooksLikeCodeSnippet(cleaned)
+    || (options.answerOutputShape === "code_with_explanation" && /\n/.test(cleaned) && /\b(class|def|return|function|method|self\.|this\.|constructor)\b/i.test(cleaned))) {
     return sanitizeCodeLikeOutput(cleaned);
   }
 
@@ -1006,7 +1010,8 @@ export function finalizeSayNextOutput(
   options: SayNextOutputPostprocessOptions = {},
 ): string {
   const cleaned = sanitizeSayNextOutput(text, options);
-  const preserveCodeLayout = outputLooksLikeCodeSnippet(cleaned);
+  const preserveCodeLayout = outputLooksLikeCodeSnippet(cleaned)
+    || (options.answerOutputShape === "code_with_explanation" && /\n/.test(cleaned) && /\b(class|def|return|function|method|self\.|this\.|constructor)\b/i.test(cleaned));
   const withoutIdentityClaim = removeUnsupportedIdentityClaim(cleaned, transcript);
   const withoutWrongNameEcho = removeWrongNameEcho(withoutIdentityClaim, transcript);
   const withoutUnsupportedSayNext = replaceUnsupportedSayNextClaim(withoutWrongNameEcho, transcript);

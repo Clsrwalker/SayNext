@@ -13,6 +13,11 @@ import { makeTelepromptOpeningLine, shouldStartTeleprompt, TelepromptRuntime, ty
 import { OpenAiConversationSession, isOpenAiConversationStateEnabled } from './openai-conversation-state';
 import { normalizeKnownProjectAsrAliases } from '../../text/asr-corrections';
 import { detectPromptMode } from '../../saynext/context-builder';
+import { classifyAnswerIntent } from '../../saynext/answer-intent';
+import {
+  generateAnswerPlanShadow,
+} from '../../saynext/answer-planner-runtime';
+import { resolvePlannerMemoryRetrievalDecision } from '../../saynext/planner-memory-policy';
 import { sayNextConversationStateInstructions } from '../../saynext/prompts';
 import { evenHubConversationStateInstructions } from '../../evenhub/prompts';
 import { LLM_PROVIDER } from '../../saynext/model-runtime';
@@ -159,6 +164,7 @@ type ManualAnswer = {
   answerId: string;
   requestId: string;
   sourceRange: SourceRange;
+  sourceText: string;
   output: string;
   pages: string[];
   pageIndex: number;
@@ -205,6 +211,7 @@ export type ManualActionResult = {
     totalPages: number;
     text: string;
     output: string;
+    sourceText?: string;
   };
   error?: string;
 };
@@ -870,7 +877,7 @@ export class MergeResponseHandler {
   public outputLanguage: OutputLanguage;
 
   // Callback for when an insight is generated (for webview SSE broadcasting)
-  public onInsight?: (insight: { text: string; timestamp: number; agentType: string; reasoning: string }) => void;
+  public onInsight?: (insight: { text: string; timestamp: number; agentType: string; reasoning: string; sourceText?: string }) => void;
   public onStatus?: (event: { type: string; [key: string]: unknown }) => void;
 
   constructor(
@@ -1023,9 +1030,40 @@ export class MergeResponseHandler {
       prenoteQuery,
       prenoteRetrievalMode,
     );
-    const relevantPersonalMemoryContext = isClassroomMode
-      ? ""
-      : await conversationLogger.getRelevantPersonalMemoryContextAsync(this.userId, memoryQuery, SAYNEXT_PERSONAL_MEMORY_TOP_K);
+    const answerPlannerMetadata = await generateAnswerPlanShadow({
+      activeScene: promptMode,
+      sceneLocked: Boolean(activeScenePromptModeOverride),
+      latestUtterance: text,
+      recentTranscript: eventSnapshot.recentTranscripts.slice(-4).join("\n"),
+      outputLanguage: this.outputLanguage === "chinese" ? "Chinese" : "English",
+      legacyAnswerIntent: classifyAnswerIntent(
+        [
+          eventSnapshot.recentTranscripts.slice(-4).join("\n"),
+          text,
+        ].filter(Boolean).join("\n"),
+        promptMode,
+        eventSnapshot,
+      ),
+      eventMemorySummary: [
+        eventSnapshot.scene ? `scene=${eventSnapshot.scene}` : "",
+        eventSnapshot.title ? `title=${eventSnapshot.title}` : "",
+        eventSnapshot.summary ? `summary=${eventSnapshot.summary}` : "",
+      ].filter(Boolean).join("; "),
+      hasPreparedNote: Boolean(activePrenoteContext.trim()),
+      hasPersonalMemoryCandidates: false,
+    });
+    const memoryRetrievalDecision = resolvePlannerMemoryRetrievalDecision({
+      isClassroomMode,
+      fallbackQuery: memoryQuery,
+      answerPlannerMetadata,
+    });
+    const relevantPersonalMemoryContext = memoryRetrievalDecision.shouldRetrieve
+      ? await conversationLogger.getRelevantPersonalMemoryContextAsync(
+        this.userId,
+        memoryRetrievalDecision.query,
+        SAYNEXT_PERSONAL_MEMORY_TOP_K,
+      )
+      : "";
 
     if (telepromptNeed !== "none") {
       this.startTelepromptAnswer({
@@ -1056,6 +1094,8 @@ export class MergeResponseHandler {
         openAiConversationSession: this.openAiConversationSession,
         transcriptCommitReason: reason === "timeout" ? "timeout" : "final",
         promptModeOverride: activeScenePromptModeOverride || undefined,
+        answerPlannerMetadata,
+        memoryRetrievalDecision,
       },
     );
 
@@ -1216,6 +1256,7 @@ export class MergeResponseHandler {
         model: metadata?.model ?? null,
         profileVersion: metadata?.profileVersion ?? null,
         retrievedSampleIds: metadata?.retrievedSampleIds ?? [],
+        answerPlannerJson: metadata?.answerPlanner ? JSON.stringify(metadata.answerPlanner) : "",
       });
     } catch (error) {
       this.session.logger.error(`Failed to log conversation sample: ${error}`);
@@ -1769,6 +1810,10 @@ export class MergeResponseHandler {
     };
   }
 
+  hasPendingManualSpeech(): boolean {
+    return Boolean(this.buildNewManualSourceRange());
+  }
+
   async generateManualAnswer(clientEventId?: string): Promise<ManualActionResult> {
     const cached = this.getCachedManualAction(clientEventId);
     if (cached) return cached;
@@ -1811,12 +1856,6 @@ export class MergeResponseHandler {
         sessionId: this.sessionId,
         state: this.getManualState(),
       });
-    }
-
-    const newSourceRange = this.buildNewManualSourceRange();
-    if (newSourceRange) {
-      console.log(`[SayNext] Manual regenerate rerouted to latest speech segments=${newSourceRange.segmentIds.length} digest=${newSourceRange.textDigest}`);
-      return this.runManualGeneration("generate", newSourceRange, clientEventId);
     }
 
     if (!this.currentManualAnswer) {
@@ -2084,13 +2123,38 @@ export class MergeResponseHandler {
         prenoteQuery,
         telepromptNeed === "none" ? "fast" : "semantic",
       );
-      const relevantPersonalMemoryContext = isClassroomMode
-        ? ""
-        : await conversationLogger.getRelevantPersonalMemoryContextAsync(
-          this.userId,
+      const manualMemoryQuery = [transcriptContext.text, sourceText].filter(Boolean).join("\n");
+      const answerPlannerMetadata = await generateAnswerPlanShadow({
+        activeScene: promptMode,
+        sceneLocked: Boolean(activeScenePromptModeOverride),
+        latestUtterance: latestText,
+        recentTranscript: transcriptContext.text || sourceText,
+        outputLanguage: this.outputLanguage === "chinese" ? "Chinese" : "English",
+        legacyAnswerIntent: classifyAnswerIntent(
           [transcriptContext.text, sourceText].filter(Boolean).join("\n"),
+          promptMode,
+          eventSnapshot,
+        ),
+        eventMemorySummary: [
+          eventSnapshot.scene ? `scene=${eventSnapshot.scene}` : "",
+          eventSnapshot.title ? `title=${eventSnapshot.title}` : "",
+          eventSnapshot.summary ? `summary=${eventSnapshot.summary}` : "",
+        ].filter(Boolean).join("; "),
+        hasPreparedNote: Boolean(activePrenoteContext.trim()),
+        hasPersonalMemoryCandidates: false,
+      });
+      const memoryRetrievalDecision = resolvePlannerMemoryRetrievalDecision({
+        isClassroomMode,
+        fallbackQuery: manualMemoryQuery,
+        answerPlannerMetadata,
+      });
+      const relevantPersonalMemoryContext = memoryRetrievalDecision.shouldRetrieve
+        ? await conversationLogger.getRelevantPersonalMemoryContextAsync(
+          this.userId,
+          memoryRetrievalDecision.query,
           SAYNEXT_PERSONAL_MEMORY_TOP_K,
-        );
+        )
+        : "";
 
       const response = await withManualGenerationTimeout(
         processConversation(
@@ -2108,6 +2172,8 @@ export class MergeResponseHandler {
             promptModeOverride: activeScenePromptModeOverride || undefined,
             promptPreset: this.promptPreset,
             transcriptContext: transcriptContext.text,
+            answerPlannerMetadata,
+            memoryRetrievalDecision,
           },
         ),
         requestId,
@@ -2169,6 +2235,7 @@ export class MergeResponseHandler {
         answerId: makeRuntimeId("manual_answer"),
         requestId,
         sourceRange,
+        sourceText,
         output: response.output,
         pages: paginateManualAnswer(response.output),
         pageIndex: 0,
@@ -2222,6 +2289,7 @@ export class MergeResponseHandler {
       totalPages: answer.pages.length,
       text: answer.pages[answer.pageIndex] || answer.output,
       output: answer.output,
+      sourceText: answer.sourceText,
     };
   }
 
@@ -2239,12 +2307,13 @@ export class MergeResponseHandler {
       totalPages: answer.pages.length,
     });
     this.bumpManualState();
-    if (this.onInsight) {
+    if (eventType === "manual_answer" && this.onInsight) {
       this.onInsight({
-        text: pageText,
+        text: answer.output,
         timestamp: Date.now(),
         agentType: "Manual",
         reasoning: eventType,
+        sourceText: answer.sourceText,
       });
     }
     this.onStatus?.({ type: eventType, state: this.getManualState(), answer: this.manualAnswerPayload(answer) });

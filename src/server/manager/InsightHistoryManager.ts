@@ -6,6 +6,7 @@ export interface InsightEntry {
   timestamp: Date;
   agentType: string;
   reasoning: string;
+  sourceText?: string;
 }
 
 /**
@@ -16,13 +17,14 @@ export interface InsightEntry {
 export class InsightHistoryManager {
   private insights: InsightEntry[] = [];
 
-  addInsight(text: string, agentType: string, reasoning: string): InsightEntry {
+  addInsight(text: string, agentType: string, reasoning: string, metadata: { sourceText?: string } = {}): InsightEntry {
     const entry: InsightEntry = {
       id: `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
       text,
       timestamp: new Date(),
       agentType,
       reasoning,
+      sourceText: metadata.sourceText,
     };
     this.insights.push(entry);
 

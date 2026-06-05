@@ -8,10 +8,17 @@ import {
   isOpenAiConversationStateEnabled,
   shouldCommitTranscriptToOpenAiConversation,
 } from "./openai-conversation-state";
-import { buildAnswerIntentHint, classifyAnswerIntent } from "../../saynext/answer-intent";
+import { classifyAnswerIntent } from "../../saynext/answer-intent";
+import {
+  generateAnswerPlanShadow,
+  shouldApplyAnswerPlannerMemoryPolicy,
+  type AnswerPlannerShadowMetadata,
+} from "../../saynext/answer-planner-runtime";
+import { resolveFinalAnswerStrategy } from "../../saynext/answer-strategy";
 import { normalizeKnownProjectAsrAliases } from "../../text/asr-corrections";
 import { buildProcessTrace } from "../../saynext/process-router";
 import type { PromptMode } from "../../saynext/process-router";
+import type { PlannerMemoryRetrievalDecision } from "../../saynext/planner-memory-policy";
 import {
   LLM_PROVIDER,
   MODEL_NAME,
@@ -106,6 +113,8 @@ export interface ProcessConversationOptions {
   promptModeOverride?: PromptMode;
   promptPreset?: "saynext" | "evenhub";
   transcriptContext?: string;
+  answerPlannerMetadata?: AnswerPlannerShadowMetadata;
+  memoryRetrievalDecision?: PlannerMemoryRetrievalDecision;
 }
 
 export async function processConversation(
@@ -123,12 +132,12 @@ export async function processConversation(
   const latestTranscript = normalizeKnownProjectAsrAliases(rawLatestTranscript);
   const promptMode = options.promptModeOverride || detectPromptMode(latestTranscript, eventMemory);
   const formattedTranscriptContext = options.transcriptContext?.trim() || "";
+  const outputLanguageText = outputLanguage === "chinese" ? "Chinese" : "English";
   const transcriptForIntent = [
     formattedTranscriptContext,
     latestTranscript,
   ].filter(Boolean).join("\n");
   const answerIntent = classifyAnswerIntent(transcriptForIntent || latestTranscript, promptMode, eventMemory);
-  const answerIntentHint = buildAnswerIntentHint(answerIntent);
   const promptPreset = options.promptPreset === "evenhub" ? "evenhub" : "saynext";
   const systemInstructions = promptPreset === "evenhub" ? evenHubSystemInstructions : sayNextInstructions;
   const conversationStateInstructions = promptPreset === "evenhub" ? evenHubConversationStateInstructions : sayNextConversationStateInstructions;
@@ -169,7 +178,7 @@ export async function processConversation(
   const formattedPrenoteContext = activePrenoteContext.trim()
     ? compactRuntimeContextBlock(activePrenoteContext.trim(), 1200)
     : "";
-  const filteredPersonalMemoryContext = isClassroomMode
+  const baseFilteredPersonalMemoryContext = isClassroomMode
     ? ""
     : filterRuntimePersonalMemoryContext(
       relevantPersonalMemoryContext,
@@ -177,6 +186,31 @@ export async function processConversation(
       promptMode,
       eventMemory,
     );
+  const answerPlannerMetadata: AnswerPlannerShadowMetadata | undefined = options.answerPlannerMetadata ?? await generateAnswerPlanShadow({
+    activeScene: promptMode,
+    sceneLocked: Boolean(options.promptModeOverride),
+    latestUtterance: latestTranscript,
+    recentTranscript: formattedTranscriptContext || previousTranscriptTexts.join("\n"),
+    outputLanguage: outputLanguageText,
+    legacyAnswerIntent: answerIntent,
+    eventMemorySummary: [
+      eventMemory?.scene ? `scene=${eventMemory.scene}` : "",
+      eventMemory?.title ? `title=${eventMemory.title}` : "",
+      eventMemory?.summary ? `summary=${eventMemory.summary}` : "",
+    ].filter(Boolean).join("; "),
+    hasPreparedNote: Boolean(formattedPrenoteContext.trim()),
+    hasPersonalMemoryCandidates: Boolean(baseFilteredPersonalMemoryContext.trim()),
+  });
+  if (answerPlannerMetadata?.enabled) {
+    const plan = answerPlannerMetadata.plan || answerPlannerMetadata.fallbackPlan;
+    console.log(
+      `[SayNextPlanner] task=${plan?.task || "unknown"} shape=${plan?.outputShape || "unknown"} depth=${plan?.answerDepth || "unknown"} memory=${answerPlannerMetadata.resolvedPolicy?.needsMemory ? "yes" : "no"} code=${answerPlannerMetadata.resolvedPolicy?.needsCode ? "yes" : "no"}${answerPlannerMetadata.error ? ` error=${answerPlannerMetadata.error}` : ""}`,
+    );
+  }
+  const applyPlannerMemoryPolicy = shouldApplyAnswerPlannerMemoryPolicy(answerPlannerMetadata);
+  const filteredPersonalMemoryContext = applyPlannerMemoryPolicy && !answerPlannerMetadata?.resolvedPolicy?.needsMemory
+    ? ""
+    : baseFilteredPersonalMemoryContext;
   const formattedPersonalMemory = isClassroomMode
     ? ""
     : compactRuntimeContextBlock(filteredPersonalMemoryContext.trim() || "No relevant personal memory.", 1400);
@@ -205,6 +239,35 @@ export async function processConversation(
     }
   }
 
+  const finalAnswerStrategy = resolveFinalAnswerStrategy({
+    legacyAnswerIntent: answerIntent,
+    answerPlannerMetadata,
+  });
+  const outputPostprocessOptions = {
+    answerIntent,
+    answerOutputShape: finalAnswerStrategy.answerOutputShape,
+  };
+  const answerPlannerMetadataForLog = answerPlannerMetadata && options.memoryRetrievalDecision
+    ? {
+      ...answerPlannerMetadata,
+      finalAnswerStrategy: {
+        source: finalAnswerStrategy.source,
+        conversationStrategy: finalAnswerStrategy.conversationStrategy,
+        legacyAnswerIntent: answerIntent,
+      },
+      memoryRetrievalDecision: options.memoryRetrievalDecision,
+    }
+    : answerPlannerMetadata
+      ? {
+        ...answerPlannerMetadata,
+        finalAnswerStrategy: {
+          source: finalAnswerStrategy.source,
+          conversationStrategy: finalAnswerStrategy.conversationStrategy,
+          legacyAnswerIntent: answerIntent,
+        },
+      }
+    : answerPlannerMetadata;
+
   const stablePromptPrefix = (promptPreset === "evenhub" ? buildEvenHubLiveTaskPrompt : buildSayNextLiveTaskPrompt)({
     formattedSceneProfile: isClassroomMode
       ? ""
@@ -212,17 +275,16 @@ export async function processConversation(
     promptMode,
     supportContext: isClassroomMode ? formattedPrenoteContext : compactRuntimeContextBlock(trustedSupportContext, 2600),
     routeHints: formattedImmediateRouteHints,
-    answerIntentHint,
+    answerIntentHint: finalAnswerStrategy.promptHint,
   });
 
-  const outputLanguageText = outputLanguage === "chinese" ? "Chinese" : "English";
   const manualResponseInstruction = options.responseStyle === "manual"
     ? promptPreset === "evenhub"
       ? evenHubManualResponseInstruction
       : "Manual G2 display: write the exact words Xiang can say now, usually in first person. No word-count target or minimum; use only the length needed. Technical or interview answers can use more detail when depth is useful. For explicit coding interview requests, include the actual code or pseudocode plus a short explanation, not only a verbal plan; code indentation and short comments are allowed. Do not use labels or advice about how to answer."
     : "";
   const conversationStateTaskHint = [
-    answerIntentHint,
+    finalAnswerStrategy.promptHint,
     isClassroomMode
       ? "Classroom mode: if the transcript is a clear question, answer it directly using general knowledge; do not ask for repetition unless the transcript is genuinely unclear."
       : "",
@@ -249,7 +311,8 @@ export async function processConversation(
   const openAiConversationInput = buildOpenAiConversationInput(latestTranscript, {
     outputLanguage: outputLanguageText,
     promptMode,
-    answerIntent,
+    answerIntent: finalAnswerStrategy.conversationIntent,
+    answerStrategy: finalAnswerStrategy.conversationStrategy,
     supportContext: conversationStateSupportContext,
     preparedNote: formattedPrenoteContext,
     taskHint: conversationStateTaskHint,
@@ -295,7 +358,8 @@ export async function processConversation(
           latestTranscript,
           outputLanguage: outputLanguageText,
           promptMode,
-          answerIntent,
+          answerIntent: finalAnswerStrategy.conversationIntent,
+          answerStrategy: finalAnswerStrategy.conversationStrategy,
           taskHint: conversationStateTaskHint,
           transcriptContext: formattedTranscriptContext,
           supportContext: conversationStateSupportContext,
@@ -340,6 +404,7 @@ export async function processConversation(
             fallback.reasoning = "Fallback after Ollama returned malformed JSON without an output field";
             fallback.metadata.agentInput = createAgentInputMetadata({
               retrievedSampleIds: retrievedSamples.map((sample) => sample.id),
+              answerPlanner: answerPlannerMetadataForLog,
               processTrace: buildProcessTrace({
                 transcript: latestTranscript,
                 output: fallback.output,
@@ -355,7 +420,7 @@ export async function processConversation(
         const reasoning = extractedOutput
           ? "Ollama returned partial JSON; extracted output field"
           : "Generated SayNext reply with Ollama";
-        const output = finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory, promptMode, { answerIntent });
+        const output = finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory, promptMode, outputPostprocessOptions);
         return {
           type: Action.INSIGHT,
           reasoning,
@@ -367,6 +432,7 @@ export async function processConversation(
             agentInput: createAgentInputMetadata({
               retrievedSampleIds: retrievedSamples.map((sample) => sample.id),
               openAiConversation: openAiConversationMetadata,
+              answerPlanner: answerPlannerMetadataForLog,
               processTrace: buildProcessTrace({
                 transcript: latestTranscript,
                 output,
@@ -387,7 +453,7 @@ export async function processConversation(
       const reasoning = extractedOutput
         ? "OpenAI returned structured text; extracted output field"
         : "Generated SayNext reply with OpenAI";
-      const output = finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory, promptMode, { answerIntent });
+      const output = finalizeSayNextOutput(extractedOutput ?? responseText, latestTranscript, outputLanguage, eventMemory, promptMode, outputPostprocessOptions);
       return {
         type: Action.INSIGHT,
         reasoning,
@@ -399,6 +465,7 @@ export async function processConversation(
           agentInput: createAgentInputMetadata({
             retrievedSampleIds: retrievedSamples.map((sample) => sample.id),
             openAiConversation: openAiConversationMetadata,
+            answerPlanner: answerPlannerMetadataForLog,
             processTrace: buildProcessTrace({
               transcript: latestTranscript,
               output,
@@ -426,6 +493,7 @@ export async function processConversation(
         agentInput: createAgentInputMetadata({
           retrievedSampleIds: retrievedSamples.map((sample) => sample.id),
           openAiConversation: openAiConversationMetadata,
+          answerPlanner: answerPlannerMetadataForLog,
           processTrace: buildProcessTrace({
             transcript: latestTranscript,
             output: "Sorry, could you say that again?",
@@ -443,6 +511,7 @@ export async function processConversation(
       fallback.reasoning = `Fallback after model error: ${error instanceof Error ? error.message : "Unknown error"}`;
       fallback.metadata.agentInput = createAgentInputMetadata({
         retrievedSampleIds: retrievedSamples.map((sample) => sample.id),
+        answerPlanner: answerPlannerMetadataForLog,
         processTrace: buildProcessTrace({
           transcript: latestTranscript,
           output: fallback.output,
