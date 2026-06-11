@@ -1,0 +1,33 @@
+{
+  "package_id": "com.xiangli.saynext.evenhub",
+  "name": "SayNext",
+  "version": "0.2.16",
+  "edition": "202601",
+  "description": "Conversation-style SayNext cue UI for Even G2 and R1.",
+  "tagline": "Transcript, prepared notes, and live SayNext cues.",
+  "author": "Xiang Li",
+  "entrypoint": "index.html",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.10",
+  "supported_languages": ["zh", "en"],
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Connects to the SayNext backend websocket for future STT and AI cue generation.",
+      "whitelist": [
+        "https://saynext.167.172.153.109.sslip.io",
+        "wss://saynext.167.172.153.109.sslip.io",
+        "http://localhost:3000",
+        "ws://localhost:3000"
+      ]
+    },
+    {
+      "name": "phone-microphone",
+      "desc": "Will use the phone microphone when selected for live transcription."
+    },
+    {
+      "name": "g2-microphone",
+      "desc": "Will use the G2 microphone when selected for live transcription."
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "evenhub-v2",
+  "version": "0.2.16",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5174",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 4174",
+    "qr": "evenhub qr --http --port 5174",
+    "pack": "npm run build && evenhub pack app.json dist -o saynext-v2.ehpk",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@evenrealities/even_hub_sdk": "^0.0.10",
+    "lucide-react": "^0.554.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@evenrealities/evenhub-cli": "^0.1.5",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.14"
+  }
+}

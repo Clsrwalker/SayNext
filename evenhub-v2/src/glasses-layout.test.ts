@@ -1,0 +1,144 @@
+import { describe, expect, test } from "vitest";
+import { buildGlassesPage, GLASS_TRANSCRIPT_LINE_CHARS, GLASS_TRANSCRIPT_MAX_LINES } from "./glasses-layout";
+import { buildMenuItems, startLiveGlasses } from "./glasses-state";
+import { MOCK_CUES, MOCK_PRENOTES, MOCK_TRANSCRIPT } from "./mock-data";
+import type { TranscriptLine } from "./types";
+
+const LONG_TRANSCRIPT: TranscriptLine[] = [
+  {
+    id: "long-1",
+    time: "00:00:01",
+    text: "This older sentence should disappear when there are newer transcript lines available.",
+  },
+  {
+    id: "long-2",
+    time: "00:00:02",
+    text: "Questions generally are going to cost normalizing the inputs itself with enough words to wrap.",
+  },
+  {
+    id: "long-3",
+    time: "00:00:03",
+    text: "You think about how the activations themselves are normalized across a batch during training.",
+  },
+  {
+    id: "long-4",
+    time: "00:00:04",
+    text: "So we are going to get the mean and variance of this batch before applying scale and shift.",
+    partial: true,
+  },
+];
+
+describe("buildGlassesPage", () => {
+  test("main layout has header, AI cue box, and three-line transcript box", () => {
+    const page = buildGlassesPage({
+      state: startLiveGlasses(MOCK_CUES[0].id),
+      cues: MOCK_CUES,
+      prenote: MOCK_PRENOTES[0],
+      transcript: MOCK_TRANSCRIPT,
+      now: new Date("2026-06-05T13:35:00-03:00"),
+    });
+
+    expect(page.view).toBe("main");
+    expect(page.containers).toHaveLength(3);
+    const rightHeader = page.containers.find((container) => container.kind === "text" && container.name === "h-right");
+    expect(rightHeader?.kind).toBe("text");
+    if (rightHeader?.kind === "text") {
+      expect(rightHeader.x).toBeGreaterThan(400);
+      expect(rightHeader.content).toContain("1:35");
+      expect(rightHeader.padding).toBe(0);
+    }
+    const transcript = page.containers.find((container) => container.kind === "text" && container.name === "transcript");
+    const cue = page.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
+    expect(transcript?.kind).toBe("text");
+    expect(cue?.kind).toBe("text");
+    if (cue?.kind === "text") {
+      expect(cue.y).toBe(34);
+      expect(cue.height).toBe(166);
+    }
+    if (transcript?.kind === "text") {
+      expect(transcript.content.split("\n")).toHaveLength(3);
+      expect(transcript.y).toBe(204);
+      expect(transcript.height).toBe(84);
+      expect(transcript.padding).toBe(0);
+    }
+  });
+
+  test("main layout is blank before a cue is explicitly generated or selected", () => {
+    const page = buildGlassesPage({
+      state: startLiveGlasses(null),
+      cues: MOCK_CUES,
+      prenote: MOCK_PRENOTES[0],
+      transcript: MOCK_TRANSCRIPT,
+    });
+    const cue = page.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
+    expect(cue?.kind).toBe("text");
+    if (cue?.kind === "text") {
+      expect(cue.content).toBe("");
+    }
+  });
+
+  test("transcript content is clipped before it reaches the G2 TextContainer", () => {
+    const page = buildGlassesPage({
+      state: startLiveGlasses(null),
+      cues: MOCK_CUES,
+      prenote: MOCK_PRENOTES[0],
+      transcript: LONG_TRANSCRIPT,
+    });
+    const transcript = page.containers.find((container) => container.kind === "text" && container.name === "transcript");
+    expect(transcript?.kind).toBe("text");
+    if (transcript?.kind === "text") {
+      const lines = transcript.content.split("\n");
+      expect(lines).toHaveLength(GLASS_TRANSCRIPT_MAX_LINES);
+      expect(transcript.content).not.toContain("older sentence");
+      for (const line of lines) {
+        expect(line.length).toBeLessThanOrEqual(GLASS_TRANSCRIPT_LINE_CHARS);
+      }
+    }
+  });
+
+  test("menu layout uses the official ListContainer and keeps transcript visible below it", () => {
+    const state = { ...startLiveGlasses(MOCK_CUES[0].id), view: "menu" as const, selectedIndex: 0 };
+    const page = buildGlassesPage({
+      state,
+      cues: MOCK_CUES,
+      prenote: MOCK_PRENOTES[0],
+      transcript: MOCK_TRANSCRIPT,
+    });
+    const list = page.containers.find((container) => container.kind === "list");
+    const rows = page.containers.filter((container) => container.kind === "text" && container.name.startsWith("menu-row"));
+    const selection = page.containers.find((container) => container.kind === "text" && container.name === "menu-selection");
+    const transcript = page.containers.find((container) => container.kind === "text" && container.name === "transcript");
+    expect(list?.kind).toBe("list");
+    expect(rows).toHaveLength(0);
+    expect(selection).toBeUndefined();
+    expect(transcript?.kind).toBe("text");
+    if (list?.kind === "list") {
+      expect(list.items).toHaveLength(buildMenuItems({ prenote: MOCK_PRENOTES[0], cues: MOCK_CUES }).length);
+      expect(list.items[0]).toContain("Prenote");
+      expect(list.y).toBe(28);
+      expect(list.height).toBe(176);
+      expect(list.borderWidth).toBe(0);
+      expect(list.eventCapture).toBe(true);
+    }
+    if (transcript?.kind === "text" && list?.kind === "list") {
+      expect(transcript.y).toBe(204);
+      expect(transcript.height).toBe(84);
+      expect(transcript.y).toBeGreaterThanOrEqual(list.y + list.height);
+    }
+  });
+
+  test("prenote detail covers the transcript area with one large text container", () => {
+    const page = buildGlassesPage({
+      state: { ...startLiveGlasses(MOCK_CUES[0].id), view: "prenote_detail" },
+      cues: MOCK_CUES,
+      prenote: MOCK_PRENOTES[0],
+      transcript: MOCK_TRANSCRIPT,
+    });
+    const detail = page.containers.find((container) => container.kind === "text" && container.name === "prenote");
+    expect(detail?.kind).toBe("text");
+    if (detail?.kind === "text") {
+      expect(detail.height).toBeGreaterThan(220);
+      expect(detail.content).toContain("TRANSFER LEARNING");
+    }
+  });
+});
