@@ -32,6 +32,7 @@ import { normalizeGlassGesture, readGlassListSelection, type GlassListSelection 
 import { decideGlassEvent } from "./glasses-event-controller";
 import { connectGlassBridge, type GlassBridgeHandle } from "./glasses-bridge";
 import { buildGlassesPage } from "./glasses-layout";
+import { createGlassRenderer, type GlassRendererHandle } from "./glasses-renderer";
 import { buildMenuItems, INITIAL_GLASS_STATE, makeAutoCueVisibility, startLiveGlasses } from "./glasses-state";
 import { removeRecordById, replaceRecordInPlace } from "./record-list";
 import type {
@@ -106,6 +107,7 @@ export default function App() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [swipedRecordId, setSwipedRecordId] = useState<string | null>(null);
   const bridgeRef = useRef<GlassBridgeHandle | null>(null);
+  const glassRendererRef = useRef<GlassRendererHandle | null>(null);
   const connectingBridgeRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
@@ -222,8 +224,8 @@ export default function App() {
   }, [isListening]);
 
   useEffect(() => {
-    if (bridgeRef.current) {
-      void bridgeRef.current.render(glassPage).catch(() => undefined);
+    if (bridgeRef.current && glassRendererRef.current) {
+      void glassRendererRef.current.render(glassPage).catch(() => undefined);
       return;
     }
     if (connectingBridgeRef.current) return;
@@ -243,6 +245,8 @@ export default function App() {
       })
       .then((bridge) => {
         bridgeRef.current = bridge;
+        glassRendererRef.current = createGlassRenderer(bridge, glassPage);
+        void glassRendererRef.current.render(glassPageRef.current).catch(() => undefined);
         if (isListeningRef.current) {
           void bridge.setAudioEnabled(true).then((enabled) => {
             if (!enabled) setConnectionStatus("g2_mic_failed");
@@ -254,6 +258,10 @@ export default function App() {
         connectingBridgeRef.current = false;
       });
   }, [glassPage]);
+
+  useEffect(() => () => {
+    glassRendererRef.current?.dispose();
+  }, []);
 
   const elapsedLabel = useMemo(() => {
     const minutes = Math.floor(elapsedSeconds / 60).toString().padStart(2, "0");
