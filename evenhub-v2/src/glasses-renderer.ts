@@ -62,17 +62,18 @@ export function createGlassRenderer(bridge: GlassBridgeHandle, initialPage: Glas
         });
       }
 
-      if (!next.transcript || !current.transcript || next.transcript.content === current.transcript.content) {
+      const nextTranscript = next.transcript;
+      if (!nextTranscript || !current.transcript || nextTranscript.content === current.transcript.content) {
         return Promise.resolve();
       }
 
       return enqueue(async () => {
         if (current.structureKey !== next.structureKey) return;
-        const ok = await bridge.updateTextContainer(next.transcript);
+        const ok = await bridge.updateTextContainer(nextTranscript);
         if (ok) {
           current = {
             ...current,
-            transcript: next.transcript,
+            transcript: nextTranscript,
           };
         } else {
           current = {

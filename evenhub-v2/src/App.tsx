@@ -28,6 +28,7 @@ import {
   wsUrl,
   type EvenHubV2ServerMessage,
 } from "./evenhub-v2-client";
+import { planPauseToggle } from "./conversation-audio";
 import { normalizeGlassGesture, readGlassListSelection, type GlassListSelection } from "./events";
 import {
   DETAIL_BACK_DOUBLE_CLICK_SUPPRESS_MS,
@@ -35,11 +36,13 @@ import {
   shouldSuppressDuplicateMenuDoubleClick,
 } from "./glasses-event-controller";
 import { connectGlassBridge, type GlassBridgeHandle } from "./glasses-bridge";
+import { updateGlassContentSetting } from "./glass-content-settings";
 import { buildGlassesPage } from "./glasses-layout";
 import { createGlassRenderer, type GlassRendererHandle } from "./glasses-renderer";
 import { buildMenuItems, INITIAL_GLASS_STATE, makeAutoCueVisibility, startLiveGlasses } from "./glasses-state";
 import { removeRecordById, replaceRecordInPlace } from "./record-list";
 import { shouldAutoFollowTranscriptScroll } from "./transcript-scroll";
+import { normalizeSupportedVoiceInput } from "./voice-input";
 import type {
   AiCue,
   ConversationRecord,
@@ -114,6 +117,7 @@ export default function App() {
   const bridgeRef = useRef<GlassBridgeHandle | null>(null);
   const glassRendererRef = useRef<GlassRendererHandle | null>(null);
   const connectingBridgeRef = useRef(false);
+  const pendingGlassRenderRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
   const isListeningRef = useRef(false);
@@ -126,6 +130,7 @@ export default function App() {
 
   const activePrenote = useMemo(() => selectedPrenote(prenotes), [prenotes]);
   const activeRecord = records.find((record) => record.id === activeRecordId) || records[0] || null;
+  const effectiveVoiceInput = normalizeSupportedVoiceInput(settings.voiceInput);
   const glassStateRef = useRef(glassState);
   const cuesRef = useRef(cues);
   const transcriptRef = useRef(transcript);
@@ -136,7 +141,8 @@ export default function App() {
     cues,
     prenote: activePrenote,
     transcript,
-  }), [activePrenote, cues, glassState, transcript]);
+    glassContent: settings.glassContent,
+  }), [activePrenote, cues, glassState, settings.glassContent, transcript]);
   const glassPageRef = useRef(glassPage);
 
   useEffect(() => {
@@ -149,6 +155,16 @@ export default function App() {
     activeConversationIdRef.current = activeConversationId;
     isListeningRef.current = isListening;
   }, [activeConversationId, activePrenote, cues, glassPage, glassState, isListening, settings, transcript]);
+
+  useEffect(() => {
+    const normalized = normalizeSupportedVoiceInput(settings.voiceInput);
+    if (normalized !== settings.voiceInput) {
+      setSettings((current) => ({
+        ...current,
+        voiceInput: normalizeSupportedVoiceInput(current.voiceInput),
+      }));
+    }
+  }, [settings.voiceInput]);
 
   useEffect(() => {
     let cancelled = false;
@@ -196,6 +212,10 @@ export default function App() {
           pendingStartPayloadRef.current = null;
           ws.send(JSON.stringify(createClientMessage("conversation_start", payload, activeConversationIdRef.current)));
         }
+        if (pendingAudioStartRef.current && activeConversationIdRef.current && isListeningRef.current && !pendingStartPayloadRef.current) {
+          pendingAudioStartRef.current = false;
+          ws.send(JSON.stringify(createClientMessage("audio_start", { codec: "linear16", sampleRate: 16000, channels: 1 }, activeConversationIdRef.current)));
+        }
       };
       ws.onmessage = (event) => {
         if (typeof event.data !== "string") return;
@@ -232,11 +252,16 @@ export default function App() {
 
   useEffect(() => {
     if (bridgeRef.current && glassRendererRef.current) {
-      void glassRendererRef.current.render(glassPage).catch(() => undefined);
+      pendingGlassRenderRef.current = false;
+      void glassRendererRef.current.render(glassPage).catch(handleGlassRenderError);
       return;
     }
-    if (connectingBridgeRef.current) return;
+    if (connectingBridgeRef.current) {
+      pendingGlassRenderRef.current = true;
+      return;
+    }
     connectingBridgeRef.current = true;
+    const initialPage = glassPage;
     void connectGlassBridge({
       initialPage: glassPage,
       onEvent: (event) => {
@@ -250,17 +275,30 @@ export default function App() {
         }
       },
       })
-      .then((bridge) => {
+      .then(async (bridge) => {
         bridgeRef.current = bridge;
-        glassRendererRef.current = createGlassRenderer(bridge, glassPage);
-        void glassRendererRef.current.render(glassPageRef.current).catch(() => undefined);
+        const latestPage = glassPageRef.current;
+        let renderedPage = initialPage;
+        if (pendingGlassRenderRef.current || latestPage !== initialPage) {
+          try {
+            await bridge.render(latestPage);
+            renderedPage = latestPage;
+          } catch (error) {
+            handleGlassRenderError(error);
+          }
+        }
+        pendingGlassRenderRef.current = false;
+        glassRendererRef.current = createGlassRenderer(bridge, renderedPage);
+        if (renderedPage !== latestPage) {
+          void glassRendererRef.current.render(latestPage).catch(handleGlassRenderError);
+        }
         if (isListeningRef.current) {
           void bridge.setAudioEnabled(true).then((enabled) => {
             if (!enabled) setConnectionStatus("g2_mic_failed");
           }).catch(() => setConnectionStatus("g2_mic_error"));
         }
       })
-      .catch(() => undefined)
+      .catch(handleGlassRenderError)
       .finally(() => {
         connectingBridgeRef.current = false;
       });
@@ -281,6 +319,11 @@ export default function App() {
     setGlassState(nextState);
   }
 
+  function handleGlassRenderError(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    setConnectionStatus(message.includes("rebuild_unavailable") ? "glass_render_unsupported" : "glass_render_error");
+  }
+
   function sendWs(type: string, payload: unknown = {}) {
     const ws = wsRef.current;
     if (ws?.readyState !== WebSocket.OPEN) {
@@ -289,6 +332,18 @@ export default function App() {
     }
     ws.send(JSON.stringify(createClientMessage(type, payload, activeConversationIdRef.current)));
     return true;
+  }
+
+  function isWsOpen() {
+    return wsRef.current?.readyState === WebSocket.OPEN;
+  }
+
+  function sendAudioStart() {
+    return sendWs("audio_start", { codec: "linear16", sampleRate: 16000, channels: 1 });
+  }
+
+  function sendAudioStop() {
+    return sendWs("audio_stop", {});
   }
 
   function setGlassAudioEnabled(enabled: boolean) {
@@ -314,7 +369,7 @@ export default function App() {
       if (pendingAudioStartRef.current) {
         pendingAudioStartRef.current = false;
         window.setTimeout(() => {
-          sendWs("audio_start", { codec: "linear16", sampleRate: 16000, channels: 1 });
+          sendAudioStart();
         }, 0);
       }
       return;
@@ -498,7 +553,9 @@ export default function App() {
   }
 
   function startConversation() {
-    const payload = conversationStartPayload(settings, activePrenote);
+    const voiceInput = normalizeSupportedVoiceInput(settings.voiceInput);
+    const startSettings = voiceInput === settings.voiceInput ? settings : { ...settings, voiceInput };
+    const payload = conversationStartPayload(startSettings, activePrenote);
     const started = sendWs("conversation_start", payload);
     if (!started) {
       pendingStartPayloadRef.current = payload;
@@ -510,7 +567,7 @@ export default function App() {
     setCues([]);
     setTranscript([]);
     setGlassState(startLiveGlasses(null));
-    setGlassAudioEnabled(true);
+    setGlassAudioEnabled(voiceInput === "glasses");
     setLiveTab("transcript");
     setScreen("live");
   }
@@ -526,6 +583,34 @@ export default function App() {
       activeConversationIdRef.current = null;
       setGlassState(INITIAL_GLASS_STATE);
       setScreen("home");
+    }
+  }
+
+  function togglePauseConversation() {
+    const voiceInput = normalizeSupportedVoiceInput(settingsRef.current.voiceInput);
+    const plan = planPauseToggle({
+      isListening: isListeningRef.current,
+      wsOpen: isWsOpen(),
+      voiceInput,
+    });
+    setIsListening(plan.nextListening);
+    isListeningRef.current = plan.nextListening;
+    setGlassAudioEnabled(plan.enableGlassAudio);
+
+    if (plan.wsType === "audio_start") {
+      pendingAudioStartRef.current = false;
+      sendAudioStart();
+    } else if (plan.wsType === "audio_stop") {
+      pendingAudioStartRef.current = false;
+      sendAudioStop();
+    } else if (plan.offlineStatus === "resume_offline") {
+      pendingAudioStartRef.current = true;
+    }
+
+    if (plan.offlineStatus) {
+      setConnectionStatus(plan.offlineStatus);
+    } else {
+      setConnectionStatus(plan.nextListening ? "listening" : "paused");
     }
   }
 
@@ -600,10 +685,14 @@ export default function App() {
           <h2>语音输入方式</h2>
           <div className="setting-card tall">
             <button className="setting-choice" onClick={() => setSettings({ ...settings, voiceInput: "glasses" })}>
-              眼镜 {settings.voiceInput === "glasses" && <Check size={28} />}
+              眼镜 {effectiveVoiceInput === "glasses" && <Check size={28} />}
             </button>
-            <button className="setting-choice" onClick={() => setSettings({ ...settings, voiceInput: "phone" })}>
-              手机 {settings.voiceInput === "phone" && <Check size={28} />}
+            <button
+              className="setting-choice"
+              disabled
+              onClick={() => setSettings({ ...settings, voiceInput: "phone" })}
+            >
+              手机 {effectiveVoiceInput === "phone" && <Check size={28} />}
             </button>
           </div>
         </section>
@@ -622,7 +711,7 @@ export default function App() {
               <input
                 type="checkbox"
                 checked={settings.glassContent.aiCue}
-                onChange={(event) => setSettings({ ...settings, glassContent: { ...settings.glassContent, aiCue: event.target.checked } })}
+                onChange={(event) => setSettings((current) => updateGlassContentSetting(current, "aiCue", event.target.checked))}
               />
             </label>
             <label className="switch-row">
@@ -630,7 +719,7 @@ export default function App() {
               <input
                 type="checkbox"
                 checked={settings.glassContent.transcript}
-                onChange={(event) => setSettings({ ...settings, glassContent: { ...settings.glassContent, transcript: event.target.checked } })}
+                onChange={(event) => setSettings((current) => updateGlassContentSetting(current, "transcript", event.target.checked))}
               />
             </label>
           </div>
@@ -715,8 +804,8 @@ export default function App() {
         <section className="settings-section">
           <h2>语音输入方式</h2>
           <div className="setting-card tall locked">
-            <div className="setting-choice">眼镜</div>
-            <div className="setting-choice">手机 <Check size={28} /></div>
+            <div className="setting-choice">眼镜 {effectiveVoiceInput === "glasses" && <Check size={28} />}</div>
+            <div className="setting-choice">手机 {effectiveVoiceInput === "phone" && <Check size={28} />}</div>
           </div>
         </section>
         <section className="settings-section">
@@ -724,11 +813,19 @@ export default function App() {
           <div className="setting-card">
             <label className="switch-row">
               <span>AI 提示</span>
-              <input type="checkbox" checked={settings.glassContent.aiCue} readOnly />
+              <input
+                type="checkbox"
+                checked={settings.glassContent.aiCue}
+                onChange={(event) => setSettings((current) => updateGlassContentSetting(current, "aiCue", event.target.checked))}
+              />
             </label>
             <label className="switch-row">
               <span>实时转录</span>
-              <input type="checkbox" checked={settings.glassContent.transcript} readOnly />
+              <input
+                type="checkbox"
+                checked={settings.glassContent.transcript}
+                onChange={(event) => setSettings((current) => updateGlassContentSetting(current, "transcript", event.target.checked))}
+              />
             </label>
           </div>
         </section>
@@ -759,7 +856,7 @@ export default function App() {
           {liveTab === "prenote" && renderPrenote(activePrenote)}
         </section>
         <footer className="live-actions">
-          <button onClick={() => setIsListening((value) => !value)}>
+          <button onClick={togglePauseConversation}>
             <Pause size={29} strokeWidth={1.4} /> {isListening ? "暂停" : "继续"}
           </button>
           <button onClick={endConversation}>

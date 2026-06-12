@@ -23,6 +23,18 @@ export type GlassBridgeHandle = {
   setAudioEnabled(enabled: boolean): Promise<boolean>;
 };
 
+export const REBUILD_UNAVAILABLE_CODE = "rebuild_unavailable";
+
+export function getRebuildPageContainer(bridge: unknown): (container: CreateStartUpPageContainer) => Promise<unknown> {
+  const rebuild = (bridge as {
+    rebuildPageContainer?: (container: CreateStartUpPageContainer) => Promise<unknown>;
+  }).rebuildPageContainer;
+  if (!rebuild) {
+    throw new Error(REBUILD_UNAVAILABLE_CODE);
+  }
+  return rebuild;
+}
+
 function textContainer(spec: GlassTextContainerSpec): TextContainerProperty {
   return new TextContainerProperty({
     containerID: spec.id,
@@ -112,14 +124,8 @@ export async function connectGlassBridge(params: {
       params.onStatus?.("G2 page ready");
       return;
     }
-    const rebuild = (bridge as unknown as {
-      rebuildPageContainer?: (container: CreateStartUpPageContainer) => Promise<unknown>;
-    }).rebuildPageContainer;
-    if (rebuild) {
-      await rebuild.call(bridge, container);
-      return;
-    }
-    await bridge.createStartUpPageContainer(container);
+    const rebuild = getRebuildPageContainer(bridge);
+    await rebuild.call(bridge, container);
   }
 
   async function updateTextContainer(spec: GlassTextContainerUpdateSpec): Promise<boolean> {

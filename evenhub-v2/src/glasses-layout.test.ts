@@ -81,6 +81,41 @@ describe("buildGlassesPage", () => {
     }
   });
 
+  test("can hide transcript from the glasses page without affecting phone data", () => {
+    const page = buildGlassesPage({
+      state: startLiveGlasses(TEST_CUES[0].id),
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: TEST_TRANSCRIPT,
+      glassContent: {
+        aiCue: true,
+        transcript: false,
+      },
+    });
+
+    expect(page.containers.some((container) => container.kind === "text" && container.name === "transcript")).toBe(false);
+    expect(page.containers.some((container) => container.kind === "text" && container.name === "ai-cue")).toBe(true);
+  });
+
+  test("can hide AI cue body from the glasses page while keeping the layout stable", () => {
+    const page = buildGlassesPage({
+      state: startLiveGlasses(TEST_CUES[0].id),
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: TEST_TRANSCRIPT,
+      glassContent: {
+        aiCue: false,
+        transcript: true,
+      },
+    });
+
+    const cue = page.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
+    expect(cue?.kind).toBe("text");
+    if (cue?.kind === "text") {
+      expect(cue.content).toBe("");
+    }
+  });
+
   test("transcript content wraps into the latest subtitle lines without ellipsis", () => {
     const page = buildGlassesPage({
       state: startLiveGlasses(null),

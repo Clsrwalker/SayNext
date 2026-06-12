@@ -107,4 +107,37 @@ describe("glass renderer", () => {
     expect(bridge.render).not.toHaveBeenCalled();
     expect(bridge.updateTextContainer).not.toHaveBeenCalled();
   });
+
+  test("forces a full rebuild after transcript upgrade fails", async () => {
+    const bridge = makeBridge();
+    bridge.updateTextContainer = vi.fn(() => Promise.resolve(false));
+    const state = { ...startLiveGlasses(TEST_CUES[0].id), view: "menu" as const, selectedIndex: 1 };
+    const initialPage = buildGlassesPage({
+      state,
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: TEST_TRANSCRIPT,
+    });
+    const renderer = createGlassRenderer(bridge, initialPage);
+    const updatedTranscriptPage = buildGlassesPage({
+      state,
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: [
+        ...TEST_TRANSCRIPT,
+        {
+          id: "partial",
+          time: "00:00:18",
+          text: "This failed upgrade should mark the renderer dirty.",
+          partial: true,
+        },
+      ],
+    });
+
+    await renderer.render(updatedTranscriptPage);
+    await renderer.render(updatedTranscriptPage);
+
+    expect(bridge.updateTextContainer).toHaveBeenCalledTimes(1);
+    expect(bridge.render).toHaveBeenCalledTimes(1);
+  });
 });

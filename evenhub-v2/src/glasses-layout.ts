@@ -1,5 +1,5 @@
 import { buildMenuItems, shouldShowAutoCue } from "./glasses-state";
-import type { AiCue, GlassRuntimeState, Prenote, TranscriptLine } from "./types";
+import type { AiCue, GlassContentFlag, GlassRuntimeState, Prenote, TranscriptLine } from "./types";
 
 export type GlassTextContainerSpec = {
   kind: "text";
@@ -182,9 +182,12 @@ export function buildGlassesPage(params: {
   cues: AiCue[];
   prenote: Prenote | null;
   transcript: TranscriptLine[];
+  glassContent?: Partial<Record<GlassContentFlag, boolean>>;
   now?: Date;
 }): GlassPageSpec {
   const now = params.now || new Date();
+  const showAiCue = params.glassContent?.aiCue ?? true;
+  const showTranscript = params.glassContent?.transcript ?? true;
   const latestCue = params.cues.find((cue) => cue.id === params.state.latestCueId) || params.cues[0];
   const activeCue = params.cues.find((cue) => cue.id === params.state.activeCueId) || latestCue;
   const transcript = buildGlassTranscriptContent(params.transcript);
@@ -193,8 +196,8 @@ export function buildGlassesPage(params: {
       view: params.state.view,
       containers: [
         ...headerContainers(now),
-        cueBox("SayNext ready.\nDouble click to exit confirmation.", true),
-        transcriptBox("Start a conversation from the phone page.", false),
+        cueBox(showAiCue ? "SayNext ready.\nDouble click to exit confirmation." : "", true),
+        ...(showTranscript ? [transcriptBox("Start a conversation from the phone page.", false)] : []),
       ],
     };
   }
@@ -245,7 +248,7 @@ export function buildGlassesPage(params: {
           padding: 4,
           eventCapture: true,
         },
-        transcriptBox(transcript, false, { y: 204, height: 84 }),
+        ...(showTranscript ? [transcriptBox(transcript, false, { y: 204, height: 84 })] : []),
       ],
     };
   }
@@ -255,8 +258,8 @@ export function buildGlassesPage(params: {
       view: params.state.view,
       containers: [
         ...headerContainers(now),
-        cueBox(cueContent(activeCue) || "No cue selected.", true),
-        transcriptBox(transcript, false),
+        cueBox(showAiCue ? cueContent(activeCue) || "No cue selected." : "", true),
+        ...(showTranscript ? [transcriptBox(transcript, false)] : []),
       ],
     };
   }
@@ -290,8 +293,8 @@ export function buildGlassesPage(params: {
     view: params.state.view,
     containers: [
       ...headerContainers(now),
-      cueBox(cueContent(visibleCue), true),
-      transcriptBox(transcript, false),
+      cueBox(showAiCue ? cueContent(visibleCue) : "", true),
+      ...(showTranscript ? [transcriptBox(transcript, false)] : []),
     ],
   };
 }
