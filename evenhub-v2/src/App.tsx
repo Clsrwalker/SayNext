@@ -29,12 +29,17 @@ import {
   type EvenHubV2ServerMessage,
 } from "./evenhub-v2-client";
 import { normalizeGlassGesture, readGlassListSelection, type GlassListSelection } from "./events";
-import { decideGlassEvent } from "./glasses-event-controller";
+import {
+  DETAIL_BACK_DOUBLE_CLICK_SUPPRESS_MS,
+  decideGlassEvent,
+  shouldSuppressDuplicateMenuDoubleClick,
+} from "./glasses-event-controller";
 import { connectGlassBridge, type GlassBridgeHandle } from "./glasses-bridge";
 import { buildGlassesPage } from "./glasses-layout";
 import { createGlassRenderer, type GlassRendererHandle } from "./glasses-renderer";
 import { buildMenuItems, INITIAL_GLASS_STATE, makeAutoCueVisibility, startLiveGlasses } from "./glasses-state";
 import { removeRecordById, replaceRecordInPlace } from "./record-list";
+import { shouldAutoFollowTranscriptScroll } from "./transcript-scroll";
 import type {
   AiCue,
   ConversationRecord,
@@ -116,6 +121,8 @@ export default function App() {
   const pendingAudioStartRef = useRef(false);
   const recordPointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const skipNextRecordClickRef = useRef(false);
+  const pendingDetailBackViewRef = useRef<"cue_detail" | "prenote_detail" | null>(null);
+  const suppressMenuDoubleClickUntilRef = useRef(0);
 
   const activePrenote = useMemo(() => selectedPrenote(prenotes), [prenotes]);
   const activeRecord = records.find((record) => record.id === activeRecordId) || records[0] || null;
@@ -394,7 +401,22 @@ export default function App() {
   }
 
   function handleGlassGesture(gesture: GlassGesture, selection: GlassListSelection = { index: null, name: null }) {
-    const currentState = glassStateRef.current;
+    const nowMs = Date.now();
+    let currentState = glassStateRef.current;
+    if (shouldSuppressDuplicateMenuDoubleClick({
+      state: currentState,
+      gesture,
+      nowMs,
+      suppressUntilMs: suppressMenuDoubleClickUntilRef.current,
+    })) {
+      return;
+    }
+    if (gesture === "double_click" && pendingDetailBackViewRef.current && currentState.view === "menu") {
+      currentState = {
+        ...currentState,
+        view: pendingDetailBackViewRef.current,
+      };
+    }
     const menuItems = buildMenuItems({ prenote: activePrenoteRef.current, cues: cuesRef.current });
     const decision = decideGlassEvent({
       state: currentState,
@@ -406,6 +428,19 @@ export default function App() {
     if (!decision.shouldRender) {
       glassStateRef.current = decision.state;
       return;
+    }
+
+    const isDetailBack = gesture === "double_click"
+      && (currentState.view === "cue_detail" || currentState.view === "prenote_detail")
+      && decision.state.view === "menu";
+
+    if (decision.state.view === "cue_detail" || decision.state.view === "prenote_detail") {
+      pendingDetailBackViewRef.current = decision.state.view;
+    } else if (gesture === "double_click" || decision.state.view === "main" || decision.state.view === "root_idle") {
+      pendingDetailBackViewRef.current = null;
+    }
+    if (isDetailBack) {
+      suppressMenuDoubleClickUntilRef.current = nowMs + DETAIL_BACK_DOUBLE_CLICK_SUPPRESS_MS;
     }
 
     commitGlassState(decision.state);
@@ -720,7 +755,7 @@ export default function App() {
         {renderTabs(liveTab, setLiveTab, Boolean(activePrenote))}
         <section className="live-content">
           {liveTab === "summary" && renderCuePanel(cues)}
-          {liveTab === "transcript" && renderTranscript(transcript)}
+          {liveTab === "transcript" && renderTranscript(transcript, true)}
           {liveTab === "prenote" && renderPrenote(activePrenote)}
         </section>
         <footer className="live-actions">
@@ -907,9 +942,38 @@ function renderSummary(record: ConversationRecord) {
   );
 }
 
-function renderTranscript(lines: TranscriptLine[]) {
+function renderTranscript(lines: TranscriptLine[], autoFollow = false) {
+  return <TranscriptCard lines={lines} autoFollow={autoFollow} />;
+}
+
+function TranscriptCard({ lines, autoFollow }: { lines: TranscriptLine[]; autoFollow: boolean }) {
+  const scrollRef = useRef<HTMLElement | null>(null);
+  const shouldFollowRef = useRef(true);
+  const lastLine = lines[lines.length - 1];
+
+  useEffect(() => {
+    if (!autoFollow || !shouldFollowRef.current) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    const frame = window.requestAnimationFrame(() => {
+      element.scrollTop = element.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoFollow, lines.length, lastLine?.id, lastLine?.text]);
+
+  function handleScroll() {
+    if (!autoFollow) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    shouldFollowRef.current = shouldAutoFollowTranscriptScroll({
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+      clientHeight: element.clientHeight,
+    });
+  }
+
   return (
-    <section className="transcript-card">
+    <section className="transcript-card" ref={scrollRef} onScroll={handleScroll}>
       {lines.length ? lines.map((line) => (
         <article key={line.id}>
           <time>{line.time}</time>

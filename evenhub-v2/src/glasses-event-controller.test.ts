@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { buildMenuItems, startLiveGlasses } from "./glasses-state";
 import { TEST_CUES, TEST_PRENOTES } from "./test-fixtures";
-import { decideGlassEvent } from "./glasses-event-controller";
+import { decideGlassEvent, shouldSuppressDuplicateMenuDoubleClick } from "./glasses-event-controller";
 
 describe("decideGlassEvent", () => {
   test("does not request a render on menu scroll, so the official ListContainer keeps its internal scroll state", () => {
@@ -35,5 +35,30 @@ describe("decideGlassEvent", () => {
     expect(decision.shouldRender).toBe(true);
     expect(decision.state.view).toBe("cue_detail");
     expect(decision.state.activeCueId).toBe(TEST_CUES[2].id);
+  });
+
+  test("suppresses the duplicate menu double click immediately after backing out of detail", () => {
+    const menuState = { ...startLiveGlasses(TEST_CUES[0].id), view: "menu" as const, selectedIndex: 1 };
+
+    expect(shouldSuppressDuplicateMenuDoubleClick({
+      state: menuState,
+      gesture: "double_click",
+      nowMs: 1200,
+      suppressUntilMs: 1500,
+    })).toBe(true);
+
+    expect(shouldSuppressDuplicateMenuDoubleClick({
+      state: menuState,
+      gesture: "double_click",
+      nowMs: 1600,
+      suppressUntilMs: 1500,
+    })).toBe(false);
+
+    expect(shouldSuppressDuplicateMenuDoubleClick({
+      state: menuState,
+      gesture: "click",
+      nowMs: 1200,
+      suppressUntilMs: 1500,
+    })).toBe(false);
   });
 });

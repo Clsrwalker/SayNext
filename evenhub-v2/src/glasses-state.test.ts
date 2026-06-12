@@ -75,6 +75,7 @@ describe("applyGlassGesture", () => {
     const cue = applyGlassGesture(cueMenu, "click", menuItems).state;
     expect(cue.view).toBe("cue_detail");
     expect(cue.activeCueId).toBe(TEST_CUES[0].id);
+    expect(applyGlassGesture(cue, "double_click", menuItems).state.view).toBe("menu");
   });
 
   test("exit confirmation uses double click to confirm and click to return", () => {

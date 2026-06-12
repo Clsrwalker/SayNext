@@ -15,6 +15,19 @@ export type GlassEventDecision = {
   shouldRender: boolean;
 };
 
+export const DETAIL_BACK_DOUBLE_CLICK_SUPPRESS_MS = 450;
+
+export function shouldSuppressDuplicateMenuDoubleClick(params: {
+  state: GlassRuntimeState;
+  gesture: GlassGesture;
+  nowMs: number;
+  suppressUntilMs: number;
+}): boolean {
+  return params.state.view === "menu"
+    && params.gesture === "double_click"
+    && params.nowMs < params.suppressUntilMs;
+}
+
 export function resolveSelectedMenuIndex(menuItems: GlassMenuItem[], selection: GlassListSelection): number | null {
   if (selection.name) {
     const byName = menuItems.findIndex((item) => item.label === selection.name);

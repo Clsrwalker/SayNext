@@ -29,6 +29,10 @@ const LONG_TRANSCRIPT: TranscriptLine[] = [
 ];
 
 describe("buildGlassesPage", () => {
+  test("uses a wider subtitle line budget", () => {
+    expect(GLASS_TRANSCRIPT_LINE_CHARS).toBe(48);
+  });
+
   test("main layout has header, AI cue box, and three-line transcript box", () => {
     const page = buildGlassesPage({
       state: startLiveGlasses(TEST_CUES[0].id),
@@ -77,7 +81,7 @@ describe("buildGlassesPage", () => {
     }
   });
 
-  test("transcript content is clipped before it reaches the G2 TextContainer", () => {
+  test("transcript content wraps into the latest subtitle lines without ellipsis", () => {
     const page = buildGlassesPage({
       state: startLiveGlasses(null),
       cues: TEST_CUES,
@@ -90,11 +94,42 @@ describe("buildGlassesPage", () => {
       const lines = transcript.content.split("\n");
       expect(lines).toHaveLength(GLASS_TRANSCRIPT_MAX_LINES);
       expect(transcript.content).not.toContain("older sentence");
+      expect(transcript.content).not.toContain("...");
+      expect(transcript.content.replace(/\s+/g, " ")).toContain("scale and shift");
       for (const line of lines) {
         expect(line.length).toBeLessThanOrEqual(GLASS_TRANSCRIPT_LINE_CHARS);
       }
     }
   });
+
+  test("transcript wrapping prefers punctuation boundaries", () => {
+    const page = buildGlassesPage({
+      state: startLiveGlasses(null),
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: [
+        {
+          id: "semantic-1",
+          time: "00:00:01",
+          text: "The answer is batch normalization. It uses mean and variance, then it learns scale and shift?",
+          partial: true,
+        },
+      ],
+    });
+    const transcript = page.containers.find((container) => container.kind === "text" && container.name === "transcript");
+    expect(transcript?.kind).toBe("text");
+    if (transcript?.kind === "text") {
+      const lines = transcript.content.split("\n");
+      expect(lines).toHaveLength(3);
+      expect(transcript.content).toContain("normalization.\n");
+      expect(transcript.content).toContain("variance,\n");
+      expect(transcript.content).not.toContain("...");
+      for (const line of lines) {
+        expect(line.length).toBeLessThanOrEqual(GLASS_TRANSCRIPT_LINE_CHARS);
+      }
+    }
+  });
+
 
   test("menu layout uses the official ListContainer and keeps transcript visible below it", () => {
     const state = { ...startLiveGlasses(TEST_CUES[0].id), view: "menu" as const, selectedIndex: 0 };

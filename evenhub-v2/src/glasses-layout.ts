@@ -42,7 +42,7 @@ export type GlassPageSpec = {
 export const G2_WIDTH = 576;
 export const G2_HEIGHT = 288;
 export const GLASS_TRANSCRIPT_MAX_LINES = 3;
-export const GLASS_TRANSCRIPT_LINE_CHARS = 40;
+export const GLASS_TRANSCRIPT_LINE_CHARS = 48;
 export const GLASS_TRANSCRIPT_ID = 3;
 export const GLASS_TRANSCRIPT_NAME = "transcript";
 
@@ -75,10 +75,59 @@ function cleanText(value: string, maxChars: number): string {
   return `${compact.slice(0, maxChars - 3).trimEnd()}...`;
 }
 
+function wrapSubtitleText(value: string, maxChars: number): string[] {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return [];
+  const lines: string[] = [];
+  let current = "";
+
+  function shouldBreakAtBoundary(line: string): boolean {
+    if (/[.!?。？！]$/.test(line)) return line.length >= 14;
+    if (/[,;:，；：]$/.test(line)) return line.length >= 24;
+    return false;
+  }
+
+  for (const token of compact.split(" ")) {
+    if (token.length > maxChars) {
+      if (current) {
+        lines.push(current);
+        current = "";
+      }
+      for (let index = 0; index < token.length; index += maxChars) {
+        lines.push(token.slice(index, index + maxChars));
+      }
+      continue;
+    }
+
+    if (!current) {
+      current = token;
+      continue;
+    }
+
+    const next = `${current} ${token}`;
+    if (next.length <= maxChars) {
+      current = next;
+    } else {
+      lines.push(current);
+      current = token;
+    }
+
+    if (shouldBreakAtBoundary(current)) {
+      lines.push(current);
+      current = "";
+    }
+  }
+
+  if (current) lines.push(current);
+  return lines;
+}
+
 export function buildGlassTranscriptContent(lines: TranscriptLine[]): string {
-  const content = lines
+  const subtitleText = lines
+    .map((line) => `${line.partial ? "~" : ""}${line.text}`)
+    .join(" ");
+  const content = wrapSubtitleText(subtitleText, GLASS_TRANSCRIPT_LINE_CHARS)
     .slice(-GLASS_TRANSCRIPT_MAX_LINES)
-    .map((line) => cleanText(`${line.partial ? "~" : ""}${line.text}`, GLASS_TRANSCRIPT_LINE_CHARS))
     .join("\n");
   return content || "Listening...";
 }

@@ -49,7 +49,7 @@ describe("glass renderer", () => {
     expect(bridge.updateTextContainer).toHaveBeenCalledTimes(1);
     expect(bridge.updateTextContainer).toHaveBeenCalledWith(expect.objectContaining({
       name: "transcript",
-      content: expect.stringContaining("This line should update only"),
+      content: expect.stringContaining("should update only"),
     }));
   });
 
