@@ -71,11 +71,16 @@ function sanitizeCodeLikeOutput(text: string): string {
   const lines = stripCodeFences(text)
     .replace(/\r\n/g, "\n")
     .split("\n")
-    .map((line) => line.replace(/\s+$/g, ""))
+    .map((line) => line
+      .replace(/^\s{0,3}#{1,6}\s+/, "")
+      .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+      .replace(/\*([^\s*\n][^*\n]*?[^\s*\n])\*/g, "$1")
+      .replace(/\s+$/g, ""))
     .filter((line) => line.trim());
 
   const usefulLines = lines.filter((line, index) => {
     const trimmed = line.trim();
+    if (/^-{3,}$/.test(trimmed)) return false;
     if (/^(analysis|reasoning|explanation|note|context)\s*[:-]/i.test(trimmed)) return false;
     if (index === 0 && /^(sure|yeah|okay|ok|absolutely|of course)[.!]*$/i.test(trimmed)) return false;
     return true;
@@ -93,9 +98,11 @@ function sanitizeCodeLikeOutput(text: string): string {
 export interface SayNextOutputPostprocessOptions {
   answerIntent?: AnswerIntent;
   answerOutputShape?: AnswerPlanOutputShape;
+  preserveStructuredOutput?: boolean;
 }
 
 function shouldPreserveStructuredNonCodeOutput(options?: SayNextOutputPostprocessOptions): boolean {
+  if (options?.preserveStructuredOutput) return true;
   if (options?.answerOutputShape) return options.answerOutputShape === "debug_steps";
   return options?.answerIntent === "interview_debug_solution";
 }
@@ -104,6 +111,8 @@ export function sanitizeSayNextOutput(text: string, options: SayNextOutputPostpr
   let cleaned = String(text ?? "")
     .replace(/```[a-zA-Z0-9_+-]*\s*\n?/g, "")
     .replace(/```/g, "")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/\*([^\s*\n][^*\n]*?[^\s*\n])\*/g, "$1")
     .trim();
 
   if (/^\s*\{/.test(cleaned)) {
@@ -142,6 +151,8 @@ export function sanitizeSayNextOutput(text: string, options: SayNextOutputPostpr
     || (options.answerOutputShape === "code_with_explanation" && /\n/.test(cleaned) && /\b(class|def|return|function|method|self\.|this\.|constructor)\b/i.test(cleaned))) {
     return sanitizeCodeLikeOutput(cleaned);
   }
+
+  cleaned = cleaned.replace(/`([^`\n]+)`/g, "$1");
 
   const lines = cleaned
     .split("\n")
@@ -1050,7 +1061,7 @@ function extractJsonObject(text: string): string | null {
 
 export function extractOutputField(text: string): string | null {
   const match = text.match(/"output"\s*:\s*"((?:\\.|[^"\\])*)/i);
-  if (!match?.[1]) return null;
+  if (!match) return null;
 
   try {
     return JSON.parse(`"${match[1].replace(/\\?$/, "")}"`);

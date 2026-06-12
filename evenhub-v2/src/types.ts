@@ -11,6 +11,7 @@ export type AiCue = {
   id: string;
   category: CueCategory;
   title: string;
+  g2Title?: string;
   output: string;
   createdAt: string;
   source: "manual" | "auto";
@@ -28,7 +29,7 @@ export type PrenoteFile = {
   id: string;
   name: string;
   sizeBytes: number;
-  status: "mock_ready" | "pending" | "error";
+  status: "ready" | "pending" | "error";
 };
 
 export type TranscriptLine = {

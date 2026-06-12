@@ -167,6 +167,27 @@ pre {
   padding-bottom: 10px;
 }
 
+.record-row {
+  position: relative;
+  min-height: 74px;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.record-delete-button {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 82px;
+  border-radius: 0 8px 8px 0;
+  background: #d7473f;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 430;
+  z-index: 0;
+}
+
 .record-card,
 .conversation-title-card,
 .summary-card,
@@ -178,6 +199,8 @@ pre {
 }
 
 .record-card {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 34px;
   align-items: center;
@@ -186,7 +209,12 @@ pre {
   min-height: 74px;
   padding: 13px 11px 12px 18px;
   text-align: left;
-  transition: transform 150ms ease, background 150ms ease;
+  transition: transform 170ms ease, background 150ms ease;
+  touch-action: pan-y;
+}
+
+.record-row.swiped .record-card {
+  transform: translateX(-86px);
 }
 
 .record-card:active,
@@ -214,6 +242,11 @@ pre {
   color: #888;
   font-size: 13px;
   line-height: 1.25;
+}
+
+.conversation-title-card .connection-status {
+  color: #666;
+  font-size: 12px;
 }
 
 .prenote-dock {

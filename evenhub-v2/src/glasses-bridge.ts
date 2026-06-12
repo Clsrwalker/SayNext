@@ -3,15 +3,24 @@ import {
   ListItemContainerProperty,
   ListContainerProperty,
   TextContainerProperty,
+  TextContainerUpgrade,
   waitForEvenAppBridge,
   type EvenAppBridge,
   type EvenHubEvent,
 } from "@evenrealities/even_hub_sdk";
 import type { GlassListContainerSpec, GlassPageSpec, GlassTextContainerSpec } from "./glasses-layout";
 
+export type GlassTextContainerUpdateSpec = {
+  id: number;
+  name: string;
+  content: string;
+};
+
 export type GlassBridgeHandle = {
   bridge: EvenAppBridge;
   render(page: GlassPageSpec): Promise<void>;
+  updateTextContainer(spec: GlassTextContainerUpdateSpec): Promise<boolean>;
+  setAudioEnabled(enabled: boolean): Promise<boolean>;
 };
 
 function textContainer(spec: GlassTextContainerSpec): TextContainerProperty {
@@ -113,6 +122,23 @@ export async function connectGlassBridge(params: {
     await bridge.createStartUpPageContainer(container);
   }
 
+  async function updateTextContainer(spec: GlassTextContainerUpdateSpec): Promise<boolean> {
+    if (!started) return false;
+    const content = spec.content.slice(0, 2000);
+    return bridge.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: spec.id,
+      containerName: spec.name,
+      contentOffset: 0,
+      contentLength: content.length,
+      content,
+    }));
+  }
+
   await render(params.initialPage);
-  return { bridge, render };
+  return {
+    bridge,
+    render,
+    updateTextContainer,
+    setAudioEnabled: (enabled: boolean) => bridge.audioControl(enabled),
+  };
 }

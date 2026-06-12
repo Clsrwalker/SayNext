@@ -32,6 +32,10 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function makeDeepgramUrl(): string {
   const sampleRate = envNumber("EVENHUB_STT_SAMPLE_RATE", 16000);
   const endpointing = envNumber("EVENHUB_STT_ENDPOINTING_MS", 300);
@@ -118,6 +122,7 @@ export class DeepgramEvenHubSttAdapter implements EvenHubSttAdapter {
   async stop(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: "Finalize" }));
+      await delay(envNumber("EVENHUB_STT_FINALIZE_WAIT_MS", 900));
       this.ws.close();
     }
     this.queue = [];

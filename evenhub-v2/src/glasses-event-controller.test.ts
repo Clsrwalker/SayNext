@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { buildMenuItems, startLiveGlasses } from "./glasses-state";
-import { MOCK_CUES, MOCK_PRENOTES } from "./mock-data";
+import { TEST_CUES, TEST_PRENOTES } from "./test-fixtures";
 import { decideGlassEvent } from "./glasses-event-controller";
 
 describe("decideGlassEvent", () => {
   test("does not request a render on menu scroll, so the official ListContainer keeps its internal scroll state", () => {
-    const menuItems = buildMenuItems({ prenote: MOCK_PRENOTES[0], cues: MOCK_CUES });
-    const menuState = { ...startLiveGlasses(MOCK_CUES[0].id), view: "menu" as const, selectedIndex: 0 };
+    const menuItems = buildMenuItems({ prenote: TEST_PRENOTES[0], cues: TEST_CUES });
+    const menuState = { ...startLiveGlasses(TEST_CUES[0].id), view: "menu" as const, selectedIndex: 0 };
 
     const decision = decideGlassEvent({
       state: menuState,
@@ -22,8 +22,8 @@ describe("decideGlassEvent", () => {
   });
 
   test("uses the official list selection when opening a cue detail", () => {
-    const menuItems = buildMenuItems({ prenote: MOCK_PRENOTES[0], cues: MOCK_CUES });
-    const menuState = { ...startLiveGlasses(MOCK_CUES[0].id), view: "menu" as const, selectedIndex: 0 };
+    const menuItems = buildMenuItems({ prenote: TEST_PRENOTES[0], cues: TEST_CUES });
+    const menuState = { ...startLiveGlasses(TEST_CUES[0].id), view: "menu" as const, selectedIndex: 0 };
 
     const decision = decideGlassEvent({
       state: menuState,
@@ -34,6 +34,6 @@ describe("decideGlassEvent", () => {
 
     expect(decision.shouldRender).toBe(true);
     expect(decision.state.view).toBe("cue_detail");
-    expect(decision.state.activeCueId).toBe(MOCK_CUES[2].id);
+    expect(decision.state.activeCueId).toBe(TEST_CUES[2].id);
   });
 });

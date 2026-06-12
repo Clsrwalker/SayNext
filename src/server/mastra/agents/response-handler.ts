@@ -18,7 +18,10 @@ import {
   generateAnswerPlanShadow,
 } from '../../saynext/answer-planner-runtime';
 import { resolvePlannerMemoryRetrievalDecision } from '../../saynext/planner-memory-policy';
-import { sayNextConversationStateInstructions } from '../../saynext/prompts';
+import {
+  buildSayNextConversationStateSeedInstructions,
+  isSayNextSingleLlmMode,
+} from '../../saynext/prompts';
 import { evenHubConversationStateInstructions } from '../../evenhub/prompts';
 import { LLM_PROVIDER } from '../../saynext/model-runtime';
 
@@ -898,7 +901,9 @@ export class MergeResponseHandler {
     this.promptPreset = promptPreset;
     const seedInstructions = promptPreset === "evenhub"
       ? evenHubConversationStateInstructions
-      : sayNextConversationStateInstructions;
+      : buildSayNextConversationStateSeedInstructions({
+        singleLlm: isSayNextSingleLlmMode(),
+      });
     if (isOpenAiConversationStateEnabled(process.env.LLM_PROVIDER || "openai")) {
       this.openAiConversationSession.warmup(Number(process.env.OPENAI_CONVERSATION_WARMUP_TIMEOUT_MS || 8000), seedInstructions)
         .then((conversationId) => this.session.logger.info(`OpenAI conversation state warmed up: ${conversationId}`))
@@ -1030,7 +1035,11 @@ export class MergeResponseHandler {
       prenoteQuery,
       prenoteRetrievalMode,
     );
-    const answerPlannerMetadata = await generateAnswerPlanShadow({
+    const singleLlmMode = this.promptPreset === "saynext"
+      && isSayNextSingleLlmMode()
+      && isOpenAiConversationStateEnabled(LLM_PROVIDER)
+      && reason !== "timeout";
+    const answerPlannerMetadata = singleLlmMode ? undefined : await generateAnswerPlanShadow({
       activeScene: promptMode,
       sceneLocked: Boolean(activeScenePromptModeOverride),
       latestUtterance: text,
@@ -1052,11 +1061,13 @@ export class MergeResponseHandler {
       hasPreparedNote: Boolean(activePrenoteContext.trim()),
       hasPersonalMemoryCandidates: false,
     });
-    const memoryRetrievalDecision = resolvePlannerMemoryRetrievalDecision({
-      isClassroomMode,
-      fallbackQuery: memoryQuery,
-      answerPlannerMetadata,
-    });
+    const memoryRetrievalDecision = singleLlmMode
+      ? { shouldRetrieve: false, query: "", reason: "single_llm:startup_memory_seed" }
+      : resolvePlannerMemoryRetrievalDecision({
+        isClassroomMode,
+        fallbackQuery: memoryQuery,
+        answerPlannerMetadata,
+      });
     const relevantPersonalMemoryContext = memoryRetrievalDecision.shouldRetrieve
       ? await conversationLogger.getRelevantPersonalMemoryContextAsync(
         this.userId,
@@ -2124,7 +2135,10 @@ export class MergeResponseHandler {
         telepromptNeed === "none" ? "fast" : "semantic",
       );
       const manualMemoryQuery = [transcriptContext.text, sourceText].filter(Boolean).join("\n");
-      const answerPlannerMetadata = await generateAnswerPlanShadow({
+      const singleLlmMode = this.promptPreset === "saynext"
+        && isSayNextSingleLlmMode()
+        && isOpenAiConversationStateEnabled(LLM_PROVIDER);
+      const answerPlannerMetadata = singleLlmMode ? undefined : await generateAnswerPlanShadow({
         activeScene: promptMode,
         sceneLocked: Boolean(activeScenePromptModeOverride),
         latestUtterance: latestText,
@@ -2143,11 +2157,13 @@ export class MergeResponseHandler {
         hasPreparedNote: Boolean(activePrenoteContext.trim()),
         hasPersonalMemoryCandidates: false,
       });
-      const memoryRetrievalDecision = resolvePlannerMemoryRetrievalDecision({
-        isClassroomMode,
-        fallbackQuery: manualMemoryQuery,
-        answerPlannerMetadata,
-      });
+      const memoryRetrievalDecision = singleLlmMode
+        ? { shouldRetrieve: false, query: "", reason: "single_llm:startup_memory_seed" }
+        : resolvePlannerMemoryRetrievalDecision({
+          isClassroomMode,
+          fallbackQuery: manualMemoryQuery,
+          answerPlannerMetadata,
+        });
       const relevantPersonalMemoryContext = memoryRetrievalDecision.shouldRetrieve
         ? await conversationLogger.getRelevantPersonalMemoryContextAsync(
           this.userId,

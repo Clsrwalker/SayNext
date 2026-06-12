@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { finalizeSayNextOutput, processConversation, resolveOpenAiModelConfig, routeSayNextProcess, sanitizeSayNextOutput } from "../mastra/agents/initial-agent";
+import { extractOutputField, finalizeSayNextOutput, processConversation, resolveOpenAiModelConfig, routeSayNextProcess, sanitizeSayNextOutput } from "../mastra/agents/initial-agent";
 import { Action } from "../mastra/types";
 import { getImmediateDecision } from "../saynext/immediate-rules";
 import { makeTelepromptOpeningLine } from "../teleprompt/teleprompt-runtime";
@@ -32,6 +32,10 @@ function expectImmediateHint(
 test("removes you-can-say prefix", () => {
   expect(sanitizeSayNextOutput("You can say: I'm leaning toward co-op, but I'm still checking the deadline."))
     .toBe("I'm leaning toward co-op, but I'm still checking the deadline.");
+});
+
+test("extracts empty output from single LLM JSON without leaking metadata", () => {
+  expect(extractOutputField('{"task":"no_reply","depth":"minimal","usedMemory":false,"reason":"background speech","output":""}')).toBe("");
 });
 
 test("keeps only first option", () => {
@@ -246,7 +250,7 @@ test("keeps coding interview snippets instead of truncating to the first sentenc
 test("resolves separate live and long OpenAI models", () => {
   expect(resolveOpenAiModelConfig({} as NodeJS.ProcessEnv)).toEqual({
     liveModel: "gpt-5.4-nano",
-    longModel: "gpt-5.4-mini",
+    longModel: "gpt-5.4-nano",
   });
 
   expect(resolveOpenAiModelConfig({
@@ -777,6 +781,91 @@ test("keeps delivery photo support wording as Xiang's line instead of support ro
   expect(output).toContain("missing-delivery case");
   expect(output.toLowerCase()).not.toContain("provide your order number");
   expect(output.toLowerCase()).not.toContain("assist further");
+});
+
+test("keeps interview speaker labels as direct questions in selected interview mode", () => {
+  const output = finalizeSayNextOutput(
+    "Before Dalhousie, I studied Computer Science at Acadia University.",
+    "Interviewer: Where did you study before Dalhousie?",
+    "english",
+    undefined,
+    "interview",
+  );
+
+  expect(output).toBe("Before Dalhousie, I studied Computer Science at Acadia University.");
+  expect(output.toLowerCase()).not.toContain("no action needed");
+  expect(output.toLowerCase()).not.toContain("narrowing the design choice");
+});
+
+test("keeps classroom speaker labels as direct class questions in selected classroom mode", () => {
+  const output = finalizeSayNextOutput(
+    "Dropout reduces overfitting by randomly turning off some neurons during training, so the model cannot rely too much on one path and has to learn more robust patterns.",
+    "Teacher: Why does dropout reduce overfitting in neural networks?",
+    "english",
+    undefined,
+    "classroom",
+  );
+
+  expect(output).toContain("Dropout reduces overfitting");
+  expect(output.toLowerCase()).not.toContain("clarify");
+  expect(output.toLowerCase()).not.toContain("no action needed");
+});
+
+test("single LLM postprocess preserves structured project answers", () => {
+  const output = finalizeSayNextOutput(
+    [
+      "Yeah - one cloud project I built is **JobLens AI**.",
+      "AWS services:",
+      "- **S3** for frontend assets and resume files.",
+      "- **API Gateway** and **Lambda** for the backend API.",
+      "- **DynamoDB** for structured app data.",
+    ].join("\n"),
+    "Interviewer: Tell me about one cloud project you built and what AWS services you used.",
+    "english",
+    undefined,
+    "interview",
+    { preserveStructuredOutput: true },
+  );
+
+  expect(output).toContain("JobLens AI");
+  expect(output).toContain("S3");
+  expect(output).toContain("API Gateway");
+  expect(output).toContain("Lambda");
+  expect(output).toContain("DynamoDB");
+  expect(output.toLowerCase()).not.toContain("times times");
+});
+
+test("single LLM postprocess removes markdown emphasis without changing content", () => {
+  const output = finalizeSayNextOutput(
+    "I used **JobLens AI** with **S3**, **Lambda**, and **DynamoDB**.",
+    "Interviewer: What AWS services did you use?",
+    "english",
+    undefined,
+    "interview",
+    { preserveStructuredOutput: true },
+  );
+
+  expect(output).toBe("I used JobLens AI with S3, Lambda, and DynamoDB.");
+});
+
+test("single LLM postprocess preserves TypeScript template literals in code", () => {
+  const output = finalizeSayNextOutput(
+    [
+      "Code:",
+      "class LibraryError extends Error {",
+      "  constructor(bookId: string) {",
+      "    super(`Book ${bookId} already exists`);",
+      "  }",
+      "}",
+    ].join("\n"),
+    "Interviewer: Can you write the code for the library design?",
+    "english",
+    undefined,
+    "interview",
+    { preserveStructuredOutput: true },
+  );
+
+  expect(output).toContain("super(`Book ${bookId} already exists`);");
 });
 
 test("keeps JobLens database answer on supported AWS data stores", () => {

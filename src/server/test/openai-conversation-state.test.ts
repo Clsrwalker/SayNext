@@ -115,7 +115,7 @@ test("conversation create payload seeds fixed instructions once", () => {
 
 test("conversation payload keeps history and fixed instructions out of the per-turn request", () => {
   const payload = buildOpenAiConversationPayload({
-    model: "gpt-4.1-mini",
+    model: "gpt-5.4-nano",
     conversationId: "conv_test",
     latestTranscript: "What project are you proud of?",
     inputOptions: {
@@ -138,7 +138,7 @@ test("conversation payload keeps history and fixed instructions out of the per-t
 
 test("conversation payload includes relevant support context when provided", () => {
   const payload = buildOpenAiConversationPayload({
-    model: "gpt-4.1-mini",
+    model: "gpt-5.4-nano",
     conversationId: "conv_test",
     latestTranscript: "What program are you in?",
     inputOptions: {

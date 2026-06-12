@@ -1,4 +1,4 @@
-const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
+const DEFAULT_OPENAI_MODEL = "gpt-5.4-nano";
 const DEFAULT_TIMEOUT_MS = 180000;
 
 export interface OpenAiJsonGenerateOptions {

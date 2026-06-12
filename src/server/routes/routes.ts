@@ -3,6 +3,7 @@
  */
 
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { getHealth } from "../api/health";
 import { insightStream } from "../api/insights";
 import { getSettings, updateSettings } from "../api/settings";
@@ -29,6 +30,7 @@ import { getTranscriptExport, listTranscriptExports, summarizeTranscriptExport }
 import { createSceneProfile, deleteSceneProfile, getSceneProfile, listSceneProfiles, updateSceneProfile } from "../api/scene-profiles";
 import { createPersonalMemory, deletePersonalMemory, listPersonalMemories, searchPersonalMemories, updatePersonalMemory } from "../api/personal-memories";
 import { replaySayNextApi } from "../api/debug-saynext-replay";
+import { deleteEvenHubV2Conversation, getEvenHubV2Bootstrap, getEvenHubV2Conversation, listEvenHubV2Conversations } from "../api/evenhub-v2";
 import {
   extractSessionMemoryCandidatesApi,
   deleteSessionMemoryCandidate,
@@ -39,6 +41,12 @@ import {
 } from "../api/session-memory-candidates";
 
 export const api = new Hono();
+
+api.use("/evenhub/v2/*", cors({
+  origin: "*",
+  allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+  allowHeaders: ["Content-Type", "Authorization", "X-EvenHub-Token"],
+}));
 
 // Health
 api.get("/health", getHealth);
@@ -107,3 +115,9 @@ api.delete("/session-memory-candidates/:id", deleteSessionMemoryCandidate);
 
 // Local replay/debug endpoint. The handler returns 404 unless explicitly enabled.
 api.post("/debug/saynext-replay", replaySayNextApi);
+
+// EvenHub v2 app bootstrap/history. The websocket lives at /api/evenhub/v2/ws.
+api.get("/evenhub/v2/bootstrap", getEvenHubV2Bootstrap);
+api.get("/evenhub/v2/conversations", listEvenHubV2Conversations);
+api.get("/evenhub/v2/conversations/:id", getEvenHubV2Conversation);
+api.delete("/evenhub/v2/conversations/:id", deleteEvenHubV2Conversation);

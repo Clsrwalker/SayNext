@@ -57,7 +57,7 @@ export function buildMenuItems(params: {
       id: cue.id,
       type: "cue",
       cueId: cue.id,
-      label: truncateListItem(formatG2CueTitle(cue.category, cue.title)),
+      label: truncateListItem(formatG2CueTitle(cue.category, cue.g2Title || cue.title)),
     });
   }
   return items;
@@ -82,7 +82,7 @@ export function applyGlassGesture(
     if (gesture === "double_click") {
       return { state: { ...state, view: "exit_confirm" }, effect: "exit_confirm" };
     }
-    if (gesture === "click" || gesture === "foreground_enter") {
+    if (gesture === "click") {
       return { state: { ...state, view: "main" }, effect: "none" };
     }
     return { state, effect: "none" };
@@ -99,9 +99,7 @@ export function applyGlassGesture(
         effect: "none",
       };
     }
-    if (gesture === "double_click") {
-      return { state, effect: "manual_generate" };
-    }
+    if (gesture === "double_click") return { state, effect: "none" };
     return { state, effect: "none" };
   }
 

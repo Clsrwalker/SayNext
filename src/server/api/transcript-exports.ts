@@ -1,7 +1,7 @@
 import type { Context } from "hono";
 import { conversationLogger, type ConversationEventRecord, type ConversationSampleRecord } from "../data/conversation-logger";
 
-const SUMMARY_MODEL = process.env.TRANSCRIPT_SUMMARY_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const SUMMARY_MODEL = process.env.TRANSCRIPT_SUMMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-nano";
 
 function readJsonBody(c: Context): Promise<Record<string, any>> {
   return c.req.json().catch(() => ({}));

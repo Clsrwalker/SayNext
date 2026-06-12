@@ -16,19 +16,24 @@ import {
   X,
 } from "lucide-react";
 import { PHONE_CUE_LABEL } from "./cue-icons";
+import {
+  conversationStartPayload,
+  createClientMessage,
+  cueFromServer,
+  deleteConversationRecord,
+  loadBootstrap,
+  loadConversationDetail,
+  partialTranscriptFromServer,
+  transcriptFromServer,
+  wsUrl,
+  type EvenHubV2ServerMessage,
+} from "./evenhub-v2-client";
 import { normalizeGlassGesture, readGlassListSelection, type GlassListSelection } from "./events";
 import { decideGlassEvent } from "./glasses-event-controller";
 import { connectGlassBridge, type GlassBridgeHandle } from "./glasses-bridge";
 import { buildGlassesPage } from "./glasses-layout";
-import { buildMenuItems, makeAutoCueVisibility, startLiveGlasses } from "./glasses-state";
-import {
-  DEFAULT_SETTINGS,
-  MOCK_CUES,
-  MOCK_PRENOTES,
-  MOCK_RECORDS,
-  MOCK_TRANSCRIPT,
-  makeManualCue,
-} from "./mock-data";
+import { buildMenuItems, INITIAL_GLASS_STATE, makeAutoCueVisibility, startLiveGlasses } from "./glasses-state";
+import { removeRecordById, replaceRecordInPlace } from "./record-list";
 import type {
   AiCue,
   ConversationRecord,
@@ -41,6 +46,17 @@ import type {
   PrenoteFile,
   TranscriptLine,
 } from "./types";
+
+const DEFAULT_SETTINGS: ConversationSettings = {
+  voiceInput: "glasses",
+  language: "english",
+  glassContent: {
+    aiCue: true,
+    transcript: true,
+  },
+  autoPopup: true,
+  cueDuration: 10000,
+};
 
 type Screen = "home" | "settings" | "noteEditor" | "live" | "history" | "conversationSettings";
 
@@ -72,46 +88,132 @@ function selectedPrenote(prenotes: Prenote[]): Prenote | null {
   };
 }
 
-function transcriptText(lines: TranscriptLine[]): string {
-  return lines.map((line) => line.text).join(" ");
-}
-
 export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
   const [settings, setSettings] = useState<ConversationSettings>(DEFAULT_SETTINGS);
-  const [records, setRecords] = useState<ConversationRecord[]>(MOCK_RECORDS);
-  const [prenotes, setPrenotes] = useState<Prenote[]>(MOCK_PRENOTES);
-  const [cues, setCues] = useState<AiCue[]>(MOCK_CUES);
-  const [transcript, setTranscript] = useState<TranscriptLine[]>(MOCK_TRANSCRIPT);
+  const [records, setRecords] = useState<ConversationRecord[]>([]);
+  const [prenotes, setPrenotes] = useState<Prenote[]>([]);
+  const [cues, setCues] = useState<AiCue[]>([]);
+  const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [liveTab, setLiveTab] = useState<ConversationTab>("transcript");
   const [historyTab, setHistoryTab] = useState<ConversationTab>("summary");
-  const [activeRecordId, setActiveRecordId] = useState(MOCK_RECORDS[0].id);
+  const [activeRecordId, setActiveRecordId] = useState<string>("");
   const [noteDraft, setNoteDraft] = useState<Prenote | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(24);
-  const [glassState, setGlassState] = useState<GlassRuntimeState>(() => startLiveGlasses(null));
+  const [glassState, setGlassState] = useState<GlassRuntimeState>(() => INITIAL_GLASS_STATE);
+  const [connectionStatus, setConnectionStatus] = useState("offline");
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [swipedRecordId, setSwipedRecordId] = useState<string | null>(null);
   const bridgeRef = useRef<GlassBridgeHandle | null>(null);
   const connectingBridgeRef = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
+  const isListeningRef = useRef(false);
+  const pendingStartPayloadRef = useRef<unknown | null>(null);
+  const pendingAudioStartRef = useRef(false);
+  const recordPointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const skipNextRecordClickRef = useRef(false);
 
   const activePrenote = useMemo(() => selectedPrenote(prenotes), [prenotes]);
-  const activeRecord = records.find((record) => record.id === activeRecordId) || records[0];
+  const activeRecord = records.find((record) => record.id === activeRecordId) || records[0] || null;
   const glassStateRef = useRef(glassState);
   const cuesRef = useRef(cues);
   const transcriptRef = useRef(transcript);
   const activePrenoteRef = useRef(activePrenote);
+  const settingsRef = useRef(settings);
   const glassPage = useMemo(() => buildGlassesPage({
     state: glassState,
     cues,
     prenote: activePrenote,
     transcript,
   }), [activePrenote, cues, glassState, transcript]);
+  const glassPageRef = useRef(glassPage);
 
   useEffect(() => {
+    glassPageRef.current = glassPage;
     glassStateRef.current = glassState;
     cuesRef.current = cues;
     transcriptRef.current = transcript;
     activePrenoteRef.current = activePrenote;
-  }, [activePrenote, cues, glassState, transcript]);
+    settingsRef.current = settings;
+    activeConversationIdRef.current = activeConversationId;
+    isListeningRef.current = isListening;
+  }, [activeConversationId, activePrenote, cues, glassPage, glassState, isListening, settings, transcript]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadBootstrap()
+      .then((bootstrap) => {
+        if (cancelled) return;
+        if (bootstrap.settings) {
+          setSettings((current) => ({
+            ...current,
+            ...bootstrap.settings,
+            glassContent: {
+              ...current.glassContent,
+              ...bootstrap.settings?.glassContent,
+            },
+          }));
+        }
+        setPrenotes(bootstrap.prenotes);
+        setRecords(bootstrap.records);
+        setActiveRecordId(bootstrap.records[0]?.id || "");
+      })
+      .catch(() => {
+        if (!cancelled) setConnectionStatus("bootstrap_failed");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function connect() {
+      if (disposed) return;
+      setConnectionStatus("connecting");
+      const ws = new WebSocket(wsUrl());
+      wsRef.current = ws;
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => {
+        if (disposed) return;
+        setConnectionStatus("connected");
+        ws.send(JSON.stringify(createClientMessage("hello", { settings: {} })));
+        if (pendingStartPayloadRef.current) {
+          const payload = pendingStartPayloadRef.current;
+          pendingStartPayloadRef.current = null;
+          ws.send(JSON.stringify(createClientMessage("conversation_start", payload, activeConversationIdRef.current)));
+        }
+      };
+      ws.onmessage = (event) => {
+        if (typeof event.data !== "string") return;
+        try {
+          handleServerMessage(JSON.parse(event.data) as EvenHubV2ServerMessage);
+        } catch {
+          setConnectionStatus("message_error");
+        }
+      };
+      ws.onerror = () => setConnectionStatus("ws_error");
+      ws.onclose = () => {
+        if (wsRef.current === ws) wsRef.current = null;
+        if (disposed) return;
+        setConnectionStatus("offline");
+        reconnectTimer = setTimeout(connect, 2000);
+      };
+    }
+
+    connect();
+    return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws?.close();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isListening) return;
@@ -132,9 +234,20 @@ export default function App() {
         const gesture = normalizeGlassGesture(event);
         if (gesture) handleGlassGesture(gesture, readGlassListSelection(event));
       },
-    })
+      onAudio: (pcm) => {
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN && activeConversationIdRef.current && isListeningRef.current) {
+          ws.send(pcm);
+        }
+      },
+      })
       .then((bridge) => {
         bridgeRef.current = bridge;
+        if (isListeningRef.current) {
+          void bridge.setAudioEnabled(true).then((enabled) => {
+            if (!enabled) setConnectionStatus("g2_mic_failed");
+          }).catch(() => setConnectionStatus("g2_mic_error"));
+        }
       })
       .catch(() => undefined)
       .finally(() => {
@@ -151,6 +264,125 @@ export default function App() {
   function commitGlassState(nextState: GlassRuntimeState) {
     glassStateRef.current = nextState;
     setGlassState(nextState);
+  }
+
+  function sendWs(type: string, payload: unknown = {}) {
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN) {
+      setConnectionStatus("offline");
+      return false;
+    }
+    ws.send(JSON.stringify(createClientMessage(type, payload, activeConversationIdRef.current)));
+    return true;
+  }
+
+  function setGlassAudioEnabled(enabled: boolean) {
+    const bridge = bridgeRef.current;
+    if (!bridge) return;
+    void bridge.setAudioEnabled(enabled).then((ok) => {
+      if (!ok && enabled) setConnectionStatus("g2_mic_failed");
+    }).catch(() => {
+      if (enabled) setConnectionStatus("g2_mic_error");
+    });
+  }
+
+  function handleServerMessage(message: EvenHubV2ServerMessage) {
+    if (message.type === "ready") {
+      setConnectionStatus("ready");
+      return;
+    }
+    if (message.type === "conversation_started") {
+      const id = message.payload?.conversationId || message.conversationId || null;
+      setActiveConversationId(id);
+      activeConversationIdRef.current = id;
+      setConnectionStatus("listening_ready");
+      if (pendingAudioStartRef.current) {
+        pendingAudioStartRef.current = false;
+        window.setTimeout(() => {
+          sendWs("audio_start", { codec: "linear16", sampleRate: 16000, channels: 1 });
+        }, 0);
+      }
+      return;
+    }
+    if (message.type === "audio_status") {
+      setConnectionStatus(message.payload?.audioStatus || "audio");
+      return;
+    }
+    if (message.type === "transcript_partial") {
+      const partial = partialTranscriptFromServer(message);
+      setTranscript((current) => {
+        const withoutPartial = current.filter((line) => !line.partial);
+        const next = partial.text ? [...withoutPartial, partial] : withoutPartial;
+        transcriptRef.current = next;
+        return next;
+      });
+      return;
+    }
+    if (message.type === "transcript_final") {
+      const line = transcriptFromServer(message);
+      setTranscript((current) => {
+        const withoutPartial = current.filter((item) => !item.partial);
+        if (withoutPartial.some((item) => item.id === line.id)) {
+          const next = withoutPartial.map((item) => item.id === line.id ? line : item);
+          transcriptRef.current = next;
+          return next;
+        }
+        const next = [...withoutPartial, line];
+        transcriptRef.current = next;
+        return next;
+      });
+      return;
+    }
+    if (message.type === "cue_created") {
+      const cue = cueFromServer(message);
+      setCues((current) => {
+        if (current.some((item) => item.id === cue.id)) return current;
+        const next = [cue, ...current];
+        cuesRef.current = next;
+        return next;
+      });
+      setGlassState((current) => {
+        const next = current.view === "main"
+          ? {
+              ...current,
+              latestCueId: cue.id,
+              activeCueId: cue.id,
+              autoCueVisibleUntil: makeAutoCueVisibility(settingsRef.current.cueDuration, Date.now()),
+            }
+          : {
+              ...current,
+              latestCueId: cue.id,
+              activeCueId: current.activeCueId || cue.id,
+              autoCueVisibleUntil: makeAutoCueVisibility(settingsRef.current.cueDuration, Date.now()),
+            };
+        glassStateRef.current = next;
+        return next;
+      });
+      return;
+    }
+    if (message.type === "conversation_saved") {
+      const id = message.payload?.conversationId || message.conversationId || activeConversationIdRef.current;
+      setIsListening(false);
+      setGlassAudioEnabled(false);
+      setActiveConversationId(null);
+      activeConversationIdRef.current = null;
+      if (id) {
+        void loadConversationDetail(id)
+          .then((record) => {
+            setRecords((current) => [record, ...current.filter((item) => item.id !== record.id)]);
+            setActiveRecordId(record.id);
+            setHistoryTab("summary");
+            setScreen("history");
+          })
+          .catch(() => setScreen("home"));
+      } else {
+        setScreen("home");
+      }
+      return;
+    }
+    if (message.type === "error") {
+      setConnectionStatus(message.payload?.code || "error");
+    }
   }
 
   function handleGlassGesture(gesture: GlassGesture, selection: GlassListSelection = { index: null, name: null }) {
@@ -170,64 +402,8 @@ export default function App() {
 
     commitGlassState(decision.state);
     if (decision.effect === "manual_generate") {
-      addManualCue();
+      setConnectionStatus("manual_disabled");
     }
-  }
-
-  function addManualCue() {
-    const cue = makeManualCue(transcriptText(transcriptRef.current));
-    setCues((current) => {
-      const nextCues = [cue, ...current];
-      cuesRef.current = nextCues;
-      return nextCues;
-    });
-    commitGlassState({
-      ...glassStateRef.current,
-      view: "main",
-      latestCueId: cue.id,
-      activeCueId: cue.id,
-      autoCueVisibleUntil: null,
-    });
-  }
-
-  function addMockAutoCue(category: CueCategory) {
-    const titleByCategory: Record<CueCategory, string> = {
-      response: "Possible reply",
-      concept: "New concept",
-      suggestion: "Next step",
-      person: "Speaker note",
-    };
-    const outputByCategory: Record<CueCategory, string> = {
-      response: "I think the direct answer is that it normalizes activations using the batch mean and variance, then learns scale and shift.",
-      concept: "Batch normalization changes training behavior by stabilizing activation distributions across mini-batches.",
-      suggestion: "It may help to mention the training versus inference difference next.",
-      person: "The speaker is explaining the topic from a teaching perspective, not asking for a personal example yet.",
-    };
-    const cue: AiCue = {
-      id: `auto-${category}-${Date.now()}`,
-      category,
-      title: titleByCategory[category],
-      output: outputByCategory[category],
-      createdAt: new Date().toISOString(),
-      source: "auto",
-    };
-    setCues((current) => [cue, ...current]);
-    setGlassState((current) => {
-      if (current.view !== "main") {
-        return {
-          ...current,
-          latestCueId: cue.id,
-          activeCueId: current.activeCueId || cue.id,
-          autoCueVisibleUntil: makeAutoCueVisibility(settings.cueDuration, Date.now()),
-        };
-      }
-      return {
-        ...current,
-        latestCueId: cue.id,
-        activeCueId: cue.id,
-        autoCueVisibleUntil: makeAutoCueVisibility(settings.cueDuration, Date.now()),
-      };
-    });
   }
 
   function togglePrenote(id: string) {
@@ -268,7 +444,7 @@ export default function App() {
         id: `file-${Date.now()}-${next.length}`,
         name: file.name,
         sizeBytes: file.size,
-        status: "mock_ready",
+        status: "ready",
       });
     }
     setNoteDraft({
@@ -279,31 +455,86 @@ export default function App() {
   }
 
   function startConversation() {
+    const payload = conversationStartPayload(settings, activePrenote);
+    const started = sendWs("conversation_start", payload);
+    if (!started) {
+      pendingStartPayloadRef.current = payload;
+      setConnectionStatus("connecting_backend");
+    }
+    pendingAudioStartRef.current = true;
     setIsListening(true);
-    setElapsedSeconds(24);
+    setElapsedSeconds(0);
+    setCues([]);
+    setTranscript([]);
     setGlassState(startLiveGlasses(null));
+    setGlassAudioEnabled(true);
     setLiveTab("transcript");
     setScreen("live");
   }
 
   function endConversation() {
     setIsListening(false);
-    const record: ConversationRecord = {
-      id: `rec-${Date.now()}`,
-      title: "新对话",
-      startedAt: "01:35 PM 2026/06/05",
-      location: "哈利法克斯, CA",
-      duration: elapsedLabel,
-      summary: "Mock summary will be generated by the backend phase.",
-      keyPoints: ["Cue history and transcript are preserved."],
-      actionItems: [],
-      transcript,
-      cueHistory: cues,
-      usedPrenote: activePrenote || undefined,
-    };
-    setRecords((current) => [record, ...current]);
-    setActiveRecordId(record.id);
+    setGlassAudioEnabled(false);
+    pendingStartPayloadRef.current = null;
+    pendingAudioStartRef.current = false;
+    const sent = sendWs("conversation_end", {});
+    if (!sent || !activeConversationIdRef.current) {
+      setActiveConversationId(null);
+      activeConversationIdRef.current = null;
+      setGlassState(INITIAL_GLASS_STATE);
+      setScreen("home");
+    }
+  }
+
+  function openHistoryRecord(id: string) {
+    if (swipedRecordId === id) {
+      setSwipedRecordId(null);
+      return;
+    }
+    setActiveRecordId(id);
+    setHistoryTab("summary");
     setScreen("history");
+    void loadConversationDetail(id)
+      .then((record) => {
+        setRecords((current) => replaceRecordInPlace(current, record));
+        setActiveRecordId(record.id);
+      })
+      .catch(() => undefined);
+  }
+
+  function handleRecordPointerDown(id: string, event: { clientX: number; clientY: number }) {
+    recordPointerRef.current = { id, x: event.clientX, y: event.clientY };
+  }
+
+  function handleRecordPointerUp(id: string, event: { clientX: number; clientY: number }) {
+    const start = recordPointerRef.current;
+    recordPointerRef.current = null;
+    if (!start || start.id !== id) return;
+    const deltaX = event.clientX - start.x;
+    const deltaY = event.clientY - start.y;
+    if (Math.abs(deltaX) < 38 || Math.abs(deltaX) < Math.abs(deltaY)) return;
+    skipNextRecordClickRef.current = true;
+    setSwipedRecordId(deltaX < 0 ? id : null);
+  }
+
+  function handleRecordClick(id: string) {
+    if (skipNextRecordClickRef.current) {
+      skipNextRecordClickRef.current = false;
+      return;
+    }
+    openHistoryRecord(id);
+  }
+
+  function deleteHistoryRecord(id: string) {
+    void deleteConversationRecord(id)
+      .then(() => {
+        setRecords((current) => removeRecordById(current, id));
+        setSwipedRecordId(null);
+        if (activeRecordId === id) {
+          setActiveRecordId("");
+        }
+      })
+      .catch(() => setConnectionStatus("delete_failed"));
   }
 
   function renderHeader(title: string, right?: React.ReactNode, backTarget: Screen = "home") {
@@ -344,7 +575,7 @@ export default function App() {
           <h2>眼镜显示内容</h2>
           <div className="setting-card">
             <label className="switch-row">
-              <span>AI提示</span>
+              <span>AI 提示</span>
               <input
                 type="checkbox"
                 checked={settings.glassContent.aiCue}
@@ -360,7 +591,7 @@ export default function App() {
               />
             </label>
           </div>
-          <p className="muted-copy">这些设置仅影响对话期间的眼镜界面。应用仍会进行转录并生成实时 AI 总结。</p>
+          <p className="muted-copy">这些设置只影响对话期间的眼镜界面。</p>
         </section>
         <section className="settings-section">
           <div className="setting-card">
@@ -394,7 +625,7 @@ export default function App() {
           <textarea
             maxLength={5000}
             value={noteDraft.text}
-            placeholder="您将能够在会话期间在眼镜上访问这些笔记。"
+            placeholder="你可以在会话期间在眼镜上访问这些笔记。"
             onChange={(event) => setNoteDraft({ ...noteDraft, text: event.target.value })}
           />
           <span className="char-count">{noteDraft.text.length}/5000</span>
@@ -409,7 +640,7 @@ export default function App() {
               onChange={(event) => addFiles(event.target.files)}
             />
           </label>
-          <p>最多添加5个文件。每个最大 5 MB。</p>
+          <p>最多添加 5 个文件。每个最大 5 MB。</p>
           {noteDraft.files.map((file) => (
             <div className="file-pill" key={file.id}>
               <Upload size={17} />
@@ -420,7 +651,7 @@ export default function App() {
         </section>
         <section className="note-info">
           <Square size={23} strokeWidth={1.5} />
-          <p>对话将使用您的准备笔记和任何上传的文件来理解上下文。这将有助于提供更有用的实时 AI 提示和对话摘要。</p>
+          <p>对话会使用准备笔记理解上下文，帮助生成实时 AI 提示。</p>
         </section>
         <footer className="bottom-actions">
           <button className="soft-danger" onClick={() => setNoteDraft(null)}>
@@ -449,7 +680,7 @@ export default function App() {
           <h2>眼镜显示内容</h2>
           <div className="setting-card">
             <label className="switch-row">
-              <span>AI提示</span>
+              <span>AI 提示</span>
               <input type="checkbox" checked={settings.glassContent.aiCue} readOnly />
             </label>
             <label className="switch-row">
@@ -473,13 +704,14 @@ export default function App() {
         <section className="conversation-title-card live-title">
           <div>
             <h2>新对话</h2>
-            <p>01:35 PM 2026/06/05 ・ 哈利法克斯, CA</p>
+            <p>01:35 PM 2026/06/05 · 哈利法克斯, CA</p>
+            <p className="connection-status">连接状态：{connectionStatus}</p>
           </div>
           <span className="live-duration"><span />{elapsedLabel}</span>
         </section>
         {renderTabs(liveTab, setLiveTab, Boolean(activePrenote))}
         <section className="live-content">
-          {liveTab === "summary" && renderCuePanel(cues, addMockAutoCue)}
+          {liveTab === "summary" && renderCuePanel(cues)}
           {liveTab === "transcript" && renderTranscript(transcript)}
           {liveTab === "prenote" && renderPrenote(activePrenote)}
         </section>
@@ -495,7 +727,20 @@ export default function App() {
     );
   }
 
-  if (screen === "history") {
+  if (screen === "history" && !activeRecord) {
+    return (
+      <main className="phone-shell">
+        {renderHeader("对话", <span />, "home")}
+        <section className="history-content">
+          <section className="summary-card">
+            <p>-</p>
+          </section>
+        </section>
+      </main>
+    );
+  }
+
+  if (screen === "history" && activeRecord) {
     return (
       <main className="phone-shell">
         {renderHeader("对话", (
@@ -506,7 +751,7 @@ export default function App() {
         <section className="conversation-title-card">
           <div>
             <h2>{activeRecord.title}</h2>
-            <p>{activeRecord.startedAt} ・ {activeRecord.location}</p>
+            <p>{activeRecord.startedAt} · {activeRecord.location}</p>
           </div>
           <span>{activeRecord.duration}</span>
         </section>
@@ -539,17 +784,26 @@ export default function App() {
         </div>
         <div className="record-list">
           {records.map((record) => (
-            <button className="record-card" key={record.id} onClick={() => {
-              setActiveRecordId(record.id);
-              setHistoryTab("summary");
-              setScreen("history");
-            }}>
-              <div>
-                <h3>{record.title}</h3>
-                <p>{record.startedAt} ・ {record.location}</p>
-              </div>
-              <ChevronRight size={34} strokeWidth={1.4} />
-            </button>
+            <div className={swipedRecordId === record.id ? "record-row swiped" : "record-row"} key={record.id}>
+              <button className="record-delete-button" onClick={() => deleteHistoryRecord(record.id)}>
+                删除
+              </button>
+              <button
+                className="record-card"
+                onClick={() => handleRecordClick(record.id)}
+                onPointerDown={(event) => handleRecordPointerDown(record.id, event)}
+                onPointerUp={(event) => handleRecordPointerUp(record.id, event)}
+                onPointerCancel={() => {
+                  recordPointerRef.current = null;
+                }}
+              >
+                <div>
+                  <h3>{record.title}</h3>
+                  <p>{record.startedAt} · {record.location}</p>
+                </div>
+                <ChevronRight size={34} strokeWidth={1.4} />
+              </button>
+            </div>
           ))}
         </div>
       </section>
@@ -593,13 +847,13 @@ function renderTabs(active: ConversationTab, setActive: (tab: ConversationTab) =
   );
 }
 
-function renderCuePanel(cues: AiCue[], addMockAutoCue: (category: CueCategory) => void) {
+function renderCuePanel(cues: AiCue[]) {
   return (
     <div className="summary-stack">
       <section className="summary-card">
-        <h2>AI提示</h2>
+        <h2>AI 提示</h2>
         <div className="cue-list">
-          {cues.slice(0, 6).map((cue) => (
+          {cues.length ? cues.slice(0, 6).map((cue) => (
             <article className="cue-row" key={cue.id}>
               <span className="cue-icon">{cueIcon(cue.category)}</span>
               <div>
@@ -607,16 +861,8 @@ function renderCuePanel(cues: AiCue[], addMockAutoCue: (category: CueCategory) =
                 <p>{cue.output}</p>
               </div>
             </article>
-          ))}
+          )) : <p>-</p>}
         </div>
-      </section>
-      <section className="summary-card compact-cue-tools">
-        {(["response", "concept", "suggestion", "person"] as const).map((category) => (
-          <button key={category} onClick={() => addMockAutoCue(category)}>
-            <span>{cueIcon(category)}</span>
-            {PHONE_CUE_LABEL[category]}
-          </button>
-        ))}
       </section>
     </div>
   );
@@ -636,12 +882,12 @@ function renderSummary(record: ConversationRecord) {
       <section className="summary-card">
         <div className="card-title-row">
           <h2>行动事项</h2>
-          <span>分享至速记 ({record.actionItems.length}/{record.actionItems.length}) ↗</span>
+          <span>分享至速记 ({record.actionItems.length}/{record.actionItems.length}) →</span>
         </div>
         <p>{record.actionItems.length ? record.actionItems.join("\n") : "-"}</p>
       </section>
       <section className="summary-card muted-cues">
-        <h2>AI提示</h2>
+        <h2>AI 提示</h2>
         {record.cueHistory.map((cue) => (
           <details key={cue.id}>
             <summary><span>{cueIcon(cue.category)}</span>{PHONE_CUE_LABEL[cue.category]}</summary>
@@ -674,3 +920,4 @@ function renderPrenote(note: Prenote | null) {
     </section>
   );
 }
+

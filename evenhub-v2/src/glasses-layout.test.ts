@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { buildGlassesPage, GLASS_TRANSCRIPT_LINE_CHARS, GLASS_TRANSCRIPT_MAX_LINES } from "./glasses-layout";
 import { buildMenuItems, startLiveGlasses } from "./glasses-state";
-import { MOCK_CUES, MOCK_PRENOTES, MOCK_TRANSCRIPT } from "./mock-data";
+import { TEST_CUES, TEST_PRENOTES, TEST_TRANSCRIPT } from "./test-fixtures";
 import type { TranscriptLine } from "./types";
 
 const LONG_TRANSCRIPT: TranscriptLine[] = [
@@ -31,10 +31,10 @@ const LONG_TRANSCRIPT: TranscriptLine[] = [
 describe("buildGlassesPage", () => {
   test("main layout has header, AI cue box, and three-line transcript box", () => {
     const page = buildGlassesPage({
-      state: startLiveGlasses(MOCK_CUES[0].id),
-      cues: MOCK_CUES,
-      prenote: MOCK_PRENOTES[0],
-      transcript: MOCK_TRANSCRIPT,
+      state: startLiveGlasses(TEST_CUES[0].id),
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: TEST_TRANSCRIPT,
       now: new Date("2026-06-05T13:35:00-03:00"),
     });
 
@@ -66,9 +66,9 @@ describe("buildGlassesPage", () => {
   test("main layout is blank before a cue is explicitly generated or selected", () => {
     const page = buildGlassesPage({
       state: startLiveGlasses(null),
-      cues: MOCK_CUES,
-      prenote: MOCK_PRENOTES[0],
-      transcript: MOCK_TRANSCRIPT,
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: TEST_TRANSCRIPT,
     });
     const cue = page.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
     expect(cue?.kind).toBe("text");
@@ -80,8 +80,8 @@ describe("buildGlassesPage", () => {
   test("transcript content is clipped before it reaches the G2 TextContainer", () => {
     const page = buildGlassesPage({
       state: startLiveGlasses(null),
-      cues: MOCK_CUES,
-      prenote: MOCK_PRENOTES[0],
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
       transcript: LONG_TRANSCRIPT,
     });
     const transcript = page.containers.find((container) => container.kind === "text" && container.name === "transcript");
@@ -97,12 +97,12 @@ describe("buildGlassesPage", () => {
   });
 
   test("menu layout uses the official ListContainer and keeps transcript visible below it", () => {
-    const state = { ...startLiveGlasses(MOCK_CUES[0].id), view: "menu" as const, selectedIndex: 0 };
+    const state = { ...startLiveGlasses(TEST_CUES[0].id), view: "menu" as const, selectedIndex: 0 };
     const page = buildGlassesPage({
       state,
-      cues: MOCK_CUES,
-      prenote: MOCK_PRENOTES[0],
-      transcript: MOCK_TRANSCRIPT,
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: TEST_TRANSCRIPT,
     });
     const list = page.containers.find((container) => container.kind === "list");
     const rows = page.containers.filter((container) => container.kind === "text" && container.name.startsWith("menu-row"));
@@ -113,7 +113,7 @@ describe("buildGlassesPage", () => {
     expect(selection).toBeUndefined();
     expect(transcript?.kind).toBe("text");
     if (list?.kind === "list") {
-      expect(list.items).toHaveLength(buildMenuItems({ prenote: MOCK_PRENOTES[0], cues: MOCK_CUES }).length);
+      expect(list.items).toHaveLength(buildMenuItems({ prenote: TEST_PRENOTES[0], cues: TEST_CUES }).length);
       expect(list.items[0]).toContain("Prenote");
       expect(list.y).toBe(28);
       expect(list.height).toBe(176);
@@ -129,10 +129,10 @@ describe("buildGlassesPage", () => {
 
   test("prenote detail covers the transcript area with one large text container", () => {
     const page = buildGlassesPage({
-      state: { ...startLiveGlasses(MOCK_CUES[0].id), view: "prenote_detail" },
-      cues: MOCK_CUES,
-      prenote: MOCK_PRENOTES[0],
-      transcript: MOCK_TRANSCRIPT,
+      state: { ...startLiveGlasses(TEST_CUES[0].id), view: "prenote_detail" },
+      cues: TEST_CUES,
+      prenote: TEST_PRENOTES[0],
+      transcript: TEST_TRANSCRIPT,
     });
     const detail = page.containers.find((container) => container.kind === "text" && container.name === "prenote");
     expect(detail?.kind).toBe("text");

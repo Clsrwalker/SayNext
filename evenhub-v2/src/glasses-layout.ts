@@ -43,9 +43,10 @@ export const G2_WIDTH = 576;
 export const G2_HEIGHT = 288;
 export const GLASS_TRANSCRIPT_MAX_LINES = 3;
 export const GLASS_TRANSCRIPT_LINE_CHARS = 40;
+export const GLASS_TRANSCRIPT_ID = 3;
+export const GLASS_TRANSCRIPT_NAME = "transcript";
 
 const CUE_ID = 2;
-const TRANSCRIPT_ID = 3;
 const MENU_ID = 4;
 const DETAIL_ID = 5;
 const HEADER_RIGHT_ID = 7;
@@ -74,11 +75,12 @@ function cleanText(value: string, maxChars: number): string {
   return `${compact.slice(0, maxChars - 3).trimEnd()}...`;
 }
 
-function latestTranscript(lines: TranscriptLine[]): string {
-  return lines
+export function buildGlassTranscriptContent(lines: TranscriptLine[]): string {
+  const content = lines
     .slice(-GLASS_TRANSCRIPT_MAX_LINES)
     .map((line) => cleanText(`${line.partial ? "~" : ""}${line.text}`, GLASS_TRANSCRIPT_LINE_CHARS))
     .join("\n");
+  return content || "Listening...";
 }
 
 function cueContent(cue: AiCue | undefined): string {
@@ -111,13 +113,13 @@ function transcriptBox(
 ): GlassTextContainerSpec {
   return {
     kind: "text",
-    id: TRANSCRIPT_ID,
-    name: "transcript",
+    id: GLASS_TRANSCRIPT_ID,
+    name: GLASS_TRANSCRIPT_NAME,
     x: 12,
     y: bounds.y ?? 204,
     width: 552,
     height: bounds.height ?? 84,
-    content: content || "Listening...",
+    content,
     borderWidth: 0,
     borderColor: 0,
     borderRadius: 0,
@@ -136,7 +138,7 @@ export function buildGlassesPage(params: {
   const now = params.now || new Date();
   const latestCue = params.cues.find((cue) => cue.id === params.state.latestCueId) || params.cues[0];
   const activeCue = params.cues.find((cue) => cue.id === params.state.activeCueId) || latestCue;
-  const transcript = latestTranscript(params.transcript);
+  const transcript = buildGlassTranscriptContent(params.transcript);
   if (params.state.view === "root_idle") {
     return {
       view: params.state.view,

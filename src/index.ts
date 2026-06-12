@@ -8,6 +8,7 @@
 import { MergeApp } from "./server/MergeApp";
 import { api } from "./server/routes/routes";
 import { evenHubWebSocket, tryUpgradeEvenHubWebSocket } from "./server/evenhub/ws";
+import { evenHubV2WebSocket, tryUpgradeEvenHubV2WebSocket } from "./server/evenhub-v2/ws";
 import { createMentraAuthRoutes } from "@mentra/sdk";
 import indexHtml from "./frontend/index.html";
 
@@ -32,6 +33,27 @@ console.log("// SayNext - Real-Time Conversation Reply Assistant\n");
 console.log(`   Package: ${PACKAGE_NAME}`);
 console.log(`   Port: ${PORT}`);
 console.log("");
+
+const evenHubCombinedWebSocket = {
+  open(ws: any) {
+    if (ws.data?.kind === "evenhub-v2") {
+      return evenHubV2WebSocket.open(ws);
+    }
+    return evenHubWebSocket.open(ws);
+  },
+  message(ws: any, message: string | Buffer | ArrayBuffer | Uint8Array) {
+    if (ws.data?.kind === "evenhub-v2") {
+      return evenHubV2WebSocket.message(ws, message);
+    }
+    return evenHubWebSocket.message(ws, message);
+  },
+  close(ws: any, code: number, reason: string) {
+    if (ws.data?.kind === "evenhub-v2") {
+      return evenHubV2WebSocket.close(ws);
+    }
+    return evenHubWebSocket.close(ws, code, reason);
+  },
+};
 
 // Initialize App (extends Hono via AppServer)
 const app = new MergeApp({
@@ -83,8 +105,11 @@ Bun.serve({
     "/webview": indexHtml,
     "/webview/*": indexHtml,
   },
-  websocket: evenHubWebSocket,
+  websocket: evenHubCombinedWebSocket,
   async fetch(request, server) {
+    const evenHubV2WsResponse = tryUpgradeEvenHubV2WebSocket(request, server);
+    if (evenHubV2WsResponse !== null) return evenHubV2WsResponse;
+
     const evenHubWsResponse = tryUpgradeEvenHubWebSocket(request, server);
     if (evenHubWsResponse !== null) return evenHubWsResponse;
 

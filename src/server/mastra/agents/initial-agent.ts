@@ -34,7 +34,12 @@ import {
   resolveOpenAiModelConfig,
   withModelTimeout,
 } from "../../saynext/model-runtime";
-import { buildSayNextLiveTaskPrompt, sayNextConversationStateInstructions, sayNextInstructions } from "../../saynext/prompts";
+import {
+  buildSayNextConversationStateSeedInstructions,
+  buildSayNextLiveTaskPrompt,
+  isSayNextSingleLlmMode,
+  sayNextInstructions,
+} from "../../saynext/prompts";
 import {
   buildEvenHubLiveTaskPrompt,
   evenHubConversationStateInstructions,
@@ -140,7 +145,14 @@ export async function processConversation(
   const answerIntent = classifyAnswerIntent(transcriptForIntent || latestTranscript, promptMode, eventMemory);
   const promptPreset = options.promptPreset === "evenhub" ? "evenhub" : "saynext";
   const systemInstructions = promptPreset === "evenhub" ? evenHubSystemInstructions : sayNextInstructions;
-  const conversationStateInstructions = promptPreset === "evenhub" ? evenHubConversationStateInstructions : sayNextConversationStateInstructions;
+  const singleLlmModeRequested = promptPreset === "saynext" && isSayNextSingleLlmMode();
+  const singleLlmMode = singleLlmModeRequested
+    && Boolean(options.openAiConversationSession)
+    && isOpenAiConversationStateEnabled(LLM_PROVIDER)
+    && shouldCommitTranscriptToOpenAiConversation(options.transcriptCommitReason ?? "final");
+  const conversationStateInstructions = promptPreset === "evenhub"
+    ? evenHubConversationStateInstructions
+    : buildSayNextConversationStateSeedInstructions({ singleLlm: singleLlmModeRequested });
   const isClassroomMode = promptMode === "classroom";
   const latestTranscriptIndex = findLatestTranscriptIndex(conversation);
   const compactConversation = conversation
@@ -186,7 +198,9 @@ export async function processConversation(
       promptMode,
       eventMemory,
     );
-  const answerPlannerMetadata: AnswerPlannerShadowMetadata | undefined = options.answerPlannerMetadata ?? await generateAnswerPlanShadow({
+  const answerPlannerMetadata: AnswerPlannerShadowMetadata | undefined = singleLlmMode
+    ? undefined
+    : options.answerPlannerMetadata ?? await generateAnswerPlanShadow({
     activeScene: promptMode,
     sceneLocked: Boolean(options.promptModeOverride),
     latestUtterance: latestTranscript,
@@ -246,6 +260,7 @@ export async function processConversation(
   const outputPostprocessOptions = {
     answerIntent,
     answerOutputShape: finalAnswerStrategy.answerOutputShape,
+    preserveStructuredOutput: singleLlmMode,
   };
   const answerPlannerMetadataForLog = answerPlannerMetadata && options.memoryRetrievalDecision
     ? {
@@ -283,14 +298,22 @@ export async function processConversation(
       ? evenHubManualResponseInstruction
       : "Manual G2 display: write the exact words Xiang can say now, usually in first person. No word-count target or minimum; use only the length needed. Technical or interview answers can use more detail when depth is useful. For explicit coding interview requests, include the actual code or pseudocode plus a short explanation, not only a verbal plan; code indentation and short comments are allowed. Do not use labels or advice about how to answer."
     : "";
+  const singleLlmTaskHint = singleLlmMode
+    ? [
+      "Single-call mode: decide task/depth/usedMemory internally and return the required JSON object.",
+      "Use seeded Xiang memory only when it directly helps the current transcript.",
+      "For daily chat, avoid project/school/career unless directly asked.",
+      "For coding or system design interviews, provide concrete code/pseudocode/design details in output.",
+    ].join("\n")
+    : "";
   const conversationStateTaskHint = [
-    finalAnswerStrategy.promptHint,
+    singleLlmTaskHint || finalAnswerStrategy.promptHint,
     isClassroomMode
       ? "Classroom mode: if the transcript is a clear question, answer it directly using general knowledge; do not ask for repetition unless the transcript is genuinely unclear."
       : "",
     manualResponseInstruction,
   ].filter(Boolean).join("\n");
-  const conversationStateSupportContext = isClassroomMode
+  const conversationStateSupportContext = singleLlmMode || isClassroomMode
     ? ""
     : compactRuntimeContextBlock([
       formattedProfile,
@@ -311,8 +334,8 @@ export async function processConversation(
   const openAiConversationInput = buildOpenAiConversationInput(latestTranscript, {
     outputLanguage: outputLanguageText,
     promptMode,
-    answerIntent: finalAnswerStrategy.conversationIntent,
-    answerStrategy: finalAnswerStrategy.conversationStrategy,
+    answerIntent: singleLlmMode ? undefined : finalAnswerStrategy.conversationIntent,
+    answerStrategy: singleLlmMode ? undefined : finalAnswerStrategy.conversationStrategy,
     supportContext: conversationStateSupportContext,
     preparedNote: formattedPrenoteContext,
     taskHint: conversationStateTaskHint,
@@ -358,8 +381,8 @@ export async function processConversation(
           latestTranscript,
           outputLanguage: outputLanguageText,
           promptMode,
-          answerIntent: finalAnswerStrategy.conversationIntent,
-          answerStrategy: finalAnswerStrategy.conversationStrategy,
+          answerIntent: singleLlmMode ? undefined : finalAnswerStrategy.conversationIntent,
+          answerStrategy: singleLlmMode ? undefined : finalAnswerStrategy.conversationStrategy,
           taskHint: conversationStateTaskHint,
           transcriptContext: formattedTranscriptContext,
           supportContext: conversationStateSupportContext,
@@ -375,6 +398,7 @@ export async function processConversation(
           omittedRecentHistoryFromPrompt: true,
           transcriptCommitReason: options.transcriptCommitReason ?? "final",
           seededInstructionsInConversation: true,
+          singleLlmMode,
           requestIncludedInstructions: false,
           estimatedSeedInstructionTokens: estimateTokens(conversationStateInstructions),
           estimatedUserInputTokens: estimateTokens(openAiConversationInput),

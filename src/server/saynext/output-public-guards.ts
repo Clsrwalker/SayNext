@@ -32,8 +32,7 @@ export function removePublicTranscriptPersonalLeak(output: string, eventMemory?:
 export function replacePublicTranscriptRoleplay(output: string, transcript: string, eventMemory?: EventMemorySnapshot): string {
   const hasSpeakerLabel = isLikelySpeakerLabelTranscript(transcript);
   const xiangAddressedDirectly = /\bxiang\b/i.test(transcript) || (!hasSpeakerLabel && /\b(you|your)\b/i.test(transcript));
-  const thirdPartyContext = (looksLikePublicOpenEvent(eventMemory) && !xiangAddressedDirectly)
-    || (hasSpeakerLabel && !/\bxiang\b/i.test(transcript));
+  const thirdPartyContext = looksLikePublicOpenEvent(eventMemory) && !xiangAddressedDirectly;
   if (!thirdPartyContext) {
     return output;
   }

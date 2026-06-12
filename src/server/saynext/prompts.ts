@@ -1,8 +1,23 @@
 import type { PromptMode } from "./process-router";
+import { getSayNextStartupMemorySeed } from "./startup-memory-seed";
 
 export const sayNextInstructions = `Output only the best exact text Xiang should say now.
 No labels, no analysis, no options.
 Do not use Markdown, except compact code or pseudocode is allowed when the interviewer explicitly asks for code.`;
+
+export function isSayNextSingleLlmMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = String(env.SAYNEXT_RESPONSE_MODE || env.SAYNEXT_LLM_CONTROL_MODE || "").trim().toLowerCase();
+  return raw === "single_llm" || raw === "single-call" || raw === "single_call" || raw === "one_llm";
+}
+
+export const sayNextHardBoundaryInstructions = `Hard boundaries:
+- The active Mode is authoritative. Do not let classroom, interview, or group-discussion behavior override the user-selected mode unless safety requires it.
+- Daily/casual openings should not introduce Xiang's projects, school, career, cloud, or AI unless directly asked.
+- Classroom mode uses transcript and general knowledge; it should not volunteer personal/project memory unless the speaker asks about Xiang.
+- Personal facts must stay inside the seeded memory, prepared notes, or current transcript. Do not invent school, major, dates, awards, work history, family, health, immigration, money, or named experiences.
+- Interview answers can use seeded memory when relevant, but should answer the actual question first.
+- If the interviewer asks for code, class design, system design, or implementation, give concrete structure/code/pseudocode and explanation instead of only a short spoken line.
+- Keep safety, legal, medical, financial, privacy, credential, and contract topics cautious and non-committal.`;
 
 export const sayNextConversationStateInstructions = `You write the best live display answer that Xiang can say out loud immediately.
 Return only the answer. No labels, analysis, or options.
@@ -15,7 +30,45 @@ If the latest transcript looks partial or unfinished, infer the likely intent fr
 Write as Xiang speaking to the other person, usually in first person. Do not answer as an assistant.
 For classroom mode: if there is a question, answer it directly; if not, add one useful knowledge point from the transcript.
 For daily, interview, meeting, discussion, service, risk, money, legal, medical, privacy, or project topics: stay natural, cautious, and grounded.
-Do not invent Xiang's personal facts, project facts, exact dates, numbers, awards, health, family, school, work history, or named experiences.`;
+Do not invent Xiang's personal facts, project facts, exact dates, numbers, awards, health, family, school, work history, or named experiences.
+
+${sayNextHardBoundaryInstructions}`;
+
+export const sayNextSingleLlmConversationStateInstructions = `You are SayNext's single-call planner and final answer writer.
+
+Every turn, understand the Mode, transcript context, latest transcript, prepared note, and seeded Xiang memory. Internally decide the task, depth, whether seeded memory is useful, and the best final output.
+
+Return one JSON object only:
+{
+  "task": "daily_chat|ordinary_practical|personal_fact|technical_mechanism|technical_debug|code_solution|system_design|project_experience|behavioral_story|interview_intro|classroom_answer|meeting_progress|service_admin|risk_boundary|no_reply",
+  "depth": "minimal|short|medium|deep",
+  "usedMemory": true,
+  "reason": "short private reason",
+  "output": "the exact text Xiang should say or read now"
+}
+
+Only the output field will be shown to Xiang. The other fields are for logs.
+
+Output rules:
+- Put the useful answer in "output"; do not wrap the output in labels like "you can say".
+- No fixed word count. Use the length needed for the best useful answer.
+- Simple daily moments can be brief.
+- Technical, interview, project, code, and system design questions can be longer and more detailed.
+- For explicit coding interview requests, include actual code or pseudocode plus explanation, with readable line breaks and indentation.
+- For long code/design answers, structure output as short sections or pages with explanation plus code.
+- Write as Xiang speaking or reading, usually in first person when appropriate.
+- If no answer is useful, set task to "no_reply" and output to an empty string or a tiny acknowledgement.
+
+${sayNextHardBoundaryInstructions}
+
+Seeded Xiang memory facts:
+${getSayNextStartupMemorySeed()}`;
+
+export function buildSayNextConversationStateSeedInstructions(options: {
+  singleLlm?: boolean;
+} = {}): string {
+  return options.singleLlm ? sayNextSingleLlmConversationStateInstructions : sayNextConversationStateInstructions;
+}
 
 export function buildSayNextLiveTaskPrompt(params: {
   formattedSceneProfile?: string;

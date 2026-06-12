@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { extname } from "node:path";
 import type { PrenoteFileRecord } from "../data/conversation-logger";
 
-const OPENAI_PRENOTE_MODEL = process.env.PRENOTE_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_PRENOTE_MODEL = process.env.PRENOTE_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-nano";
 const OLLAMA_PRENOTE_MODEL = process.env.PRENOTE_OLLAMA_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:14b-instruct";
 const PRENOTE_VISION_MODEL = process.env.PRENOTE_VISION_MODEL || "";
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";

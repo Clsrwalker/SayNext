@@ -9,7 +9,7 @@ export function resolveOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): 
 } {
   return {
     liveModel: env.OPENAI_MODEL || env.MODEL_NAME || "gpt-5.4-nano",
-    longModel: env.OPENAI_LONG_MODEL || env.OPENAI_HIGH_RISK_MODEL || env.OPENAI_FALLBACK_MODEL || "gpt-5.4-mini",
+    longModel: env.OPENAI_LONG_MODEL || env.OPENAI_HIGH_RISK_MODEL || env.OPENAI_FALLBACK_MODEL || "gpt-5.4-nano",
   };
 }
 
