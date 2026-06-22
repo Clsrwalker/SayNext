@@ -9,6 +9,7 @@ import { MergeApp } from "./server/MergeApp";
 import { api } from "./server/routes/routes";
 import { evenHubWebSocket, tryUpgradeEvenHubWebSocket } from "./server/evenhub/ws";
 import { evenHubV2WebSocket, tryUpgradeEvenHubV2WebSocket } from "./server/evenhub-v2/ws";
+import { evenHubV2SummaryRunner } from "./server/evenhub-v2/summary-runner";
 import { createMentraAuthRoutes } from "@mentra/sdk";
 import indexHtml from "./frontend/index.html";
 
@@ -79,6 +80,7 @@ app.route("/api", api);
 
 // Start the SDK app (registers SDK routes, checks version)
 await app.start();
+evenHubV2SummaryRunner.recoverQueuedAndStale();
 
 console.log(`// SayNext running at http://localhost:${PORT}`);
 console.log(`   Webview: http://localhost:${PORT}`);

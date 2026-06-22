@@ -33,6 +33,7 @@ import {
   type EvenHubV2Store,
   type EvenHubV2TranscriptLineRecord,
 } from "./store";
+import { evenHubV2SummaryRunner, type EvenHubV2SummaryRunner } from "./summary-runner";
 
 type RuntimeState = {
   conversationStatus: ConversationStatus;
@@ -47,6 +48,7 @@ type EvenHubV2RuntimeOptions = {
   store?: EvenHubV2Store;
   autoCueGenerator?: AutoCueGenerator;
   contextAdapter?: EvenHubV2ContextAdapter;
+  summaryRunner?: Pick<EvenHubV2SummaryRunner, "queueSummary" | "enqueue">;
   sttAdapterFactory?: (callbacks: EvenHubSttCallbacks) => EvenHubSttAdapter | null;
   settings?: Partial<EvenHubV2Settings>;
   debounceMs?: number;
@@ -83,6 +85,7 @@ export class EvenHubV2Runtime {
   private readonly store: EvenHubV2Store;
   private readonly autoCueGenerator: AutoCueGenerator;
   private readonly contextAdapter: EvenHubV2ContextAdapter;
+  private readonly summaryRunner: Pick<EvenHubV2SummaryRunner, "queueSummary" | "enqueue">;
   private readonly sttAdapter: EvenHubSttAdapter | null;
   private readonly debounceMs: number;
   private readonly cooldownMs: number;
@@ -126,6 +129,7 @@ export class EvenHubV2Runtime {
     this.store = options.store || evenHubV2Store;
     this.autoCueGenerator = options.autoCueGenerator || new OpenAiAutoCueGenerator();
     this.contextAdapter = options.contextAdapter || new LightweightEvenHubV2ContextAdapter();
+    this.summaryRunner = options.summaryRunner || evenHubV2SummaryRunner;
     this.sttAdapter = (options.sttAdapterFactory || createEvenHubSttAdapter)({
       onTranscript: (event) => this.handleSttTranscript(event.text, event.isFinal),
       onStatus: (detail) => this.sendAudioStatus(this.state.audioStatus, detail),
@@ -696,6 +700,11 @@ export class EvenHubV2Runtime {
       durationMs: Math.max(0, Date.now() - this.conversationStartedAt),
       lastPartialAtEnd: this.lastPartialText,
     });
+    this.summaryRunner.queueSummary({
+      conversationId,
+      userId: this.userId,
+      queuedAt: endedAt,
+    });
     this.state.conversationStatus = "ended";
     this.state.audioStatus = "stopped";
     this.conversationId = null;
@@ -708,6 +717,7 @@ export class EvenHubV2Runtime {
       cueCount: this.store.listCues(conversationId).length,
       endedAt,
     }, conversationId);
+    this.summaryRunner.enqueue(conversationId);
   }
 
   private sendCueCreated(cue: EvenHubV2CueRecord): void {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { partialTranscriptFromServer, resolveBackendOrigin, transcriptFromServer } from "./evenhub-v2-client";
+import { partialTranscriptFromServer, recordFromConversationDetail, resolveBackendOrigin, transcriptFromServer } from "./evenhub-v2-client";
 
 describe("resolveBackendOrigin", () => {
   test("uses env override when provided", () => {
@@ -64,5 +64,70 @@ describe("server transcript mapping", () => {
     });
     expect(line.time).toBe("00:00:04");
     expect(line.partial).toBe(true);
+  });
+});
+
+describe("conversation detail mapping", () => {
+  test("maps structured summary and cue history from the detail response", () => {
+    const record = recordFromConversationDetail({
+      conversation: {
+        id: "conv-1",
+        title: "Raw title",
+        startedAt: "2026-06-12T10:00:00.000Z",
+        endedAt: "2026-06-12T10:10:00.000Z",
+        durationMs: 600000,
+      },
+      summary: {
+        status: "ready",
+        title: "Summary title",
+        overview: "A useful summary.",
+        keyPoints: [{ id: "kp-1", title: "Point", details: ["Detail"] }],
+        actionItems: [{ id: "act-1", text: "Follow up", checked: true }],
+        emptyReason: "",
+        generatedAt: "2026-06-12T10:11:00.000Z",
+        error: "",
+      },
+      transcript: [
+        { id: "line-1", index: 0, text: "hello", receivedAt: "2026-06-12T10:00:05.000Z" },
+      ],
+      cues: [
+        {
+          id: "cue-1",
+          category: "concept",
+          title: "Concept",
+          g2Title: "Concept",
+          output: "Cue output",
+          createdAt: "2026-06-12T10:01:00.000Z",
+        },
+      ],
+    });
+
+    expect(record.summary.status).toBe("ready");
+    expect(record.summary.keyPoints[0].details).toEqual(["Detail"]);
+    expect(record.summary.actionItems[0].checked).toBe(true);
+    expect(record.cueHistory[0].title).toBe("Concept");
+  });
+
+  test("uses summary title when conversation title is still default", () => {
+    const record = recordFromConversationDetail({
+      conversation: {
+        id: "conv-2",
+        title: "New Conversation",
+        startedAt: "2026-06-12T10:00:00.000Z",
+        endedAt: "2026-06-12T10:10:00.000Z",
+        durationMs: 600000,
+      },
+      summary: {
+        status: "ready",
+        title: "Generated Summary Title",
+        overview: "A useful summary.",
+        keyPoints: [],
+        actionItems: [],
+      },
+      transcript: [],
+      cues: [],
+    });
+
+    expect(record.title).toBe("Generated Summary Title");
   });
 });

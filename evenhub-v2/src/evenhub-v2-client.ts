@@ -1,4 +1,4 @@
-import type { AiCue, ConversationRecord, ConversationSettings, CueDuration, Prenote, TranscriptLine } from "./types";
+import type { AiCue, ConversationRecord, ConversationSettings, ConversationSummary, CueDuration, Prenote, SummaryStatus, TranscriptLine } from "./types";
 
 const PROTOCOL_VERSION = "evenhub-v2.1";
 const DEFAULT_BACKEND_ORIGIN = "https://saynext.167.172.153.109.sslip.io";
@@ -52,8 +52,20 @@ type BootstrapResponse = {
     startedAt: string;
     endedAt: string;
     durationMs: number | null;
+    summaryStatus?: SummaryStatus;
     usedPrenote?: { ids?: string[]; text?: string };
   }>;
+};
+
+type ServerConversationSummary = {
+  status: SummaryStatus;
+  title: string;
+  overview: string;
+  keyPoints: ConversationSummary["keyPoints"];
+  actionItems: ConversationSummary["actionItems"];
+  emptyReason?: string;
+  generatedAt?: string;
+  error?: string;
 };
 
 type ConversationDetailResponse = {
@@ -65,6 +77,7 @@ type ConversationDetailResponse = {
     durationMs: number | null;
     usedPrenote?: { ids?: string[]; text?: string };
   };
+  summary?: ServerConversationSummary;
   transcript: Array<{ id: string; text: string; index: number; receivedAt: string }>;
   cues: Array<{
     id: string;
@@ -208,9 +221,7 @@ export async function loadBootstrap(): Promise<{
       startedAt: dateLabel(conversation.startedAt),
       location: "-",
       duration: durationToServerLabel(conversation.durationMs),
-      summary: "-",
-      keyPoints: [],
-      actionItems: [],
+      summary: emptyConversationSummary(conversation.summaryStatus || "not_started"),
       transcript: [],
       cueHistory: [],
       usedPrenote: conversation.usedPrenote?.text ? {
@@ -228,20 +239,49 @@ function durationToServerLabel(durationMs: number | null | undefined): string {
   return durationFromMs(durationMs);
 }
 
-export async function loadConversationDetail(id: string): Promise<ConversationRecord> {
-  const response = await fetch(apiUrl(`/api/evenhub/v2/conversations/${encodeURIComponent(id)}`));
-  if (!response.ok) throw new Error(`conversation detail failed: ${response.status}`);
-  const data = await response.json() as ConversationDetailResponse;
+export function emptyConversationSummary(status: SummaryStatus = "not_started"): ConversationSummary {
+  return {
+    status,
+    title: "",
+    overview: "",
+    keyPoints: [],
+    actionItems: [],
+    emptyReason: "",
+    generatedAt: "",
+    error: "",
+  };
+}
+
+function summaryFromServer(summary: ServerConversationSummary | undefined): ConversationSummary {
+  if (!summary) return emptyConversationSummary();
+  return {
+    status: summary.status || "not_started",
+    title: summary.title || "",
+    overview: summary.overview || "",
+    keyPoints: Array.isArray(summary.keyPoints) ? summary.keyPoints : [],
+    actionItems: Array.isArray(summary.actionItems) ? summary.actionItems : [],
+    emptyReason: summary.emptyReason || "",
+    generatedAt: summary.generatedAt || "",
+    error: summary.error || "",
+  };
+}
+
+function displayConversationTitle(conversationTitle: string | undefined, summaryTitle: string | undefined): string {
+  const rawTitle = (conversationTitle || "").trim();
+  const generatedTitle = (summaryTitle || "").trim();
+  if (rawTitle && !["Conversation", "New Conversation", "Empty Conversation"].includes(rawTitle)) return rawTitle;
+  return generatedTitle || rawTitle || "Conversation";
+}
+
+export function recordFromConversationDetail(data: ConversationDetailResponse): ConversationRecord {
   const startedAt = new Date(data.conversation.startedAt).getTime();
   return {
     id: data.conversation.id,
-    title: data.conversation.title || "Conversation",
+    title: displayConversationTitle(data.conversation.title, data.summary?.title),
     startedAt: dateLabel(data.conversation.startedAt),
     location: "-",
     duration: durationFromMs(data.conversation.durationMs),
-    summary: "-",
-    keyPoints: [],
-    actionItems: [],
+    summary: summaryFromServer(data.summary),
     transcript: data.transcript.map((line): TranscriptLine => ({
       id: line.id,
       time: offsetLabel(new Date(line.receivedAt).getTime() - startedAt) || timeFromIso(line.receivedAt),
@@ -264,6 +304,13 @@ export async function loadConversationDetail(id: string): Promise<ConversationRe
       files: [],
     } : undefined,
   };
+}
+
+export async function loadConversationDetail(id: string): Promise<ConversationRecord> {
+  const response = await fetch(apiUrl(`/api/evenhub/v2/conversations/${encodeURIComponent(id)}`));
+  if (!response.ok) throw new Error(`conversation detail failed: ${response.status}`);
+  const data = await response.json() as ConversationDetailResponse;
+  return recordFromConversationDetail(data);
 }
 
 export async function deleteConversationRecord(id: string): Promise<void> {

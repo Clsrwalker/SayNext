@@ -29,6 +29,7 @@ import {
   type EvenHubV2ServerMessage,
 } from "./evenhub-v2-client";
 import { planPauseToggle } from "./conversation-audio";
+import { CUE_CATEGORY_ORDER, groupCuesByCategory } from "./cue-groups";
 import { normalizeGlassGesture, readGlassListSelection, type GlassListSelection } from "./events";
 import {
   DETAIL_BACK_DOUBLE_CLICK_SUPPRESS_MS,
@@ -114,6 +115,7 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState("offline");
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [swipedRecordId, setSwipedRecordId] = useState<string | null>(null);
+  const [selectedCueDetail, setSelectedCueDetail] = useState<AiCue | null>(null);
   const bridgeRef = useRef<GlassBridgeHandle | null>(null);
   const glassRendererRef = useRef<GlassRendererHandle | null>(null);
   const connectingBridgeRef = useRef(false);
@@ -249,6 +251,21 @@ export default function App() {
     const timer = setInterval(() => setElapsedSeconds((current) => current + 1), 1000);
     return () => clearInterval(timer);
   }, [isListening]);
+
+  useEffect(() => {
+    if (screen !== "history" || !activeRecordId) return;
+    const status = activeRecord?.summary.status;
+    if (status !== "queued" && status !== "running") return;
+    const timer = window.setInterval(() => {
+      void loadConversationDetail(activeRecordId)
+        .then((record) => {
+          setRecords((current) => replaceRecordInPlace(current, record));
+          setActiveRecordId(record.id);
+        })
+        .catch(() => undefined);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [activeRecord?.summary.status, activeRecordId, screen]);
 
   useEffect(() => {
     if (bridgeRef.current && glassRendererRef.current) {
@@ -619,6 +636,7 @@ export default function App() {
       setSwipedRecordId(null);
       return;
     }
+    setSelectedCueDetail(null);
     setActiveRecordId(id);
     setHistoryTab("summary");
     setScreen("history");
@@ -897,10 +915,11 @@ export default function App() {
         </section>
         {renderTabs(historyTab, setHistoryTab, Boolean(activeRecord.usedPrenote))}
         <section className="history-content">
-          {historyTab === "summary" && renderSummary(activeRecord)}
+          {historyTab === "summary" && renderSummary(activeRecord, setSelectedCueDetail)}
           {historyTab === "transcript" && renderTranscript(activeRecord.transcript)}
           {historyTab === "prenote" && renderPrenote(activeRecord.usedPrenote || null)}
         </section>
+        {selectedCueDetail && renderCueDetailModal(selectedCueDetail, () => setSelectedCueDetail(null))}
       </main>
     );
   }
@@ -1008,33 +1027,100 @@ function renderCuePanel(cues: AiCue[]) {
   );
 }
 
-function renderSummary(record: ConversationRecord) {
+function renderSummary(record: ConversationRecord, onCueSelect: (cue: AiCue) => void) {
+  const summary = record.summary;
+  const isReady = summary.status === "ready";
+  const isTooShort = summary.emptyReason === "too_short";
+  const overview = isReady
+    ? isTooShort
+      ? "这段对话内容较少，暂无总结。"
+      : summary.overview || "-"
+    : summary.status === "failed"
+      ? "AI 总结生成失败。转写和 AI 提示仍可查看。"
+      : summary.status === "queued" || summary.status === "running"
+        ? "AI 总结生成中..."
+        : "暂无 AI 总结。";
+
   return (
     <div className="summary-stack">
       <section className="summary-card">
         <h2>对话摘要</h2>
-        <p>{record.summary}</p>
+        <p>{overview}</p>
         <h2>关键点</h2>
-        <ul>
-          {record.keyPoints.length ? record.keyPoints.map((point) => <li key={point}>{point}</li>) : <li>-</li>}
+        <ul className="key-point-list">
+          {summary.keyPoints.length ? summary.keyPoints.map((point) => (
+            <li className="key-point-item" key={point.id}>
+              <strong>{point.title}</strong>
+              {point.details.length ? (
+                <ul>
+                  {point.details.map((detail, index) => <li key={`${point.id}-${index}`}>{detail}</li>)}
+                </ul>
+              ) : null}
+            </li>
+          )) : <li>-</li>}
         </ul>
       </section>
       <section className="summary-card">
         <div className="card-title-row">
           <h2>行动事项</h2>
-          <span>分享至速记 ({record.actionItems.length}/{record.actionItems.length}) →</span>
+          <span>分享至速记 ({summary.actionItems.length}/{summary.actionItems.length}) →</span>
         </div>
-        <p>{record.actionItems.length ? record.actionItems.join("\n") : "-"}</p>
+        <div className="summary-action-list">
+          {summary.actionItems.length ? summary.actionItems.map((item) => (
+            <article className="summary-action-item" key={item.id}>
+              <span>{item.checked ? <Check size={17} strokeWidth={2.2} /> : null}</span>
+              <p>{item.text}</p>
+            </article>
+          )) : <p>-</p>}
+        </div>
       </section>
-      <section className="summary-card muted-cues">
-        <h2>AI 提示</h2>
-        {record.cueHistory.map((cue) => (
-          <details key={cue.id}>
-            <summary><span>{cueIcon(cue.category)}</span>{PHONE_CUE_LABEL[cue.category]}</summary>
-            <p>{cue.output}</p>
-          </details>
-        ))}
-      </section>
+      {renderCueGroups(record.cueHistory, onCueSelect)}
+    </div>
+  );
+}
+
+function renderCueGroups(cues: AiCue[], onCueSelect: (cue: AiCue) => void) {
+  const groups = groupCuesByCategory(cues);
+  const visibleCategories = CUE_CATEGORY_ORDER.filter((category) => groups[category].length > 0);
+
+  return (
+    <section className="summary-card muted-cues">
+      <h2>AI 提示</h2>
+      {visibleCategories.length ? visibleCategories.map((category) => (
+        <details className="cue-group" key={category} open>
+          <summary>
+            <span>{cueIcon(category)}</span>
+            {PHONE_CUE_LABEL[category]}
+          </summary>
+          <div className="cue-chip-row">
+            {groups[category].map((cue) => (
+              <button className="cue-chip" key={cue.id} type="button" onClick={() => onCueSelect(cue)}>
+                <span>{cueIcon(cue.category)}</span>
+                {cue.title}
+              </button>
+            ))}
+          </div>
+        </details>
+      )) : <p>-</p>}
+    </section>
+  );
+}
+
+function renderCueDetailModal(cue: AiCue, onClose: () => void) {
+  return (
+    <div className="cue-modal-backdrop" role="presentation" onClick={onClose}>
+      <article className="cue-modal" role="dialog" aria-modal="true" aria-label={cue.title} onClick={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <span>{cueIcon(cue.category)}</span>
+            <h2>{cue.title}</h2>
+          </div>
+          <button type="button" aria-label="关闭" onClick={onClose}>
+            <X size={24} strokeWidth={1.8} />
+          </button>
+        </header>
+        <p>{cue.output}</p>
+      </article>
     </div>
   );
 }

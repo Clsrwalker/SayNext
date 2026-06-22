@@ -655,6 +655,24 @@ pre {
   padding-left: 34px;
 }
 
+.key-point-list {
+  padding-left: 26px;
+}
+
+.key-point-item {
+  display: grid;
+  gap: 8px;
+}
+
+.key-point-item strong {
+  font-weight: 430;
+}
+
+.key-point-item ul {
+  gap: 7px;
+  padding-left: 18px;
+}
+
 .card-title-row {
   display: flex;
   justify-content: space-between;
@@ -685,6 +703,135 @@ pre {
 
 .muted-cues summary::-webkit-details-marker {
   display: none;
+}
+
+.cue-group {
+  padding: 12px 0;
+}
+
+.cue-group summary {
+  justify-content: space-between;
+}
+
+.cue-group summary span:first-child {
+  display: inline-flex;
+  margin-right: 18px;
+}
+
+.cue-group summary::after {
+  content: "⌃";
+  margin-left: auto;
+  color: #202020;
+  font-size: 22px;
+}
+
+.cue-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 0 4px 30px;
+}
+
+.cue-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  min-height: 50px;
+  padding: 0 18px;
+  border-radius: 4px;
+  background: #f3f3f2;
+  color: #202020;
+  font-size: 16px;
+  text-align: left;
+}
+
+.cue-chip span {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: #252525;
+}
+
+.summary-action-list {
+  display: grid;
+  gap: 12px;
+}
+
+.summary-action-item {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  min-height: 60px;
+  padding: 10px 10px 10px 0;
+}
+
+.summary-action-item span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 2px;
+  background: #202020;
+  color: #fff;
+}
+
+.summary-action-item p {
+  margin: 0;
+}
+
+.cue-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(0, 0, 0, 0.44);
+}
+
+.cue-modal {
+  width: min(100%, 420px);
+  border-radius: 16px;
+  background: #fff;
+  padding: 22px 20px 24px;
+}
+
+.cue-modal header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.cue-modal header div {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.cue-modal header span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #202020;
+}
+
+.cue-modal h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 430;
+}
+
+.cue-modal p {
+  color: #222;
+  font-size: 18px;
+  line-height: 1.42;
+  white-space: pre-wrap;
 }
 
 .transcript-card {

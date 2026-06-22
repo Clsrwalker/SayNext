@@ -5,7 +5,7 @@ export interface OpenAiJsonGenerateOptions {
   model?: string;
   system?: string;
   prompt: string;
-  temperature?: number;
+  temperature?: number | null;
   timeoutMs?: number;
 }
 
@@ -58,6 +58,24 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
     "Return valid JSON only. Do not include markdown, explanation, or extra text.",
   ].filter(Boolean).join("\n\n");
 
+  const body: Record<string, unknown> = {
+    model,
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: system ? `${system}\n\n${options.prompt}` : options.prompt,
+          },
+        ],
+      },
+    ],
+  };
+  if (options.temperature !== null) {
+    body.temperature = options.temperature ?? 0.05;
+  }
+
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -65,21 +83,7 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
       Authorization: `Bearer ${apiKey}`,
     },
     signal: controller.signal,
-    body: JSON.stringify({
-      model,
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: system ? `${system}\n\n${options.prompt}` : options.prompt,
-            },
-          ],
-        },
-      ],
-      temperature: options.temperature ?? 0.05,
-    }),
+    body: JSON.stringify(body),
   }).finally(() => clearTimeout(timeout));
 
   if (!response.ok) {

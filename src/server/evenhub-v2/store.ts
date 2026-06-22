@@ -7,6 +7,7 @@ const DEFAULT_DB_PATH = join(process.cwd(), "data", "saynext.sqlite");
 
 export type StoredConversationStatus = "active" | "ended" | "abandoned";
 export type StoredAttemptStatus = "queued" | "running" | "created" | "skipped" | "failed" | "stale";
+export type StoredSummaryStatus = "queued" | "running" | "ready" | "failed";
 
 export type EvenHubV2ConversationRecord = {
   id: string;
@@ -73,6 +74,32 @@ export type EvenHubV2CueRecord = {
   createdAt: string;
 };
 
+export type EvenHubV2SummaryRecord = {
+  id: string;
+  conversationId: string;
+  userId: string;
+  status: StoredSummaryStatus;
+  attemptCount: number;
+  title: string;
+  overview: string;
+  keyPointsJson: string;
+  actionItemsJson: string;
+  model: string;
+  promptVersion: string;
+  rawOutput: string;
+  error: string;
+  emptyReason: string;
+  traceJson: string;
+  inputTranscriptChars: number;
+  inputLineCount: number;
+  inputTruncated: boolean;
+  queuedAt: string;
+  startedAt: string;
+  completedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CreateConversationInput = {
   id: string;
   userId: string;
@@ -126,6 +153,43 @@ export type CreateCueInput = {
   output: string;
   sourceTranscriptLineIds: string[];
   createdAt: string;
+};
+
+export type QueueSummaryInput = {
+  id: string;
+  conversationId: string;
+  userId: string;
+  queuedAt: string;
+};
+
+export type CompleteSummaryInput = {
+  conversationId: string;
+  title: string;
+  overview: string;
+  keyPoints: unknown[];
+  actionItems: unknown[];
+  model: string;
+  promptVersion: string;
+  rawOutput: string;
+  inputTranscriptChars: number;
+  inputLineCount: number;
+  inputTruncated: boolean;
+  emptyReason?: string;
+  trace?: unknown;
+  completedAt: string;
+};
+
+export type FailSummaryInput = {
+  conversationId: string;
+  model?: string;
+  promptVersion?: string;
+  rawOutput?: string;
+  error: string;
+  inputTranscriptChars?: number;
+  inputLineCount?: number;
+  inputTruncated?: boolean;
+  trace?: unknown;
+  completedAt: string;
 };
 
 function dbPath(): string {
@@ -252,6 +316,36 @@ export class EvenHubV2Store {
       )
     `);
     db.run("CREATE INDEX IF NOT EXISTS idx_evenhub_v2_cues_conversation ON evenhub_v2_cues(conversation_id, created_at DESC)");
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS evenhub_v2_summaries (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        title TEXT NOT NULL DEFAULT '',
+        overview TEXT NOT NULL DEFAULT '',
+        key_points_json TEXT NOT NULL DEFAULT '[]',
+        action_items_json TEXT NOT NULL DEFAULT '[]',
+        model TEXT NOT NULL DEFAULT '',
+        prompt_version TEXT NOT NULL DEFAULT '',
+        raw_output TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        empty_reason TEXT NOT NULL DEFAULT '',
+        trace_json TEXT NOT NULL DEFAULT '{}',
+        input_transcript_chars INTEGER NOT NULL DEFAULT 0,
+        input_line_count INTEGER NOT NULL DEFAULT 0,
+        input_truncated INTEGER NOT NULL DEFAULT 0,
+        queued_at TEXT NOT NULL,
+        started_at TEXT NOT NULL DEFAULT '',
+        completed_at TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(conversation_id) REFERENCES evenhub_v2_conversations(id) ON DELETE CASCADE
+      )
+    `);
+    db.run("CREATE INDEX IF NOT EXISTS idx_evenhub_v2_summaries_status ON evenhub_v2_summaries(status, queued_at)");
   }
 
   createConversation(input: CreateConversationInput): EvenHubV2ConversationRecord {
@@ -453,10 +547,145 @@ export class EvenHubV2Store {
     return rows.map(EvenHubV2CueRecordMapper);
   }
 
+  queueSummary(input: QueueSummaryInput): EvenHubV2SummaryRecord {
+    this.getDb().query(`
+      INSERT OR IGNORE INTO evenhub_v2_summaries (
+        id, conversation_id, user_id, status, queued_at
+      ) VALUES (?, ?, ?, 'queued', ?)
+    `).run(input.id, input.conversationId, input.userId, input.queuedAt);
+    const summary = this.getSummary(input.conversationId);
+    if (!summary) throw new Error(`Failed to queue summary for conversation ${input.conversationId}`);
+    return summary;
+  }
+
+  claimQueuedSummary(conversationId: string, startedAt: string): boolean {
+    const result = this.getDb().query(`
+      UPDATE evenhub_v2_summaries
+      SET status = 'running',
+          started_at = ?,
+          attempt_count = attempt_count + 1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE conversation_id = ?
+        AND status = 'queued'
+    `).run(startedAt, conversationId) as { changes: number };
+    return result.changes === 1;
+  }
+
+  listQueuedSummaries(limit = 50): EvenHubV2SummaryRecord[] {
+    const rows = this.getDb()
+      .query("SELECT * FROM evenhub_v2_summaries WHERE status = 'queued' ORDER BY queued_at ASC LIMIT ?")
+      .all(Math.max(1, limit)) as any[];
+    return rows.map(EvenHubV2SummaryRecordMapper);
+  }
+
+  resetStaleRunningSummaries(cutoffStartedAt: string): EvenHubV2SummaryRecord[] {
+    const stale = this.getDb()
+      .query("SELECT * FROM evenhub_v2_summaries WHERE status = 'running' AND started_at != '' AND started_at < ? ORDER BY started_at ASC")
+      .all(cutoffStartedAt) as any[];
+    const summaries = stale.map(EvenHubV2SummaryRecordMapper);
+    for (const summary of summaries) {
+      this.getDb().query(`
+        UPDATE evenhub_v2_summaries
+        SET status = 'queued',
+            started_at = '',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE conversation_id = ?
+          AND status = 'running'
+      `).run(summary.conversationId);
+    }
+    return summaries;
+  }
+
+  completeSummary(input: CompleteSummaryInput): EvenHubV2SummaryRecord | null {
+    this.getDb().query(`
+      UPDATE evenhub_v2_summaries
+      SET status = 'ready',
+          title = ?,
+          overview = ?,
+          key_points_json = ?,
+          action_items_json = ?,
+          model = ?,
+          prompt_version = ?,
+          raw_output = ?,
+          error = '',
+          empty_reason = ?,
+          trace_json = ?,
+          input_transcript_chars = ?,
+          input_line_count = ?,
+          input_truncated = ?,
+          completed_at = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE conversation_id = ?
+    `).run(
+      input.title,
+      input.overview,
+      asJson(input.keyPoints),
+      asJson(input.actionItems),
+      input.model,
+      input.promptVersion,
+      input.rawOutput,
+      input.emptyReason || "",
+      asJson(input.trace || {}),
+      input.inputTranscriptChars,
+      input.inputLineCount,
+      input.inputTruncated ? 1 : 0,
+      input.completedAt,
+      input.conversationId,
+    );
+    if (input.title.trim()) {
+      this.getDb().query(`
+        UPDATE evenhub_v2_conversations
+        SET title = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND (TRIM(title) = '' OR title IN ('Conversation', 'New Conversation', 'Empty Conversation'))
+      `).run(input.title.trim(), input.conversationId);
+    }
+    return this.getSummary(input.conversationId);
+  }
+
+  failSummary(input: FailSummaryInput): EvenHubV2SummaryRecord | null {
+    this.getDb().query(`
+      UPDATE evenhub_v2_summaries
+      SET status = 'failed',
+          model = ?,
+          prompt_version = ?,
+          raw_output = ?,
+          error = ?,
+          trace_json = ?,
+          input_transcript_chars = ?,
+          input_line_count = ?,
+          input_truncated = ?,
+          completed_at = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE conversation_id = ?
+    `).run(
+      input.model || "",
+      input.promptVersion || "",
+      input.rawOutput || "",
+      input.error,
+      asJson(input.trace || {}),
+      input.inputTranscriptChars || 0,
+      input.inputLineCount || 0,
+      input.inputTruncated ? 1 : 0,
+      input.completedAt,
+      input.conversationId,
+    );
+    return this.getSummary(input.conversationId);
+  }
+
+  getSummary(conversationId: string): EvenHubV2SummaryRecord | null {
+    const row = this.getDb()
+      .query("SELECT * FROM evenhub_v2_summaries WHERE conversation_id = ?")
+      .get(conversationId) as any;
+    return row ? EvenHubV2SummaryRecordMapper(row) : null;
+  }
+
   getConversationDetail(conversationId: string): {
     conversation: EvenHubV2ConversationRecord;
     transcript: EvenHubV2TranscriptLineRecord[];
     cues: EvenHubV2CueRecord[];
+    summary: EvenHubV2SummaryRecord | null;
   } | null {
     const conversation = this.getConversation(conversationId);
     if (!conversation) return null;
@@ -464,6 +693,7 @@ export class EvenHubV2Store {
       conversation,
       transcript: this.listTranscriptLines(conversationId),
       cues: this.listCues(conversationId),
+      summary: this.getSummary(conversationId),
     };
   }
 }
@@ -538,6 +768,34 @@ function EvenHubV2CueRecordMapper(row: any): EvenHubV2CueRecord {
     output: row.output,
     sourceTranscriptLineIdsJson: row.source_transcript_line_ids_json,
     createdAt: row.created_at,
+  };
+}
+
+function EvenHubV2SummaryRecordMapper(row: any): EvenHubV2SummaryRecord {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    userId: row.user_id,
+    status: row.status,
+    attemptCount: row.attempt_count,
+    title: row.title,
+    overview: row.overview,
+    keyPointsJson: row.key_points_json,
+    actionItemsJson: row.action_items_json,
+    model: row.model,
+    promptVersion: row.prompt_version,
+    rawOutput: row.raw_output,
+    error: row.error,
+    emptyReason: row.empty_reason,
+    traceJson: row.trace_json,
+    inputTranscriptChars: row.input_transcript_chars,
+    inputLineCount: row.input_line_count,
+    inputTruncated: Boolean(row.input_truncated),
+    queuedAt: row.queued_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

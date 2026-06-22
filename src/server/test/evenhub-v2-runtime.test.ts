@@ -4,6 +4,26 @@ import { createEvenHubV2ClientMessage, type EvenHubV2ServerMessage } from "../ev
 import { EvenHubV2Runtime } from "../evenhub-v2/runtime";
 import { EvenHubV2Store } from "../evenhub-v2/store";
 
+class FakeSummaryRunner {
+  events: string[] = [];
+
+  constructor(private readonly store: EvenHubV2Store) {}
+
+  queueSummary(input: { conversationId: string; userId: string; queuedAt?: string }): void {
+    this.events.push("queue");
+    this.store.queueSummary({
+      id: `summary-${input.conversationId}`,
+      conversationId: input.conversationId,
+      userId: input.userId,
+      queuedAt: input.queuedAt || "2026-06-12T00:00:00.000Z",
+    });
+  }
+
+  enqueue(conversationId: string): void {
+    this.events.push(`enqueue:${conversationId}`);
+  }
+}
+
 class FakeAutoCueGenerator implements AutoCueGenerator {
   calls: AutoCueGeneratorInput[] = [];
 
@@ -45,13 +65,19 @@ function makeRuntime(
   store = new EvenHubV2Store(":memory:"),
   overrides: Partial<ConstructorParameters<typeof EvenHubV2Runtime>[0]> = {},
 ) {
+  const summaryRunner = new FakeSummaryRunner(store);
   return {
     store,
+    summaryRunner,
     runtime: new EvenHubV2Runtime({
       userId: "test-user",
       clientSessionId: "client-1",
-      send: (message) => sent.push(message),
+      send: (message) => {
+        if (message.type === "conversation_saved") summaryRunner.events.push("saved");
+        sent.push(message);
+      },
       store,
+      summaryRunner,
       autoCueGenerator: generator,
       sttAdapterFactory: () => null,
       debounceMs: 60_000,
@@ -174,6 +200,25 @@ test("EvenHubV2Runtime ignores duplicate conversation_end while already ending",
 
   expect(sent.filter((message) => message.type === "conversation_saved")).toHaveLength(1);
   expect(sent.some((message) => message.type === "error" && message.payload?.code === "conversation_not_active")).toBe(false);
+});
+
+test("EvenHubV2Runtime queues summary before conversation_saved and enqueues after saved", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  const { runtime, store, summaryRunner } = makeRuntime(generator, sent);
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "The final transcript should be saved before summary generation starts.",
+    isFinal: true,
+  }));
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("conversation_end", {}));
+
+  expect(store.getSummary(conversationId)?.status).toBe("queued");
+  expect(summaryRunner.events).toEqual(["queue", "saved", `enqueue:${conversationId}`]);
 });
 
 test("EvenHubV2Runtime sends realtime transcript offsets for partial and final text", async () => {

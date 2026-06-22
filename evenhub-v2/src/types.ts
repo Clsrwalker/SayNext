@@ -6,6 +6,7 @@ export type GlassContentFlag = "aiCue" | "transcript";
 export type ConversationTab = "summary" | "transcript" | "prenote";
 export type GlassView = "root_idle" | "main" | "menu" | "cue_detail" | "prenote_detail" | "exit_confirm";
 export type GlassGesture = "click" | "double_click" | "scroll_up" | "scroll_down" | "foreground_enter" | "foreground_exit" | "abnormal_exit";
+export type SummaryStatus = "not_started" | "queued" | "running" | "ready" | "failed";
 
 export type AiCue = {
   id: string;
@@ -39,15 +40,36 @@ export type TranscriptLine = {
   partial?: boolean;
 };
 
+export type ConversationSummaryKeyPoint = {
+  id: string;
+  title: string;
+  details: string[];
+};
+
+export type ConversationSummaryActionItem = {
+  id: string;
+  text: string;
+  checked: boolean;
+};
+
+export type ConversationSummary = {
+  status: SummaryStatus;
+  title: string;
+  overview: string;
+  keyPoints: ConversationSummaryKeyPoint[];
+  actionItems: ConversationSummaryActionItem[];
+  emptyReason?: string;
+  generatedAt?: string;
+  error?: string;
+};
+
 export type ConversationRecord = {
   id: string;
   title: string;
   startedAt: string;
   location: string;
   duration: string;
-  summary: string;
-  keyPoints: string[];
-  actionItems: string[];
+  summary: ConversationSummary;
   transcript: TranscriptLine[];
   cueHistory: AiCue[];
   usedPrenote?: Prenote;
