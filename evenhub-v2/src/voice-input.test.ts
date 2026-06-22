@@ -7,8 +7,8 @@ describe("voice input support", () => {
     expect(normalizeSupportedVoiceInput("glasses")).toBe("glasses");
   });
 
-  test("falls phone input back to glasses until phone mic is implemented", () => {
-    expect(isVoiceInputSelectable("phone")).toBe(false);
-    expect(normalizeSupportedVoiceInput("phone")).toBe("glasses");
+  test("keeps phone input selectable when SDK source selection is available", () => {
+    expect(isVoiceInputSelectable("phone")).toBe(true);
+    expect(normalizeSupportedVoiceInput("phone")).toBe("phone");
   });
 });

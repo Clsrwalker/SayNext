@@ -55,6 +55,7 @@ import type {
   Prenote,
   PrenoteFile,
   TranscriptLine,
+  VoiceInput,
 } from "./types";
 
 const DEFAULT_SETTINGS: ConversationSettings = {
@@ -125,6 +126,7 @@ export default function App() {
   const isListeningRef = useRef(false);
   const pendingStartPayloadRef = useRef<unknown | null>(null);
   const pendingAudioStartRef = useRef(false);
+  const activeAudioSourceRef = useRef<VoiceInput>("glasses");
   const recordPointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const skipNextRecordClickRef = useRef(false);
   const pendingDetailBackViewRef = useRef<"cue_detail" | "prenote_detail" | null>(null);
@@ -216,7 +218,7 @@ export default function App() {
         }
         if (pendingAudioStartRef.current && activeConversationIdRef.current && isListeningRef.current && !pendingStartPayloadRef.current) {
           pendingAudioStartRef.current = false;
-          ws.send(JSON.stringify(createClientMessage("audio_start", { codec: "linear16", sampleRate: 16000, channels: 1 }, activeConversationIdRef.current)));
+          ws.send(JSON.stringify(createClientMessage("audio_start", audioStartPayload(activeAudioSourceRef.current), activeConversationIdRef.current)));
         }
       };
       ws.onmessage = (event) => {
@@ -285,10 +287,10 @@ export default function App() {
         const gesture = normalizeGlassGesture(event);
         if (gesture) handleGlassGesture(gesture, readGlassListSelection(event));
       },
-      onAudio: (pcm) => {
+      onAudio: (audio) => {
         const ws = wsRef.current;
         if (ws?.readyState === WebSocket.OPEN && activeConversationIdRef.current && isListeningRef.current) {
-          ws.send(pcm);
+          ws.send(audio.pcm);
         }
       },
       })
@@ -310,9 +312,9 @@ export default function App() {
           void glassRendererRef.current.render(latestPage).catch(handleGlassRenderError);
         }
         if (isListeningRef.current) {
-          void bridge.setAudioEnabled(true).then((enabled) => {
-            if (!enabled) setConnectionStatus("g2_mic_failed");
-          }).catch(() => setConnectionStatus("g2_mic_error"));
+          void bridge.setAudioEnabled(true, activeAudioSourceRef.current).then((enabled) => {
+            if (!enabled) setConnectionStatus(micFailedStatus(activeAudioSourceRef.current));
+          }).catch(() => setConnectionStatus(micErrorStatus(activeAudioSourceRef.current)));
         }
       })
       .catch(handleGlassRenderError)
@@ -355,21 +357,33 @@ export default function App() {
     return wsRef.current?.readyState === WebSocket.OPEN;
   }
 
-  function sendAudioStart() {
-    return sendWs("audio_start", { codec: "linear16", sampleRate: 16000, channels: 1 });
+  function audioStartPayload(source: VoiceInput) {
+    return { codec: "linear16", sampleRate: 16000, channels: 1, audioSource: source };
+  }
+
+  function sendAudioStart(source = activeAudioSourceRef.current) {
+    return sendWs("audio_start", audioStartPayload(source));
   }
 
   function sendAudioStop() {
     return sendWs("audio_stop", {});
   }
 
-  function setGlassAudioEnabled(enabled: boolean) {
+  function micFailedStatus(source: VoiceInput) {
+    return source === "phone" ? "phone_mic_failed" : "g2_mic_failed";
+  }
+
+  function micErrorStatus(source: VoiceInput) {
+    return source === "phone" ? "phone_mic_error" : "g2_mic_error";
+  }
+
+  function setBridgeAudioEnabled(enabled: boolean, source = activeAudioSourceRef.current) {
     const bridge = bridgeRef.current;
     if (!bridge) return;
-    void bridge.setAudioEnabled(enabled).then((ok) => {
-      if (!ok && enabled) setConnectionStatus("g2_mic_failed");
+    void bridge.setAudioEnabled(enabled, source).then((ok) => {
+      if (!ok && enabled) setConnectionStatus(micFailedStatus(source));
     }).catch(() => {
-      if (enabled) setConnectionStatus("g2_mic_error");
+      if (enabled) setConnectionStatus(micErrorStatus(source));
     });
   }
 
@@ -450,7 +464,7 @@ export default function App() {
     if (message.type === "conversation_saved") {
       const id = message.payload?.conversationId || message.conversationId || activeConversationIdRef.current;
       setIsListening(false);
-      setGlassAudioEnabled(false);
+      setBridgeAudioEnabled(false);
       setActiveConversationId(null);
       activeConversationIdRef.current = null;
       if (id) {
@@ -573,6 +587,7 @@ export default function App() {
     const voiceInput = normalizeSupportedVoiceInput(settings.voiceInput);
     const startSettings = voiceInput === settings.voiceInput ? settings : { ...settings, voiceInput };
     const payload = conversationStartPayload(startSettings, activePrenote);
+    activeAudioSourceRef.current = voiceInput;
     const started = sendWs("conversation_start", payload);
     if (!started) {
       pendingStartPayloadRef.current = payload;
@@ -584,14 +599,14 @@ export default function App() {
     setCues([]);
     setTranscript([]);
     setGlassState(startLiveGlasses(null));
-    setGlassAudioEnabled(voiceInput === "glasses");
+    setBridgeAudioEnabled(true, voiceInput);
     setLiveTab("transcript");
     setScreen("live");
   }
 
   function endConversation() {
     setIsListening(false);
-    setGlassAudioEnabled(false);
+    setBridgeAudioEnabled(false);
     pendingStartPayloadRef.current = null;
     pendingAudioStartRef.current = false;
     const sent = sendWs("conversation_end", {});
@@ -612,11 +627,14 @@ export default function App() {
     });
     setIsListening(plan.nextListening);
     isListeningRef.current = plan.nextListening;
-    setGlassAudioEnabled(plan.enableGlassAudio);
+    if (plan.bridgeAudio.source) {
+      activeAudioSourceRef.current = plan.bridgeAudio.source;
+    }
+    setBridgeAudioEnabled(plan.bridgeAudio.enabled, plan.bridgeAudio.source || activeAudioSourceRef.current);
 
     if (plan.wsType === "audio_start") {
       pendingAudioStartRef.current = false;
-      sendAudioStart();
+      sendAudioStart(activeAudioSourceRef.current);
     } else if (plan.wsType === "audio_stop") {
       pendingAudioStartRef.current = false;
       sendAudioStop();
@@ -707,7 +725,6 @@ export default function App() {
             </button>
             <button
               className="setting-choice"
-              disabled
               onClick={() => setSettings({ ...settings, voiceInput: "phone" })}
             >
               手机 {effectiveVoiceInput === "phone" && <Check size={28} />}

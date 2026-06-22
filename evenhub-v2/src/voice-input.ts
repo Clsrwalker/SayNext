@@ -1,6 +1,7 @@
 import type { VoiceInput } from "./types";
+import { PHONE_MIC_SUPPORTED } from "./audio-source";
 
-export const PHONE_MIC_SUPPORTED = false;
+export { PHONE_MIC_SUPPORTED };
 
 export function isVoiceInputSelectable(input: VoiceInput): boolean {
   return input !== "phone" || PHONE_MIC_SUPPORTED;

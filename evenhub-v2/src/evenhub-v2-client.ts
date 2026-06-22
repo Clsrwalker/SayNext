@@ -18,7 +18,7 @@ type Envelope<TType extends string, TPayload = unknown> = {
 export type EvenHubV2ServerMessage =
   | Envelope<"ready", { settings: ServerSettings }>
   | Envelope<"conversation_started", { conversationId: string }>
-  | Envelope<"audio_status", { audioStatus: string; detail?: string; audioBytesReceived?: number }>
+  | Envelope<"audio_status", { audioStatus: string; detail?: string; audioBytesReceived?: number; audioSource?: "glasses" | "phone" }>
   | Envelope<"transcript_partial", { text: string; offsetMs?: number }>
   | Envelope<"transcript_final", { lineId: string; index: number; text: string; receivedAt: string; offsetMs?: number }>
   | Envelope<"cue_created", {

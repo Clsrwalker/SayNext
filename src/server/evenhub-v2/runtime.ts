@@ -22,6 +22,7 @@ import {
   type AudioStatus,
   type AutoCueJobStatus,
   type ConversationStatus,
+  type EvenHubV2AudioSource,
   type EvenHubV2ClientMessage,
   type EvenHubV2Envelope,
   type EvenHubV2ServerMessage,
@@ -113,6 +114,7 @@ export class EvenHubV2Runtime {
   private sttFinalCount = 0;
   private finalSavedCount = 0;
   private lastAudioStatusAt = 0;
+  private audioSource: EvenHubV2AudioSource = "glasses";
   private lastPartialText = "";
   private lastFinalText = "";
   private partialCommitTimer: ReturnType<typeof setTimeout> | null = null;
@@ -188,7 +190,7 @@ export class EvenHubV2Runtime {
     }
 
     if (message.type === "audio_start") {
-      await this.startAudio();
+      await this.startAudio(message.payload?.audioSource);
       return;
     }
 
@@ -281,6 +283,7 @@ export class EvenHubV2Runtime {
     this.sttFinalCount = 0;
     this.finalSavedCount = 0;
     this.lastAudioStatusAt = 0;
+    this.audioSource = "glasses";
     this.lastPartialText = "";
     this.lastFinalText = "";
     this.clearPartialCommitTimer();
@@ -310,11 +313,12 @@ export class EvenHubV2Runtime {
     });
   }
 
-  private async startAudio(): Promise<void> {
+  private async startAudio(audioSource: EvenHubV2AudioSource = "glasses"): Promise<void> {
     if (this.state.conversationStatus !== "active") {
       this.sendError("conversation_not_active", "Start a conversation before starting audio.", true);
       return;
     }
+    this.audioSource = audioSource;
     if (this.state.audioStatus === "listening" || this.state.audioStatus === "starting") {
       this.sendAudioStatus(this.state.audioStatus, "Audio is already active.", true);
       return;
@@ -741,6 +745,7 @@ export class EvenHubV2Runtime {
       audioStatus,
       detail,
       audioBytesReceived: this.audioBytesReceived,
+      audioSource: this.audioSource,
     });
   }
 

@@ -275,6 +275,32 @@ test("EvenHubV2Runtime queues audio chunks while STT is starting", async () => {
   await audioStart;
 });
 
+test("EvenHubV2Runtime includes selected audio source in audio status", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    sttAdapterFactory: () => ({
+      start: async () => undefined,
+      pushAudio: () => undefined,
+      stop: async () => undefined,
+      close: () => undefined,
+    }),
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_start", {
+    audioSource: "phone",
+  }));
+
+  const audioStatuses = sent.filter((message) => message.type === "audio_status");
+  expect(audioStatuses.at(-1)).toMatchObject({
+    payload: {
+      audioStatus: "listening",
+      audioSource: "phone",
+    },
+  });
+});
+
 test("EvenHubV2Store deletes a conversation with transcript and cues", () => {
   const store = new EvenHubV2Store(":memory:");
   const conversationId = "conv-delete";

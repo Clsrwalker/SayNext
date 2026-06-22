@@ -43,3 +43,25 @@ test("parseEvenHubV2ClientMessage accepts conversation_start and debug transcrip
     },
   });
 });
+
+test("parseEvenHubV2ClientMessage accepts audio source metadata", () => {
+  const audioStart = createEvenHubV2ClientMessage("audio_start", {
+    codec: "linear16",
+    sampleRate: 16000,
+    channels: 1,
+    audioSource: "phone",
+  });
+
+  expect(parseEvenHubV2ClientMessage(JSON.stringify(audioStart))).toMatchObject({
+    ok: true,
+    message: {
+      type: "audio_start",
+      payload: {
+        codec: "linear16",
+        sampleRate: 16000,
+        channels: 1,
+        audioSource: "phone",
+      },
+    },
+  });
+});

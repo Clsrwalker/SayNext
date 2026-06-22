@@ -5,6 +5,7 @@ export type ConversationStatus = "idle" | "active" | "ending" | "ended";
 export type AudioStatus = "stopped" | "starting" | "listening" | "reconnecting" | "failed";
 export type AutoCueJobStatus = "queued" | "running" | "created" | "skipped" | "failed" | "stale";
 export type AutoCueCategory = "response" | "concept" | "suggestion" | "person" | "none";
+export type EvenHubV2AudioSource = "glasses" | "phone";
 
 export type EvenHubV2Settings = {
   language: "english" | "chinese" | "auto";
@@ -40,6 +41,7 @@ export type EvenHubV2ClientMessage =
       codec?: "linear16";
       sampleRate?: number;
       channels?: number;
+      audioSource?: EvenHubV2AudioSource;
     }>
   | EvenHubV2Envelope<"audio_stop", Record<string, never>>
   | EvenHubV2Envelope<"conversation_end", Record<string, never>>
@@ -72,6 +74,7 @@ export type EvenHubV2ServerMessage =
       audioStatus: AudioStatus;
       detail?: string;
       audioBytesReceived?: number;
+      audioSource?: EvenHubV2AudioSource;
     }>
   | EvenHubV2Envelope<"transcript_partial", {
       text: string;
@@ -156,6 +159,10 @@ function normalizeStringArray(value: unknown): string[] | undefined {
   return value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
 }
 
+function normalizeAudioSource(value: unknown): EvenHubV2AudioSource | undefined {
+  return value === "phone" || value === "glasses" ? value : undefined;
+}
+
 export function parseEvenHubV2ClientMessage(raw: string): ParseEvenHubV2Result {
   let parsed: unknown;
   try {
@@ -223,6 +230,7 @@ export function parseEvenHubV2ClientMessage(raw: string): ParseEvenHubV2Result {
           codec: payload.codec === "linear16" ? "linear16" : undefined,
           sampleRate,
           channels,
+          audioSource: normalizeAudioSource(payload.audioSource),
         },
       },
     };
