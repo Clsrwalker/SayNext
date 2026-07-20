@@ -17,6 +17,11 @@ import {
 } from "./context-adapter";
 import { computeLinear16AudioStats, type Linear16AudioStats } from "./audio-diagnostics";
 import {
+  evenHubV2CueOpportunityRouter,
+  type CueOpportunityRouter,
+  type CueOpportunityRouterResult,
+} from "./cue-opportunity-router";
+import {
   defaultEvenHubV2Settings,
   makeEvenHubV2Id,
   normalizeEvenHubV2Settings,
@@ -55,9 +60,7 @@ type EvenHubV2RuntimeOptions = {
   sttAdapterFactory?: (callbacks: EvenHubSttCallbacks) => EvenHubSttAdapter | null;
   settings?: Partial<EvenHubV2Settings>;
   debounceMs?: number;
-  cooldownMs?: number;
-  maxDisplayedCuesPerMinute?: number;
-  confidenceThreshold?: number;
+  cueOpportunityRouter?: CueOpportunityRouter | null;
   finalFlushTimeoutMs?: number;
   partialCommitMs?: number;
   partialCommitMinChars?: number;
@@ -123,9 +126,7 @@ export class EvenHubV2Runtime {
   private readonly sttAdapter: EvenHubSttAdapter | null;
   private readonly sttProvider: string;
   private readonly debounceMs: number;
-  private readonly cooldownMs: number;
-  private readonly maxDisplayedCuesPerMinute: number;
-  private readonly confidenceThreshold: number;
+  private readonly cueOpportunityRouter: CueOpportunityRouter | null;
   private readonly finalFlushTimeoutMs: number;
   private readonly partialCommitMs: number;
   private readonly partialCommitMinChars: number;
@@ -140,7 +141,6 @@ export class EvenHubV2Runtime {
   private candidateBuffer: EvenHubV2TranscriptLineRecord[] = [];
   private generatedTranscriptHashes = new Set<string>();
   private lastDisplayedCueOutputHash: string | null = null;
-  private displayedCueTimes: number[] = [];
   private pendingFlush = false;
   private cueFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private currentAutoJob: Promise<void> | null = null;
@@ -188,9 +188,9 @@ export class EvenHubV2Runtime {
     this.sttProvider = this.sttAdapter?.provider || "stt";
     this.settings = normalizeEvenHubV2Settings(options.settings);
     this.debounceMs = options.debounceMs ?? Number(process.env.EVENHUB_V2_CUE_DEBOUNCE_MS || 900);
-    this.cooldownMs = options.cooldownMs ?? Number(process.env.EVENHUB_V2_CUE_COOLDOWN_MS || 8000);
-    this.maxDisplayedCuesPerMinute = options.maxDisplayedCuesPerMinute ?? Number(process.env.EVENHUB_V2_MAX_CUES_PER_MINUTE || 3);
-    this.confidenceThreshold = options.confidenceThreshold ?? Number(process.env.EVENHUB_V2_CUE_CONFIDENCE_THRESHOLD || 0.75);
+    this.cueOpportunityRouter = options.cueOpportunityRouter === undefined
+      ? evenHubV2CueOpportunityRouter
+      : options.cueOpportunityRouter;
     this.finalFlushTimeoutMs = options.finalFlushTimeoutMs ?? Number(process.env.EVENHUB_V2_FINAL_FLUSH_TIMEOUT_MS || 800);
     this.partialCommitMs = options.partialCommitMs ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MS || DEFAULT_PARTIAL_COMMIT_MS);
     this.partialCommitMinChars = options.partialCommitMinChars ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MIN_CHARS || DEFAULT_PARTIAL_COMMIT_MIN_CHARS);
@@ -331,7 +331,6 @@ export class EvenHubV2Runtime {
     this.candidateBuffer = [];
     this.generatedTranscriptHashes = new Set();
     this.lastDisplayedCueOutputHash = null;
-    this.displayedCueTimes = [];
     this.audioBytesReceived = 0;
     this.audioChunksReceived = 0;
     this.lastAudioStats = null;
@@ -520,9 +519,7 @@ export class EvenHubV2Runtime {
     this.finalSavedCount += 1;
     this.logTranscriptProgress("saved_final", normalized, source);
     if (this.state.conversationStatus === "active") {
-      if (source !== "partial_timeout") {
-        this.candidateBuffer.push(line);
-      }
+      this.candidateBuffer.push(line);
       this.sendMessage("transcript_final", {
         lineId: line.id,
         index: line.lineIndex,
@@ -530,9 +527,7 @@ export class EvenHubV2Runtime {
         receivedAt: line.receivedAt,
         offsetMs: this.offsetForIso(line.receivedAt),
       });
-      if (source !== "partial_timeout") {
-        this.scheduleCueFlush();
-      }
+      this.scheduleCueFlush();
     }
     return line;
   }
@@ -575,23 +570,6 @@ export class EvenHubV2Runtime {
       return;
     }
     if (!this.candidateBuffer.length) return;
-
-    const now = Date.now();
-    this.displayedCueTimes = this.displayedCueTimes.filter((time) => now - time < 60_000);
-    if (this.displayedCueTimes.length >= this.maxDisplayedCuesPerMinute) {
-      this.writeSkippedAttempt("rate_limited");
-      return;
-    }
-
-    const lastDisplayedAt = this.displayedCueTimes[this.displayedCueTimes.length - 1] || 0;
-    const cooldownRemaining = this.cooldownMs - (now - lastDisplayedAt);
-    if (lastDisplayedAt && cooldownRemaining > 0) {
-      this.clearCueFlushTimer();
-      this.cueFlushTimer = setTimeout(() => {
-        void this.flushCueBufferNow();
-      }, cooldownRemaining);
-      return;
-    }
 
     const windowLines = this.candidateBuffer.slice(-3);
     this.candidateBuffer = [];
@@ -639,6 +617,21 @@ export class EvenHubV2Runtime {
   }): Promise<void> {
     if (!this.conversationId) return;
     const recentTranscript = this.transcriptLines.slice(-8).map((line) => line.text).join("\n");
+    const routerLines = this.transcriptLines.slice(-3);
+    let router: CueOpportunityRouterResult | null = null;
+    let routerError = "";
+    if (this.cueOpportunityRouter) {
+      try {
+        router = await this.cueOpportunityRouter.predict({
+          segmentMinus2: routerLines.at(-3)?.text || "",
+          segmentMinus1: routerLines.at(-2)?.text || "",
+          current: routerLines.at(-1)?.text || "",
+        });
+      } catch (error) {
+        routerError = error instanceof Error ? error.message : String(error);
+        console.warn(`[EvenHubV2] cue router failed open: ${routerError}`);
+      }
+    }
     const context = await this.contextAdapter.build({
       userId: this.userId,
       conversationId: this.conversationId,
@@ -662,6 +655,8 @@ export class EvenHubV2Runtime {
       trace: {
         memoryUsedIds: context.memoryUsedIds,
         prenoteUsedIds: context.prenoteUsedIds,
+        router,
+        routerError,
       },
     });
 
@@ -672,6 +667,7 @@ export class EvenHubV2Runtime {
         recentTranscript,
         contextSnapshot: context.contextSnapshot,
         settings: this.settings,
+        router,
       });
     } catch (error) {
       this.store.updateAutoCueAttempt(input.attemptId, {
@@ -682,6 +678,8 @@ export class EvenHubV2Runtime {
           error: error instanceof Error ? error.message : String(error),
           memoryUsedIds: context.memoryUsedIds,
           prenoteUsedIds: context.prenoteUsedIds,
+          router,
+          routerError,
         },
       });
       return;
@@ -691,7 +689,6 @@ export class EvenHubV2Runtime {
     const outputHash = hashText(cue.output);
     const displayDecision = shouldDisplayAutoCue({
       cue,
-      confidenceThreshold: this.confidenceThreshold,
       previousOutputHash: this.lastDisplayedCueOutputHash,
       outputHash,
       conversationActive: this.state.conversationStatus === "active",
@@ -713,12 +710,14 @@ export class EvenHubV2Runtime {
         trace: {
           memoryUsedIds: context.memoryUsedIds,
           prenoteUsedIds: context.prenoteUsedIds,
+          router,
+          routerError,
         },
       });
       return;
     }
 
-    if (!this.conversationId || this.state.conversationStatus !== "active" || cue.category === "none") {
+    if (!this.conversationId || this.state.conversationStatus !== "active") {
       this.store.updateAutoCueAttempt(input.attemptId, {
         status: "stale",
         category: cue.category,
@@ -731,6 +730,12 @@ export class EvenHubV2Runtime {
         model: result.model,
         latencyMs: Date.now() - input.startedAt,
         skippedReason: "stale_after_validation",
+        trace: {
+          memoryUsedIds: context.memoryUsedIds,
+          prenoteUsedIds: context.prenoteUsedIds,
+          router,
+          routerError,
+        },
       });
       return;
     }
@@ -749,7 +754,6 @@ export class EvenHubV2Runtime {
       createdAt,
     });
     this.lastDisplayedCueOutputHash = outputHash;
-    this.displayedCueTimes.push(Date.now());
     this.store.updateAutoCueAttempt(input.attemptId, {
       status: "created",
       category: cue.category,
@@ -765,6 +769,8 @@ export class EvenHubV2Runtime {
         cueId: storedCue.id,
         memoryUsedIds: context.memoryUsedIds,
         prenoteUsedIds: context.prenoteUsedIds,
+        router,
+        routerError,
       },
     });
     this.sendCueCreated(storedCue);

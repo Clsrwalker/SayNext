@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
 import type { AutoCueGenerationResult, AutoCueGenerator, AutoCueGeneratorInput } from "../evenhub-v2/auto-cue-generator";
+import type {
+  CueOpportunityRouter,
+  CueOpportunityRouterInput,
+  CueOpportunityRouterResult,
+} from "../evenhub-v2/cue-opportunity-router";
 import { createEvenHubV2ClientMessage, type EvenHubV2ServerMessage } from "../evenhub-v2/protocol";
 import { EvenHubV2Runtime } from "../evenhub-v2/runtime";
 import { EvenHubV2Store } from "../evenhub-v2/store";
@@ -33,6 +38,28 @@ class FakeAutoCueGenerator implements AutoCueGenerator {
     this.calls.push(input);
     return typeof this.result === "function" ? this.result() : this.result;
   }
+}
+
+class FakeCueOpportunityRouter implements CueOpportunityRouter {
+  calls: CueOpportunityRouterInput[] = [];
+
+  constructor(private readonly result: CueOpportunityRouterResult | Error) {}
+
+  async predict(input: CueOpportunityRouterInput): Promise<CueOpportunityRouterResult> {
+    this.calls.push(input);
+    if (this.result instanceof Error) throw this.result;
+    return this.result;
+  }
+}
+
+function cueNeededRouterResult(): CueOpportunityRouterResult {
+  return {
+    probability: 0.998,
+    decision: "cue_needed",
+    threshold: 0.519233227,
+    model: "saynext_context_router_v2",
+    latencyMs: 8,
+  };
 }
 
 function validCue(overrides: Partial<AutoCueGenerationResult["data"]> = {}): AutoCueGenerationResult {
@@ -81,9 +108,7 @@ function makeRuntime(
       autoCueGenerator: generator,
       sttAdapterFactory: () => null,
       debounceMs: 60_000,
-      cooldownMs: 0,
       finalFlushTimeoutMs: 0,
-      confidenceThreshold: 0.75,
       ...overrides,
     }),
   };
@@ -117,9 +142,9 @@ test("EvenHubV2Runtime creates a cue from final transcript through the auto pipe
   expect(store.listCues(conversationId)).toHaveLength(1);
 });
 
-test("EvenHubV2Runtime stores low-confidence attempts without pushing cue_created", async () => {
+test("EvenHubV2Runtime displays a complete cue without using confidence as a gate", async () => {
   const sent: EvenHubV2ServerMessage[] = [];
-  const generator = new FakeAutoCueGenerator(validCue({ category: "none", confidence: 0.2, title: "", g2Title: "", output: "" }));
+  const generator = new FakeAutoCueGenerator(validCue({ confidence: 0.2 }));
   const { runtime, store } = makeRuntime(generator, sent);
 
   await start(runtime);
@@ -131,11 +156,108 @@ test("EvenHubV2Runtime stores low-confidence attempts without pushing cue_create
 
   const conversationId = runtime.activeConversationId;
   if (!conversationId) throw new Error("conversation id missing");
-  expect(sent.some((message) => message.type === "cue_created")).toBe(false);
-  expect(store.listCues(conversationId)).toHaveLength(0);
+  expect(sent.some((message) => message.type === "cue_created")).toBe(true);
+  expect(store.listCues(conversationId)).toHaveLength(1);
   const attempts = store.getDb().query("SELECT * FROM evenhub_v2_auto_cue_attempts WHERE conversation_id = ?").all(conversationId) as any[];
   expect(attempts).toHaveLength(1);
-  expect(attempts[0].status).toBe("skipped");
+  expect(attempts[0].status).toBe("created");
+});
+
+test("EvenHubV2Runtime does not rate-limit or cool down consecutive useful cues", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  let cueNumber = 0;
+  const generator = new FakeAutoCueGenerator(async () => {
+    cueNumber += 1;
+    return validCue({
+      title: `Cue ${cueNumber}`,
+      g2Title: `Cue ${cueNumber}`,
+      output: `Useful answer number ${cueNumber}.`,
+    });
+  });
+  const { runtime, store } = makeRuntime(generator, sent);
+
+  await start(runtime);
+  for (let index = 1; index <= 4; index += 1) {
+    await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+      text: `Question number ${index} needs a direct answer.`,
+      isFinal: true,
+    }));
+    await runtime.flushCueBufferNow();
+  }
+
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  expect(generator.calls).toHaveLength(4);
+  expect(sent.filter((message) => message.type === "cue_created")).toHaveLength(4);
+  expect(store.listCues(conversationId)).toHaveLength(4);
+});
+
+test("EvenHubV2Runtime sends the latest three transcript segments and router result to generation", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  const router = new FakeCueOpportunityRouter(cueNeededRouterResult());
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    cueOpportunityRouter: router,
+  });
+
+  await start(runtime);
+  for (const text of ["Older context.", "The interviewer asks about the database.", "Could you explain the trade-off?"]) {
+    await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", { text, isFinal: true }));
+  }
+  await runtime.flushCueBufferNow();
+
+  expect(router.calls).toEqual([{
+    segmentMinus2: "Older context.",
+    segmentMinus1: "The interviewer asks about the database.",
+    current: "Could you explain the trade-off?",
+  }]);
+  expect(generator.calls).toHaveLength(1);
+  expect(generator.calls[0].router).toEqual(cueNeededRouterResult());
+});
+
+test("EvenHubV2Runtime fails open when the router is unavailable", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  const router = new FakeCueOpportunityRouter(new Error("router unavailable"));
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    cueOpportunityRouter: router,
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "What should I say next in this interview?",
+    isFinal: true,
+  }));
+  await runtime.flushCueBufferNow();
+
+  expect(router.calls).toHaveLength(1);
+  expect(generator.calls).toHaveLength(1);
+  expect(generator.calls[0].router).toBeNull();
+  expect(sent.some((message) => message.type === "cue_created")).toBe(true);
+});
+
+test("EvenHubV2Runtime uses a stable partial_timeout transcript as a cue candidate", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 5,
+    partialCommitMinChars: 4,
+    partialCommitMinWords: 2,
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "Could you explain the deployment trade-off",
+    isFinal: false,
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  await runtime.flushCueBufferNow();
+
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  expect(store.listTranscriptLines(conversationId)[0]?.source).toBe("partial_timeout");
+  expect(generator.calls).toHaveLength(1);
+  expect(sent.some((message) => message.type === "cue_created")).toBe(true);
 });
 
 test("EvenHubV2Runtime keeps accepting transcript while an auto job is running", async () => {
