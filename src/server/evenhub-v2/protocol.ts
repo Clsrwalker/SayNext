@@ -6,6 +6,7 @@ export type AudioStatus = "stopped" | "starting" | "listening" | "reconnecting" 
 export type AutoCueJobStatus = "queued" | "running" | "created" | "skipped" | "failed" | "stale";
 export type AutoCueCategory = "response" | "concept" | "suggestion" | "person" | "none";
 export type EvenHubV2AudioSource = "glasses" | "phone";
+export type EvenHubV2ObservedAudioSource = EvenHubV2AudioSource | "unknown";
 
 export type EvenHubV2Settings = {
   language: "english" | "chinese" | "auto";
@@ -42,6 +43,13 @@ export type EvenHubV2ClientMessage =
       sampleRate?: number;
       channels?: number;
       audioSource?: EvenHubV2AudioSource;
+    }>
+  | EvenHubV2Envelope<"audio_diagnostics", {
+      selectedSource?: EvenHubV2AudioSource;
+      chunkCount?: number;
+      byteCount?: number;
+      sourceCounts?: Partial<Record<EvenHubV2ObservedAudioSource, number>>;
+      mismatchCount?: number;
     }>
   | EvenHubV2Envelope<"audio_stop", Record<string, never>>
   | EvenHubV2Envelope<"conversation_end", Record<string, never>>
@@ -93,6 +101,22 @@ export type EvenHubV2ServerMessage =
       transcriptCount: number;
       cueCount: number;
       endedAt: string;
+      audioStats?: {
+        chunkCount: number;
+        byteCount: number;
+        avgRms: number;
+        minRms: number;
+        maxRms: number;
+        peak: number;
+        avgZeroRatio: number;
+        maxClippedRatio: number;
+        lowRmsChunkCount: number;
+        selectedSource?: EvenHubV2AudioSource;
+        clientChunkCount?: number;
+        clientByteCount?: number;
+        clientSourceCounts?: Record<EvenHubV2ObservedAudioSource, number>;
+        clientMismatchCount?: number;
+      };
     }>
   | EvenHubV2Envelope<"status", {
       status: string;
@@ -163,6 +187,21 @@ function normalizeAudioSource(value: unknown): EvenHubV2AudioSource | undefined 
   return value === "phone" || value === "glasses" ? value : undefined;
 }
 
+function normalizeNonNegativeCount(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.trunc(value);
+}
+
+function normalizeAudioSourceCounts(value: unknown): Partial<Record<EvenHubV2ObservedAudioSource, number>> | undefined {
+  if (!isRecord(value)) return undefined;
+  const next: Partial<Record<EvenHubV2ObservedAudioSource, number>> = {};
+  for (const source of ["phone", "glasses", "unknown"] as const) {
+    const count = normalizeNonNegativeCount(value[source]);
+    if (typeof count === "number") next[source] = count;
+  }
+  return next;
+}
+
 export function parseEvenHubV2ClientMessage(raw: string): ParseEvenHubV2Result {
   let parsed: unknown;
   try {
@@ -231,6 +270,23 @@ export function parseEvenHubV2ClientMessage(raw: string): ParseEvenHubV2Result {
           sampleRate,
           channels,
           audioSource: normalizeAudioSource(payload.audioSource),
+        },
+      },
+    };
+  }
+
+  if (parsed.type === "audio_diagnostics") {
+    return {
+      ok: true,
+      message: {
+        ...base,
+        type: "audio_diagnostics",
+        payload: {
+          selectedSource: normalizeAudioSource(payload.selectedSource),
+          chunkCount: normalizeNonNegativeCount(payload.chunkCount),
+          byteCount: normalizeNonNegativeCount(payload.byteCount),
+          sourceCounts: normalizeAudioSourceCounts(payload.sourceCounts),
+          mismatchCount: normalizeNonNegativeCount(payload.mismatchCount),
         },
       },
     };

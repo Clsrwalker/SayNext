@@ -154,14 +154,18 @@ pre {
 }
 
 .record-section {
-  max-height: calc(100vh - 332px);
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 332px);
   min-height: 262px;
   overflow: hidden;
 }
 
 .record-list {
   display: grid;
+  flex: 1 1 auto;
   gap: 8px;
+  min-height: 0;
   max-height: 100%;
   overflow-y: auto;
   padding-bottom: 10px;

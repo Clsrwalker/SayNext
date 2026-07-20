@@ -100,6 +100,13 @@ export type EvenHubV2SummaryRecord = {
   updatedAt: string;
 };
 
+export type EvenHubV2UserSettingsRecord = {
+  userId: string;
+  settingsJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CreateConversationInput = {
   id: string;
   userId: string;
@@ -160,6 +167,11 @@ export type QueueSummaryInput = {
   conversationId: string;
   userId: string;
   queuedAt: string;
+};
+
+export type UpsertUserSettingsInput = {
+  userId: string;
+  settings: EvenHubV2Settings;
 };
 
 export type CompleteSummaryInput = {
@@ -256,6 +268,15 @@ export class EvenHubV2Store {
     db.run("CREATE INDEX IF NOT EXISTS idx_evenhub_v2_conversations_user_time ON evenhub_v2_conversations(user_id, started_at DESC)");
 
     db.run(`
+      CREATE TABLE IF NOT EXISTS evenhub_v2_user_settings (
+        user_id TEXT PRIMARY KEY,
+        settings_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    db.run(`
       CREATE TABLE IF NOT EXISTS evenhub_v2_transcript_lines (
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL,
@@ -263,7 +284,7 @@ export class EvenHubV2Store {
         line_index INTEGER NOT NULL,
         text TEXT NOT NULL,
         received_at TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'deepgram',
+        source TEXT NOT NULL DEFAULT 'stt',
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(conversation_id) REFERENCES evenhub_v2_conversations(id) ON DELETE CASCADE
       )
@@ -346,6 +367,25 @@ export class EvenHubV2Store {
       )
     `);
     db.run("CREATE INDEX IF NOT EXISTS idx_evenhub_v2_summaries_status ON evenhub_v2_summaries(status, queued_at)");
+  }
+
+  upsertUserSettings(input: UpsertUserSettingsInput): EvenHubV2UserSettingsRecord {
+    this.getDb().query(`
+      INSERT INTO evenhub_v2_user_settings (
+        user_id, settings_json
+      ) VALUES (?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        settings_json = excluded.settings_json,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(input.userId, asJson(input.settings));
+    return this.getUserSettings(input.userId)!;
+  }
+
+  getUserSettings(userId: string): EvenHubV2UserSettingsRecord | null {
+    const row = this.getDb()
+      .query("SELECT * FROM evenhub_v2_user_settings WHERE user_id = ?")
+      .get(userId) as any;
+    return row ? EvenHubV2UserSettingsRecordMapper(row) : null;
   }
 
   createConversation(input: CreateConversationInput): EvenHubV2ConversationRecord {
@@ -794,6 +834,15 @@ function EvenHubV2SummaryRecordMapper(row: any): EvenHubV2SummaryRecord {
     queuedAt: row.queued_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function EvenHubV2UserSettingsRecordMapper(row: any): EvenHubV2UserSettingsRecord {
+  return {
+    userId: row.user_id,
+    settingsJson: row.settings_json,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

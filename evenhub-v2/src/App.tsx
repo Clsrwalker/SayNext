@@ -24,6 +24,8 @@ import {
   loadBootstrap,
   loadConversationDetail,
   partialTranscriptFromServer,
+  savePrenoteDraft,
+  saveServerSettings,
   transcriptFromServer,
   wsUrl,
   type EvenHubV2ServerMessage,
@@ -43,6 +45,8 @@ import { createGlassRenderer, type GlassRendererHandle } from "./glasses-rendere
 import { buildMenuItems, INITIAL_GLASS_STATE, makeAutoCueVisibility, startLiveGlasses } from "./glasses-state";
 import { removeRecordById, replaceRecordInPlace } from "./record-list";
 import { shouldAutoFollowTranscriptScroll } from "./transcript-scroll";
+import { isExplicitAudioSourceMismatch, type AudioEventSource } from "./audio-source";
+import { loadStoredConversationSettings, resolveBootstrapConversationSettings, saveConversationSettings } from "./settings-storage";
 import { normalizeSupportedVoiceInput } from "./voice-input";
 import type {
   AiCue,
@@ -73,6 +77,30 @@ type Screen = "home" | "settings" | "noteEditor" | "live" | "history" | "convers
 
 const MAX_FILES = 5;
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const AUDIO_DIAGNOSTICS_INTERVAL_MS = 5000;
+const SETTINGS_SYNC_DEBOUNCE_MS = 500;
+
+type AudioDiagnosticsState = {
+  chunkCount: number;
+  byteCount: number;
+  sourceCounts: Record<AudioEventSource, number>;
+  mismatchCount: number;
+  lastSentAt: number;
+};
+
+function emptyAudioDiagnostics(): AudioDiagnosticsState {
+  return {
+    chunkCount: 0,
+    byteCount: 0,
+    sourceCounts: {
+      phone: 0,
+      glasses: 0,
+      unknown: 0,
+    },
+    mismatchCount: 0,
+    lastSentAt: 0,
+  };
+}
 
 function cueIcon(category: CueCategory) {
   if (category === "concept") return <BookOpen size={22} strokeWidth={1.7} />;
@@ -99,9 +127,22 @@ function selectedPrenote(prenotes: Prenote[]): Prenote | null {
   };
 }
 
+function loadInitialConversationSettings(): {
+  settings: ConversationSettings;
+  hasLocalSettings: boolean;
+} {
+  const stored = loadStoredConversationSettings(DEFAULT_SETTINGS);
+  return {
+    settings: stored || DEFAULT_SETTINGS,
+    hasLocalSettings: Boolean(stored),
+  };
+}
+
 export default function App() {
+  const initialSettings = useMemo(() => loadInitialConversationSettings(), []);
   const [screen, setScreen] = useState<Screen>("home");
-  const [settings, setSettings] = useState<ConversationSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<ConversationSettings>(initialSettings.settings);
+  const [settingsReady, setSettingsReady] = useState(false);
   const [records, setRecords] = useState<ConversationRecord[]>([]);
   const [prenotes, setPrenotes] = useState<Prenote[]>([]);
   const [cues, setCues] = useState<AiCue[]>([]);
@@ -127,10 +168,14 @@ export default function App() {
   const pendingStartPayloadRef = useRef<unknown | null>(null);
   const pendingAudioStartRef = useRef(false);
   const activeAudioSourceRef = useRef<VoiceInput>("glasses");
+  const audioSourceMismatchCountRef = useRef(0);
+  const audioDiagnosticsRef = useRef<AudioDiagnosticsState>(emptyAudioDiagnostics());
   const recordPointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const skipNextRecordClickRef = useRef(false);
   const pendingDetailBackViewRef = useRef<"cue_detail" | "prenote_detail" | null>(null);
   const suppressMenuDoubleClickUntilRef = useRef(0);
+  const hasLocalSettingsRef = useRef(initialSettings.hasLocalSettings);
+  const settingsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activePrenote = useMemo(() => selectedPrenote(prenotes), [prenotes]);
   const activeRecord = records.find((record) => record.id === activeRecordId) || records[0] || null;
@@ -171,18 +216,34 @@ export default function App() {
   }, [settings.voiceInput]);
 
   useEffect(() => {
+    saveConversationSettings(settings);
+    hasLocalSettingsRef.current = true;
+    if (!settingsReady) return;
+
+    if (settingsSyncTimerRef.current) clearTimeout(settingsSyncTimerRef.current);
+    settingsSyncTimerRef.current = setTimeout(() => {
+      void saveServerSettings(settings).catch(() => undefined);
+    }, SETTINGS_SYNC_DEBOUNCE_MS);
+
+    return () => {
+      if (settingsSyncTimerRef.current) {
+        clearTimeout(settingsSyncTimerRef.current);
+        settingsSyncTimerRef.current = null;
+      }
+    };
+  }, [settings, settingsReady]);
+
+  useEffect(() => {
     let cancelled = false;
     void loadBootstrap()
       .then((bootstrap) => {
         if (cancelled) return;
         if (bootstrap.settings) {
-          setSettings((current) => ({
-            ...current,
-            ...bootstrap.settings,
-            glassContent: {
-              ...current.glassContent,
-              ...bootstrap.settings?.glassContent,
-            },
+          setSettings((current) => resolveBootstrapConversationSettings({
+            current,
+            bootstrap: bootstrap.settings,
+            bootstrapSource: bootstrap.settingsSource,
+            hasLocalSettings: hasLocalSettingsRef.current,
           }));
         }
         setPrenotes(bootstrap.prenotes);
@@ -191,6 +252,9 @@ export default function App() {
       })
       .catch(() => {
         if (!cancelled) setConnectionStatus("bootstrap_failed");
+      })
+      .finally(() => {
+        if (!cancelled) setSettingsReady(true);
       });
     return () => {
       cancelled = true;
@@ -289,7 +353,12 @@ export default function App() {
       },
       onAudio: (audio) => {
         const ws = wsRef.current;
-        if (ws?.readyState === WebSocket.OPEN && activeConversationIdRef.current && isListeningRef.current) {
+        if (
+          ws?.readyState === WebSocket.OPEN
+          && activeConversationIdRef.current
+          && isListeningRef.current
+        ) {
+          recordAudioDiagnostic(audio.source, audio.pcm.byteLength);
           ws.send(audio.pcm);
         }
       },
@@ -359,6 +428,42 @@ export default function App() {
 
   function audioStartPayload(source: VoiceInput) {
     return { codec: "linear16", sampleRate: 16000, channels: 1, audioSource: source };
+  }
+
+  function resetAudioDiagnostics() {
+    audioDiagnosticsRef.current = emptyAudioDiagnostics();
+  }
+
+  function sendAudioDiagnostics(force = false) {
+    const ws = wsRef.current;
+    const conversationId = activeConversationIdRef.current;
+    if (ws?.readyState !== WebSocket.OPEN || !conversationId) return;
+    const diagnostics = audioDiagnosticsRef.current;
+    if (!diagnostics.chunkCount) return;
+    const now = Date.now();
+    if (!force && now - diagnostics.lastSentAt < AUDIO_DIAGNOSTICS_INTERVAL_MS) return;
+    diagnostics.lastSentAt = now;
+    ws.send(JSON.stringify(createClientMessage("audio_diagnostics", {
+      selectedSource: activeAudioSourceRef.current,
+      chunkCount: diagnostics.chunkCount,
+      byteCount: diagnostics.byteCount,
+      sourceCounts: diagnostics.sourceCounts,
+      mismatchCount: diagnostics.mismatchCount,
+    }, conversationId)));
+  }
+
+  function recordAudioDiagnostic(source: AudioEventSource, byteCount: number) {
+    const diagnostics = audioDiagnosticsRef.current;
+    diagnostics.chunkCount += 1;
+    diagnostics.byteCount += byteCount;
+    diagnostics.sourceCounts[source] += 1;
+    if (isExplicitAudioSourceMismatch(activeAudioSourceRef.current, source)) {
+      diagnostics.mismatchCount += 1;
+      audioSourceMismatchCountRef.current += 1;
+    } else {
+      audioSourceMismatchCountRef.current = 0;
+    }
+    sendAudioDiagnostics(false);
   }
 
   function sendAudioStart(source = activeAudioSourceRef.current) {
@@ -557,9 +662,15 @@ export default function App() {
       ...noteDraft,
       title: firstLine ? firstLine.replace(/^#+\s*/, "").slice(0, 48) : noteDraft.title,
     };
-    setPrenotes((current) => [nextNote, ...current]);
-    setNoteDraft(null);
-    setScreen("home");
+    void savePrenoteDraft(nextNote)
+      .then((savedNote) => {
+        setPrenotes((current) => [savedNote, ...current.filter((note) => note.id !== nextNote.id && note.id !== savedNote.id)]);
+        setNoteDraft(null);
+        setScreen("home");
+      })
+      .catch(() => {
+        setConnectionStatus("prenote_save_failed");
+      });
   }
 
   function addFiles(files: FileList | null) {
@@ -588,6 +699,8 @@ export default function App() {
     const startSettings = voiceInput === settings.voiceInput ? settings : { ...settings, voiceInput };
     const payload = conversationStartPayload(startSettings, activePrenote);
     activeAudioSourceRef.current = voiceInput;
+    audioSourceMismatchCountRef.current = 0;
+    resetAudioDiagnostics();
     const started = sendWs("conversation_start", payload);
     if (!started) {
       pendingStartPayloadRef.current = payload;
@@ -605,6 +718,7 @@ export default function App() {
   }
 
   function endConversation() {
+    sendAudioDiagnostics(true);
     setIsListening(false);
     setBridgeAudioEnabled(false);
     pendingStartPayloadRef.current = null;

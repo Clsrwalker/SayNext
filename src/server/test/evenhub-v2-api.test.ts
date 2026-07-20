@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ensureSummaryForEndedConversation, serializeSummary } from "../api/evenhub-v2";
+import { ensureSummaryForEndedConversation, getEvenHubV2SettingsBootstrap, serializeEvenHubV2Prenote, serializeSummary } from "../api/evenhub-v2";
 import { EvenHubV2Store, type EvenHubV2SummaryRecord } from "../evenhub-v2/store";
 
 function summary(overrides: Partial<EvenHubV2SummaryRecord> = {}): EvenHubV2SummaryRecord {
@@ -59,6 +59,69 @@ test("serializeSummary exposes structured result without raw debug fields", () =
   });
   expect(JSON.stringify(serialized)).not.toContain("sensitive raw output");
   expect(JSON.stringify(serialized)).not.toContain("private trace");
+});
+
+test("serializeEvenHubV2Prenote maps stored prenotes to phone app shape", () => {
+  const prenote = serializeEvenHubV2Prenote({
+    id: 42,
+    userId: "user-1",
+    title: "Interview notes",
+    description: "",
+    status: "ready",
+    isActive: true,
+    sourceText: "raw source text",
+    extractedText: "",
+    processedJson: "{}",
+    runtimeContext: "usable note text",
+    model: null,
+    contentHash: "",
+    error: "",
+    createdAt: "2026-06-22T10:00:00.000Z",
+    updatedAt: "2026-06-22T10:00:00.000Z",
+  });
+
+  expect(prenote).toEqual({
+    id: "42",
+    title: "Interview notes",
+    text: "usable note text",
+    selected: true,
+    files: [],
+  });
+});
+
+test("getEvenHubV2SettingsBootstrap distinguishes default and saved settings", () => {
+  const store = new EvenHubV2Store(":memory:");
+
+  expect(getEvenHubV2SettingsBootstrap("user-1", store)).toMatchObject({
+    settingsSource: "default",
+    settings: {
+      language: "english",
+      showAiCue: true,
+      showTranscript: true,
+    },
+  });
+
+  store.upsertUserSettings({
+    userId: "user-1",
+    settings: {
+      language: "chinese",
+      cueDurationMs: "forever",
+      autoPopup: false,
+      showAiCue: false,
+      showTranscript: true,
+    },
+  });
+
+  expect(getEvenHubV2SettingsBootstrap("user-1", store)).toMatchObject({
+    settingsSource: "saved",
+    settings: {
+      language: "chinese",
+      cueDurationMs: "forever",
+      autoPopup: false,
+      showAiCue: false,
+      showTranscript: true,
+    },
+  });
 });
 
 test("ensureSummaryForEndedConversation lazily queues ended conversations without summary", () => {

@@ -30,7 +30,14 @@ import { getTranscriptExport, listTranscriptExports, summarizeTranscriptExport }
 import { createSceneProfile, deleteSceneProfile, getSceneProfile, listSceneProfiles, updateSceneProfile } from "../api/scene-profiles";
 import { createPersonalMemory, deletePersonalMemory, listPersonalMemories, searchPersonalMemories, updatePersonalMemory } from "../api/personal-memories";
 import { replaySayNextApi } from "../api/debug-saynext-replay";
-import { deleteEvenHubV2Conversation, getEvenHubV2Bootstrap, getEvenHubV2Conversation, listEvenHubV2Conversations } from "../api/evenhub-v2";
+import {
+  createEvenHubV2Prenote,
+  deleteEvenHubV2Conversation,
+  getEvenHubV2Bootstrap,
+  getEvenHubV2Conversation,
+  listEvenHubV2Conversations,
+  updateEvenHubV2Settings,
+} from "../api/evenhub-v2";
 import {
   extractSessionMemoryCandidatesApi,
   deleteSessionMemoryCandidate,
@@ -44,7 +51,7 @@ export const api = new Hono();
 
 api.use("/evenhub/v2/*", cors({
   origin: "*",
-  allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+  allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "Authorization", "X-EvenHub-Token"],
 }));
 
@@ -118,6 +125,8 @@ api.post("/debug/saynext-replay", replaySayNextApi);
 
 // EvenHub v2 app bootstrap/history. The websocket lives at /api/evenhub/v2/ws.
 api.get("/evenhub/v2/bootstrap", getEvenHubV2Bootstrap);
+api.patch("/evenhub/v2/settings", updateEvenHubV2Settings);
+api.post("/evenhub/v2/prenotes", createEvenHubV2Prenote);
 api.get("/evenhub/v2/conversations", listEvenHubV2Conversations);
 api.get("/evenhub/v2/conversations/:id", getEvenHubV2Conversation);
 api.delete("/evenhub/v2/conversations/:id", deleteEvenHubV2Conversation);

@@ -8,7 +8,7 @@ import {
   type EvenAppBridge,
   type EvenHubEvent,
 } from "@evenrealities/even_hub_sdk";
-import { normalizeAudioEventSource, toSdkAudioInputSource } from "./audio-source";
+import { normalizeAudioEventSource, toSdkAudioInputSource, type AudioEventSource } from "./audio-source";
 import type { GlassListContainerSpec, GlassPageSpec, GlassTextContainerSpec } from "./glasses-layout";
 import type { VoiceInput } from "./types";
 
@@ -20,7 +20,7 @@ export type GlassTextContainerUpdateSpec = {
 
 export type BridgeAudioChunk = {
   pcm: Uint8Array;
-  source: VoiceInput;
+  source: AudioEventSource;
 };
 
 export type GlassBridgeHandle = {
@@ -94,7 +94,22 @@ function toStartupContainer(page: GlassPageSpec): CreateStartUpPageContainer {
   });
 }
 
-function readAudioChunk(event: EvenHubEvent): BridgeAudioChunk | null {
+function decodeBase64Pcm(value: string): Uint8Array | null {
+  const decoder = globalThis.atob;
+  if (typeof decoder !== "function") return null;
+  try {
+    const binary = decoder(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+export function readAudioChunk(event: EvenHubEvent): BridgeAudioChunk | null {
   const raw = event as unknown as {
     audioEvent?: { audioPcm?: unknown; source?: unknown };
   };
@@ -103,6 +118,10 @@ function readAudioChunk(event: EvenHubEvent): BridgeAudioChunk | null {
   if (pcm instanceof Uint8Array) return { pcm, source };
   if (pcm instanceof ArrayBuffer) return { pcm: new Uint8Array(pcm), source };
   if (Array.isArray(pcm)) return { pcm: new Uint8Array(pcm), source };
+  if (typeof pcm === "string") {
+    const bytes = decodeBase64Pcm(pcm);
+    return bytes ? { pcm: bytes, source } : null;
+  }
   return null;
 }
 

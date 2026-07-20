@@ -1,10 +1,12 @@
 import type { Context } from "hono";
-import { defaultEvenHubV2Settings } from "../evenhub-v2/protocol";
+import { defaultEvenHubV2Settings, normalizeEvenHubV2Settings, type EvenHubV2Settings } from "../evenhub-v2/protocol";
 import { evenHubV2SummaryRunner } from "../evenhub-v2/summary-runner";
 import { evenHubV2Store, parseStoredJson, type EvenHubV2Store, type EvenHubV2SummaryRecord } from "../evenhub-v2/store";
+import { conversationLogger, type PrenoteRecord } from "../data/conversation-logger";
 
 type ConversationDetail = NonNullable<ReturnType<EvenHubV2Store["getConversationDetail"]>>;
 type SummaryQueueRunner = Pick<typeof evenHubV2SummaryRunner, "queueSummary" | "enqueue">;
+type SettingsSource = "saved" | "default";
 
 function getUserId(c: Context): string {
   if (process.env.EVENHUB_V2_ALLOW_QUERY_USER_ID === "true") {
@@ -38,6 +40,64 @@ export function serializeSummary(summary: EvenHubV2SummaryRecord | null) {
     generatedAt: summary.completedAt,
     error: summary.error,
   };
+}
+
+export function serializeEvenHubV2Prenote(prenote: PrenoteRecord) {
+  return {
+    id: String(prenote.id),
+    title: prenote.title,
+    text: prenote.runtimeContext || prenote.sourceText || prenote.description || "",
+    selected: prenote.isActive,
+    files: [],
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+export function getEvenHubV2SettingsBootstrap(
+  userId: string,
+  store: Pick<EvenHubV2Store, "getUserSettings"> = evenHubV2Store,
+): {
+  settings: EvenHubV2Settings;
+  settingsSource: SettingsSource;
+  settingsUpdatedAt: string;
+} {
+  const saved = store.getUserSettings(userId);
+  if (!saved) {
+    return {
+      settings: defaultEvenHubV2Settings(),
+      settingsSource: "default",
+      settingsUpdatedAt: "",
+    };
+  }
+
+  return {
+    settings: normalizeEvenHubV2Settings(
+      parseStoredJson<Partial<EvenHubV2Settings>>(saved.settingsJson, {}),
+      defaultEvenHubV2Settings(),
+    ),
+    settingsSource: "saved",
+    settingsUpdatedAt: saved.updatedAt,
+  };
+}
+
+function inferPrenoteTitle(text: string, fallback = "新笔记"): string {
+  const firstLine = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return (firstLine || fallback).replace(/^#+\s*/, "").slice(0, 48) || fallback;
+}
+
+async function readJsonBody(c: Context): Promise<Record<string, any> | null> {
+  try {
+    const body = await c.req.json();
+    return body && typeof body === "object" ? body : {};
+  } catch {
+    return null;
+  }
 }
 
 export function ensureSummaryForEndedConversation(
@@ -79,13 +139,65 @@ function serializeConversation(record: ReturnType<typeof evenHubV2Store.listConv
 
 export const getEvenHubV2Bootstrap = (c: Context) => {
   const userId = getUserId(c);
+  const settings = getEvenHubV2SettingsBootstrap(userId);
   const conversations = evenHubV2Store.listConversations(userId, 20).map(serializeConversation);
   return c.json({
     userId,
-    settings: defaultEvenHubV2Settings(),
-    prenotes: [],
+    ...settings,
+    prenotes: conversationLogger.listPrenotes(userId).map(serializeEvenHubV2Prenote),
     conversations,
   });
+};
+
+export const updateEvenHubV2Settings = async (c: Context) => {
+  const userId = getUserId(c);
+  const body = await readJsonBody(c);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+
+  const current = getEvenHubV2SettingsBootstrap(userId).settings;
+  const rawSettings = isRecord(body.settings) ? body.settings : body;
+  const settings = normalizeEvenHubV2Settings(rawSettings as Partial<EvenHubV2Settings>, current);
+  const saved = evenHubV2Store.upsertUserSettings({ userId, settings });
+
+  return c.json({
+    settings,
+    settingsSource: "saved" satisfies SettingsSource,
+    settingsUpdatedAt: saved.updatedAt,
+  });
+};
+
+export const createEvenHubV2Prenote = async (c: Context) => {
+  const userId = getUserId(c);
+  const body = await readJsonBody(c);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+
+  const text = String(body.text || "").trim();
+  if (!text) return c.json({ error: "Prenote text is required" }, 400);
+
+  const title = String(body.title || "").trim() || inferPrenoteTitle(text);
+  const prenote = conversationLogger.createPrenote({
+    userId,
+    title: title.slice(0, 80),
+    description: "EvenHub v2 prepared note",
+    sourceText: text,
+  });
+  if (!prenote) return c.json({ error: "Prenote storage is disabled" }, 503);
+
+  const updated = conversationLogger.updatePrenoteProcessing(prenote.id, {
+    status: "ready",
+    runtimeContext: text,
+    extractedText: "",
+    processedJson: "{}",
+    model: "manual",
+    contentHash: "",
+    error: "",
+  }) ?? prenote;
+
+  if (body.selected !== false) {
+    conversationLogger.setPrenoteActive(userId, updated.id, true);
+  }
+
+  return c.json({ prenote: serializeEvenHubV2Prenote(conversationLogger.getPrenote(updated.id) ?? updated) }, 201);
 };
 
 export const listEvenHubV2Conversations = (c: Context) => {

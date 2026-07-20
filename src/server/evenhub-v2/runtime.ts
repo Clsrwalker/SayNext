@@ -15,6 +15,7 @@ import {
   LightweightEvenHubV2ContextAdapter,
   type EvenHubV2ContextAdapter,
 } from "./context-adapter";
+import { computeLinear16AudioStats, type Linear16AudioStats } from "./audio-diagnostics";
 import {
   defaultEvenHubV2Settings,
   makeEvenHubV2Id,
@@ -25,6 +26,7 @@ import {
   type EvenHubV2AudioSource,
   type EvenHubV2ClientMessage,
   type EvenHubV2Envelope,
+  type EvenHubV2ObservedAudioSource,
   type EvenHubV2ServerMessage,
   type EvenHubV2Settings,
 } from "./protocol";
@@ -58,9 +60,40 @@ type EvenHubV2RuntimeOptions = {
   confidenceThreshold?: number;
   finalFlushTimeoutMs?: number;
   partialCommitMs?: number;
+  partialCommitMinChars?: number;
+  partialCommitMinWords?: number;
 };
 
 const DEFAULT_USER_ID = "evenhub-v2-user";
+const DEFAULT_PARTIAL_COMMIT_MS = 3000;
+const DEFAULT_PARTIAL_COMMIT_MIN_CHARS = 12;
+const DEFAULT_PARTIAL_COMMIT_MIN_WORDS = 4;
+const LOW_RMS_THRESHOLD = 80;
+
+type ClientAudioDiagnostics = {
+  selectedSource?: EvenHubV2AudioSource;
+  chunkCount?: number;
+  byteCount?: number;
+  sourceCounts?: Record<EvenHubV2ObservedAudioSource, number>;
+  mismatchCount?: number;
+};
+
+type AudioStatsSummary = {
+  chunkCount: number;
+  byteCount: number;
+  avgRms: number;
+  minRms: number;
+  maxRms: number;
+  peak: number;
+  avgZeroRatio: number;
+  maxClippedRatio: number;
+  lowRmsChunkCount: number;
+  selectedSource?: EvenHubV2AudioSource;
+  clientChunkCount?: number;
+  clientByteCount?: number;
+  clientSourceCounts?: Record<EvenHubV2ObservedAudioSource, number>;
+  clientMismatchCount?: number;
+};
 
 function normalizeText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
@@ -88,12 +121,15 @@ export class EvenHubV2Runtime {
   private readonly contextAdapter: EvenHubV2ContextAdapter;
   private readonly summaryRunner: Pick<EvenHubV2SummaryRunner, "queueSummary" | "enqueue">;
   private readonly sttAdapter: EvenHubSttAdapter | null;
+  private readonly sttProvider: string;
   private readonly debounceMs: number;
   private readonly cooldownMs: number;
   private readonly maxDisplayedCuesPerMinute: number;
   private readonly confidenceThreshold: number;
   private readonly finalFlushTimeoutMs: number;
   private readonly partialCommitMs: number;
+  private readonly partialCommitMinChars: number;
+  private readonly partialCommitMinWords: number;
   private serverSeq = 0;
   private settings: EvenHubV2Settings;
   private conversationId: string | null = null;
@@ -110,6 +146,15 @@ export class EvenHubV2Runtime {
   private currentAutoJob: Promise<void> | null = null;
   private audioBytesReceived = 0;
   private audioChunksReceived = 0;
+  private lastAudioStats: Linear16AudioStats | null = null;
+  private audioRmsTotal = 0;
+  private audioMinRms: number | null = null;
+  private audioMaxRms = 0;
+  private audioPeak = 0;
+  private audioZeroRatioTotal = 0;
+  private audioMaxClippedRatio = 0;
+  private lowRmsChunkCount = 0;
+  private clientAudioDiagnostics: ClientAudioDiagnostics = {};
   private sttPartialCount = 0;
   private sttFinalCount = 0;
   private finalSavedCount = 0;
@@ -140,13 +185,16 @@ export class EvenHubV2Runtime {
         this.sendAudioStatus("failed", error.message);
       },
     });
+    this.sttProvider = this.sttAdapter?.provider || "stt";
     this.settings = normalizeEvenHubV2Settings(options.settings);
     this.debounceMs = options.debounceMs ?? Number(process.env.EVENHUB_V2_CUE_DEBOUNCE_MS || 900);
     this.cooldownMs = options.cooldownMs ?? Number(process.env.EVENHUB_V2_CUE_COOLDOWN_MS || 8000);
     this.maxDisplayedCuesPerMinute = options.maxDisplayedCuesPerMinute ?? Number(process.env.EVENHUB_V2_MAX_CUES_PER_MINUTE || 3);
     this.confidenceThreshold = options.confidenceThreshold ?? Number(process.env.EVENHUB_V2_CUE_CONFIDENCE_THRESHOLD || 0.75);
     this.finalFlushTimeoutMs = options.finalFlushTimeoutMs ?? Number(process.env.EVENHUB_V2_FINAL_FLUSH_TIMEOUT_MS || 800);
-    this.partialCommitMs = options.partialCommitMs ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MS || 1200);
+    this.partialCommitMs = options.partialCommitMs ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MS || DEFAULT_PARTIAL_COMMIT_MS);
+    this.partialCommitMinChars = options.partialCommitMinChars ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MIN_CHARS || DEFAULT_PARTIAL_COMMIT_MIN_CHARS);
+    this.partialCommitMinWords = options.partialCommitMinWords ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MIN_WORDS || DEFAULT_PARTIAL_COMMIT_MIN_WORDS);
   }
 
   get snapshot(): RuntimeState {
@@ -194,6 +242,11 @@ export class EvenHubV2Runtime {
       return;
     }
 
+    if (message.type === "audio_diagnostics") {
+      this.handleAudioDiagnostics(message.payload || {});
+      return;
+    }
+
     if (message.type === "audio_stop") {
       await this.stopAudio("stopped_by_client");
       return;
@@ -222,6 +275,8 @@ export class EvenHubV2Runtime {
   handleAudioChunk(chunk: Uint8Array): void {
     this.audioBytesReceived += chunk.byteLength;
     this.audioChunksReceived += 1;
+    this.lastAudioStats = computeLinear16AudioStats(chunk);
+    this.updateAudioStats(this.lastAudioStats);
     this.logAudioProgress("chunk");
     if (this.state.conversationStatus !== "active") {
       this.sendAudioStatus(this.state.audioStatus, "Audio ignored because no active conversation.", true);
@@ -279,6 +334,15 @@ export class EvenHubV2Runtime {
     this.displayedCueTimes = [];
     this.audioBytesReceived = 0;
     this.audioChunksReceived = 0;
+    this.lastAudioStats = null;
+    this.audioRmsTotal = 0;
+    this.audioMinRms = null;
+    this.audioMaxRms = 0;
+    this.audioPeak = 0;
+    this.audioZeroRatioTotal = 0;
+    this.audioMaxClippedRatio = 0;
+    this.lowRmsChunkCount = 0;
+    this.clientAudioDiagnostics = {};
     this.sttPartialCount = 0;
     this.sttFinalCount = 0;
     this.finalSavedCount = 0;
@@ -354,6 +418,54 @@ export class EvenHubV2Runtime {
     this.sendAudioStatus("stopped", detail, true);
   }
 
+  private handleAudioDiagnostics(payload: Extract<EvenHubV2ClientMessage, { type: "audio_diagnostics" }>["payload"]): void {
+    const sourceCounts = payload.sourceCounts || {};
+    this.clientAudioDiagnostics = {
+      selectedSource: payload.selectedSource || this.clientAudioDiagnostics.selectedSource,
+      chunkCount: typeof payload.chunkCount === "number" ? payload.chunkCount : this.clientAudioDiagnostics.chunkCount,
+      byteCount: typeof payload.byteCount === "number" ? payload.byteCount : this.clientAudioDiagnostics.byteCount,
+      sourceCounts: {
+        phone: sourceCounts.phone ?? this.clientAudioDiagnostics.sourceCounts?.phone ?? 0,
+        glasses: sourceCounts.glasses ?? this.clientAudioDiagnostics.sourceCounts?.glasses ?? 0,
+        unknown: sourceCounts.unknown ?? this.clientAudioDiagnostics.sourceCounts?.unknown ?? 0,
+      },
+      mismatchCount: typeof payload.mismatchCount === "number" ? payload.mismatchCount : this.clientAudioDiagnostics.mismatchCount,
+    };
+  }
+
+  private updateAudioStats(stats: Linear16AudioStats): void {
+    this.audioRmsTotal += stats.rms;
+    this.audioMinRms = this.audioMinRms === null ? stats.rms : Math.min(this.audioMinRms, stats.rms);
+    this.audioMaxRms = Math.max(this.audioMaxRms, stats.rms);
+    this.audioPeak = Math.max(this.audioPeak, stats.peak);
+    this.audioZeroRatioTotal += stats.zeroRatio;
+    this.audioMaxClippedRatio = Math.max(this.audioMaxClippedRatio, stats.clippedRatio);
+    if (stats.rms > 0 && stats.rms < LOW_RMS_THRESHOLD) {
+      this.lowRmsChunkCount += 1;
+    }
+  }
+
+  private audioStatsSummary(): AudioStatsSummary {
+    const chunkCount = this.audioChunksReceived;
+    const diagnostics = this.clientAudioDiagnostics;
+    return {
+      chunkCount,
+      byteCount: this.audioBytesReceived,
+      avgRms: chunkCount ? Math.round(this.audioRmsTotal / chunkCount) : 0,
+      minRms: this.audioMinRms ?? 0,
+      maxRms: this.audioMaxRms,
+      peak: this.audioPeak,
+      avgZeroRatio: chunkCount ? Number((this.audioZeroRatioTotal / chunkCount).toFixed(3)) : 0,
+      maxClippedRatio: this.audioMaxClippedRatio,
+      lowRmsChunkCount: this.lowRmsChunkCount,
+      selectedSource: diagnostics.selectedSource || this.audioSource,
+      clientChunkCount: diagnostics.chunkCount,
+      clientByteCount: diagnostics.byteCount,
+      clientSourceCounts: diagnostics.sourceCounts,
+      clientMismatchCount: diagnostics.mismatchCount,
+    };
+  }
+
   private handlePartialTranscript(text: string): void {
     const normalized = normalizeText(text);
     if (!normalized || this.state.conversationStatus !== "active") return;
@@ -400,7 +512,11 @@ export class EvenHubV2Runtime {
       this.transcriptLines.push(line);
     }
     this.lastFinalText = normalized;
-    this.lastPartialText = normalized === this.lastPartialText ? "" : this.lastPartialText;
+    if (source !== "partial_timeout") {
+      this.lastPartialText = "";
+    } else if (normalized === this.lastPartialText) {
+      this.lastPartialText = "";
+    }
     this.finalSavedCount += 1;
     this.logTranscriptProgress("saved_final", normalized, source);
     if (this.state.conversationStatus === "active") {
@@ -425,12 +541,13 @@ export class EvenHubV2Runtime {
     if (isFinal) {
       this.sttFinalCount += 1;
       this.clearPartialCommitTimer();
-      this.logTranscriptProgress("deepgram_final", text, "deepgram");
-      await this.commitFinalTranscript(text, "deepgram");
+      this.lastPartialText = "";
+      this.logTranscriptProgress("stt_final", text, this.sttProvider);
+      await this.commitFinalTranscript(text, this.sttProvider);
       return;
     }
     this.sttPartialCount += 1;
-    this.logTranscriptProgress("deepgram_partial", text, "deepgram");
+    this.logTranscriptProgress("stt_partial", text, this.sttProvider);
     this.handlePartialTranscript(text);
   }
 
@@ -714,12 +831,14 @@ export class EvenHubV2Runtime {
     this.conversationId = null;
     this.candidateBuffer = [];
     this.clearPartialCommitTimer();
-    console.info(`[EvenHubV2] conversation ended id=${conversationId} chunks=${this.audioChunksReceived} bytes=${this.audioBytesReceived} partials=${this.sttPartialCount} finals=${this.sttFinalCount} saved=${this.finalSavedCount}`);
+    const audioStats = this.audioStatsSummary();
+    console.info(`[EvenHubV2] conversation ended id=${conversationId} chunks=${this.audioChunksReceived} bytes=${this.audioBytesReceived} partials=${this.sttPartialCount} finals=${this.sttFinalCount} saved=${this.finalSavedCount} audio=${JSON.stringify(audioStats)}`);
     this.sendMessage("conversation_saved", {
       conversationId,
       transcriptCount: this.transcriptLines.length,
       cueCount: this.store.listCues(conversationId).length,
       endedAt,
+      audioStats,
     }, conversationId);
     this.summaryRunner.enqueue(conversationId);
   }
@@ -780,7 +899,21 @@ export class EvenHubV2Runtime {
     if (!text) return;
     this.clearPartialCommitTimer();
     this.lastPartialText = "";
+    if (!this.shouldCommitPartialTimeout(text)) {
+      this.logTranscriptProgress("partial_timeout_skipped", text, "partial_timeout");
+      return;
+    }
     await this.commitFinalTranscript(text, "partial_timeout");
+  }
+
+  private shouldCommitPartialTimeout(text: string): boolean {
+    const normalized = normalizeText(text);
+    if (!normalized || normalized === this.lastFinalText) return false;
+    if (normalized.length < this.partialCommitMinChars) return false;
+    if (/\s/.test(normalized)) {
+      return normalized.split(/\s+/).filter(Boolean).length >= this.partialCommitMinWords;
+    }
+    return Array.from(normalized).length >= this.partialCommitMinChars;
   }
 
   private shouldReplacePartialTimeout(partial: string, final: string): boolean {
@@ -791,14 +924,18 @@ export class EvenHubV2Runtime {
 
   private logAudioProgress(reason: string): void {
     if (this.audioChunksReceived <= 3 || this.audioChunksReceived % 50 === 0) {
-      console.info(`[EvenHubV2] audio ${reason} conv=${this.conversationId || "-"} status=${this.state.audioStatus} chunks=${this.audioChunksReceived} bytes=${this.audioBytesReceived}`);
+      const stats = this.lastAudioStats;
+      const statsText = stats
+        ? ` samples=${stats.samples} rms=${stats.rms} peak=${stats.peak} zero=${stats.zeroRatio} clipped=${stats.clippedRatio}`
+        : "";
+      console.info(`[EvenHubV2] audio ${reason} conv=${this.conversationId || "-"} status=${this.state.audioStatus} source=${this.audioSource} chunks=${this.audioChunksReceived} bytes=${this.audioBytesReceived}${statsText}`);
     }
   }
 
   private logTranscriptProgress(event: string, text: string, source: string): void {
     const normalized = normalizeText(text);
-    if (event === "deepgram_partial" && this.sttPartialCount > 3 && this.sttPartialCount % 20 !== 0) return;
-    console.info(`[EvenHubV2] transcript ${event} conv=${this.conversationId || "-"} source=${source} partials=${this.sttPartialCount} finals=${this.sttFinalCount} saved=${this.finalSavedCount} len=${normalized.length} text=${JSON.stringify(normalized.slice(0, 120))}`);
+    if (event === "stt_partial" && this.sttPartialCount > 3 && this.sttPartialCount % 20 !== 0) return;
+    console.info(`[EvenHubV2] transcript ${event} conv=${this.conversationId || "-"} provider=${this.sttProvider} source=${source} partials=${this.sttPartialCount} finals=${this.sttFinalCount} saved=${this.finalSavedCount} len=${normalized.length} text=${JSON.stringify(normalized.slice(0, 120))}`);
   }
 
   private sendError(code: string, message: string, recoverable = false): void {

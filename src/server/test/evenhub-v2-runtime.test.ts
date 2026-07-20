@@ -186,6 +186,78 @@ test("EvenHubV2Runtime saves pending partial transcript as partial_timeout on en
   expect(sent.some((message) => message.type === "conversation_saved")).toBe(true);
 });
 
+test("EvenHubV2Runtime does not save very short partial_timeout fragments", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  const { runtime, store } = makeRuntime(generator, sent);
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "Is",
+    isFinal: false,
+  }));
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("conversation_end", {}));
+
+  expect(store.listTranscriptLines(conversationId)).toHaveLength(0);
+  expect(sent.some((message) => message.type === "conversation_saved")).toBe(true);
+});
+
+test("EvenHubV2Runtime clears stale partial text after a different final arrives", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  const { runtime, store } = makeRuntime(generator, sent);
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "the old partial wording that should not be saved",
+    isFinal: false,
+  }));
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "the final wording arrived from deepgram",
+    isFinal: true,
+  }));
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("conversation_end", {}));
+
+  const lines = store.listTranscriptLines(conversationId);
+  expect(lines).toHaveLength(1);
+  expect(lines[0].source).toBe("debug");
+  expect(lines[0].text).toBe("the final wording arrived from deepgram");
+});
+
+test("EvenHubV2Runtime labels STT transcript lines with the active provider", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  let emitTranscript!: (input: { text: string; isFinal: boolean }) => Promise<void> | void;
+  const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    sttAdapterFactory: (callbacks) => {
+      emitTranscript = callbacks.onTranscript;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: () => undefined,
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  await emitTranscript({
+    text: "AssemblyAI final transcript should keep provider source.",
+    isFinal: true,
+  });
+
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  const lines = store.listTranscriptLines(conversationId);
+  expect(lines).toHaveLength(1);
+  expect(lines[0].source).toBe("assemblyai");
+});
+
 test("EvenHubV2Runtime ignores duplicate conversation_end while already ending", async () => {
   const sent: EvenHubV2ServerMessage[] = [];
   const generator = new FakeAutoCueGenerator(validCue());
@@ -200,6 +272,50 @@ test("EvenHubV2Runtime ignores duplicate conversation_end while already ending",
 
   expect(sent.filter((message) => message.type === "conversation_saved")).toHaveLength(1);
   expect(sent.some((message) => message.type === "error" && message.payload?.code === "conversation_not_active")).toBe(false);
+});
+
+test("EvenHubV2Runtime includes aggregate audio stats and client source diagnostics when saved", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(validCue());
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    sttAdapterFactory: () => ({
+      start: async () => undefined,
+      pushAudio: () => undefined,
+      stop: async () => undefined,
+      close: () => undefined,
+    }),
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_start", {
+    audioSource: "phone",
+  }));
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_diagnostics", {
+    selectedSource: "phone",
+    chunkCount: 2,
+    byteCount: 8,
+    sourceCounts: { phone: 1, glasses: 1, unknown: 0 },
+    mismatchCount: 1,
+  }));
+  runtime.handleAudioChunk(new Uint8Array([0, 0, 0, 0]));
+  runtime.handleAudioChunk(new Uint8Array([232, 3, 24, 252]));
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("conversation_end", {}));
+
+  const saved = sent.find((message) => message.type === "conversation_saved");
+  expect(saved?.payload).toMatchObject({
+    audioStats: {
+      chunkCount: 2,
+      byteCount: 8,
+      selectedSource: "phone",
+      clientSourceCounts: {
+        phone: 1,
+        glasses: 1,
+        unknown: 0,
+      },
+      clientMismatchCount: 1,
+    },
+  });
+  expect((saved?.payload as any).audioStats.avgRms).toBeGreaterThan(0);
 });
 
 test("EvenHubV2Runtime queues summary before conversation_saved and enqueues after saved", async () => {

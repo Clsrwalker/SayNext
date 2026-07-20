@@ -65,3 +65,35 @@ test("parseEvenHubV2ClientMessage accepts audio source metadata", () => {
     },
   });
 });
+
+test("parseEvenHubV2ClientMessage accepts audio diagnostics", () => {
+  const diagnostic = createEvenHubV2ClientMessage("audio_diagnostics", {
+    selectedSource: "phone",
+    chunkCount: 20,
+    byteCount: 64_000,
+    sourceCounts: {
+      phone: 19,
+      glasses: 1,
+      unknown: 0,
+    },
+    mismatchCount: 1,
+  });
+
+  expect(parseEvenHubV2ClientMessage(JSON.stringify(diagnostic))).toMatchObject({
+    ok: true,
+    message: {
+      type: "audio_diagnostics",
+      payload: {
+        selectedSource: "phone",
+        chunkCount: 20,
+        byteCount: 64_000,
+        sourceCounts: {
+          phone: 19,
+          glasses: 1,
+          unknown: 0,
+        },
+        mismatchCount: 1,
+      },
+    },
+  });
+});

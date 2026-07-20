@@ -1,3 +1,4 @@
+import type { BootstrapSettingsSource } from "./settings-storage";
 import type { AiCue, ConversationRecord, ConversationSettings, ConversationSummary, CueDuration, Prenote, SummaryStatus, TranscriptLine } from "./types";
 
 const PROTOCOL_VERSION = "evenhub-v2.1";
@@ -45,6 +46,8 @@ type ServerSettings = {
 
 type BootstrapResponse = {
   settings?: ServerSettings;
+  settingsSource?: BootstrapSettingsSource;
+  settingsUpdatedAt?: string;
   prenotes?: Prenote[];
   conversations?: Array<{
     id: string;
@@ -198,6 +201,8 @@ export function wsUrl(): string {
 
 export async function loadBootstrap(): Promise<{
   settings?: Partial<ConversationSettings>;
+  settingsSource?: BootstrapSettingsSource;
+  settingsUpdatedAt?: string;
   prenotes: Prenote[];
   records: ConversationRecord[];
 }> {
@@ -214,6 +219,8 @@ export async function loadBootstrap(): Promise<{
         transcript: data.settings.showTranscript,
       },
     } : undefined,
+    settingsSource: data.settingsSource,
+    settingsUpdatedAt: data.settingsUpdatedAt,
     prenotes: data.prenotes || [],
     records: (data.conversations || []).map((conversation) => ({
       id: conversation.id,
@@ -233,6 +240,15 @@ export async function loadBootstrap(): Promise<{
       } : undefined,
     })),
   };
+}
+
+export async function saveServerSettings(settings: ConversationSettings): Promise<void> {
+  const response = await fetch(apiUrl("/api/evenhub/v2/settings"), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings: serverSettings(settings) }),
+  });
+  if (!response.ok) throw new Error(`settings save failed: ${response.status}`);
 }
 
 function durationToServerLabel(durationMs: number | null | undefined): string {
@@ -318,6 +334,22 @@ export async function deleteConversationRecord(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!response.ok) throw new Error(`conversation delete failed: ${response.status}`);
+}
+
+export async function savePrenoteDraft(note: Prenote): Promise<Prenote> {
+  const response = await fetch(apiUrl("/api/evenhub/v2/prenotes"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: note.title,
+      text: note.text,
+      selected: note.selected,
+    }),
+  });
+  if (!response.ok) throw new Error(`prenote save failed: ${response.status}`);
+  const data = await response.json() as { prenote?: Prenote };
+  if (!data.prenote) throw new Error("prenote save failed: missing prenote");
+  return data.prenote;
 }
 
 export function conversationStartPayload(settings: ConversationSettings, prenote: Prenote | null) {
