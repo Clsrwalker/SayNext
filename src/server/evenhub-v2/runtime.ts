@@ -10,12 +10,16 @@ import {
   shouldDisplayAutoCue,
   type AutoCueGenerationResult,
   type AutoCueGenerator,
+  type AutoCueSession,
 } from "./auto-cue-generator";
 import {
   LightweightEvenHubV2ContextAdapter,
   type EvenHubV2ContextAdapter,
+  type EvenHubV2ContextSnapshot,
 } from "./context-adapter";
 import { computeLinear16AudioStats, type Linear16AudioStats } from "./audio-diagnostics";
+import { isLikelyCueReadback, sameSpokenText } from "./cue-turn";
+import { getDeepSenseInterviewCards } from "./interview-guide";
 import {
   evenHubV2CueOpportunityRouter,
   type CueOpportunityRouter,
@@ -49,6 +53,48 @@ type RuntimeState = {
   activeAutoJobs: Map<string, AutoCueJobStatus>;
 };
 
+type LiveTranscriptTurn = {
+  id: string;
+  revision: number;
+  text: string;
+  updatedAt: number;
+};
+
+type FinalCueCandidate = {
+  turnId: string;
+  revision: number;
+  line: EvenHubV2TranscriptLineRecord;
+  previousTurns: Array<{ lineId: string; text: string; role: "unknown" | "xiang_readback" }>;
+};
+
+type CueJobInput = {
+  attemptId: string;
+  requestId: string;
+  questionId: string;
+  sourceRevision: number;
+  triggerWindow: string;
+  inputHash: string;
+  sourceTranscriptLineIds: string[];
+  previousTurns: Array<{ lineId: string; text: string; role: "unknown" | "xiang_readback" }>;
+  startedAt: number;
+  speculative: boolean;
+};
+
+type GeneratedCueDraft = {
+  input: CueJobInput;
+  result: AutoCueGenerationResult;
+  context: EvenHubV2ContextSnapshot;
+  router: CueOpportunityRouterResult | null;
+  routerError: string;
+};
+
+type AutoCueProviderLifecycle = {
+  localConversationId: string;
+  session: AutoCueSession | null;
+  sessionPromise: Promise<AutoCueSession | null>;
+  commitChain: Promise<void>;
+};
+
 type EvenHubV2RuntimeOptions = {
   userId: string;
   clientSessionId?: string;
@@ -68,10 +114,11 @@ type EvenHubV2RuntimeOptions = {
 };
 
 const DEFAULT_USER_ID = "evenhub-v2-user";
-const DEFAULT_PARTIAL_COMMIT_MS = 3000;
+const DEFAULT_PARTIAL_COMMIT_MS = 1200;
 const DEFAULT_PARTIAL_COMMIT_MIN_CHARS = 12;
 const DEFAULT_PARTIAL_COMMIT_MIN_WORDS = 4;
 const LOW_RMS_THRESHOLD = 80;
+const DEEPSENSE_ACTIVE_INTERVIEW_QUERY = "DeepSense Full-Stack AI Developer Co-op Fall 2026 interview";
 
 type ClientAudioDiagnostics = {
   selectedSource?: EvenHubV2AudioSource;
@@ -138,12 +185,20 @@ export class EvenHubV2Runtime {
   private selectedPrenoteIds: string[] = [];
   private selectedPrenoteText = "";
   private transcriptLines: EvenHubV2TranscriptLineRecord[] = [];
-  private candidateBuffer: EvenHubV2TranscriptLineRecord[] = [];
+  private candidateBuffer: FinalCueCandidate[] = [];
   private generatedTranscriptHashes = new Set<string>();
   private lastDisplayedCueOutputHash: string | null = null;
+  private lastDisplayedCueOutput = "";
   private pendingFlush = false;
   private cueFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private currentAutoJob: Promise<void> | null = null;
+  private currentAutoJobInput: CueJobInput | null = null;
+  private pendingSpeculativeTurn: LiveTranscriptTurn | null = null;
+  private providerLifecycle: AutoCueProviderLifecycle | null = null;
+  private liveTurn: LiveTranscriptTurn | null = null;
+  private preparedSpeculative: GeneratedCueDraft | null = null;
+  private finalizedTurns = new Map<string, { revision: number; text: string; lineId: string }>();
+  private canonicalTurns: Array<{ lineId: string; text: string; role: "unknown" | "xiang_readback" }> = [];
   private audioBytesReceived = 0;
   private audioChunksReceived = 0;
   private lastAudioStats: Linear16AudioStats | null = null;
@@ -175,7 +230,11 @@ export class EvenHubV2Runtime {
     this.sendToClient = options.send;
     this.store = options.store || evenHubV2Store;
     this.autoCueGenerator = options.autoCueGenerator || new OpenAiAutoCueGenerator();
-    this.contextAdapter = options.contextAdapter || new LightweightEvenHubV2ContextAdapter();
+    this.contextAdapter = options.contextAdapter || new LightweightEvenHubV2ContextAdapter({
+      activeInterviewQuery: process.env.EVENHUB_V2_ACTIVE_INTERVIEW_QUERY?.trim()
+        || DEEPSENSE_ACTIVE_INTERVIEW_QUERY,
+      interviewCards: getDeepSenseInterviewCards(),
+    });
     this.summaryRunner = options.summaryRunner || evenHubV2SummaryRunner;
     this.sttAdapter = (options.sttAdapterFactory || createEvenHubSttAdapter)({
       onTranscript: (event) => this.handleSttTranscript(event.text, event.isFinal),
@@ -187,12 +246,16 @@ export class EvenHubV2Runtime {
     });
     this.sttProvider = this.sttAdapter?.provider || "stt";
     this.settings = normalizeEvenHubV2Settings(options.settings);
-    this.debounceMs = options.debounceMs ?? Number(process.env.EVENHUB_V2_CUE_DEBOUNCE_MS || 900);
+    this.debounceMs = options.debounceMs ?? Number(process.env.EVENHUB_V2_CUE_DEBOUNCE_MS || 0);
     this.cueOpportunityRouter = options.cueOpportunityRouter === undefined
       ? evenHubV2CueOpportunityRouter
       : options.cueOpportunityRouter;
     this.finalFlushTimeoutMs = options.finalFlushTimeoutMs ?? Number(process.env.EVENHUB_V2_FINAL_FLUSH_TIMEOUT_MS || 800);
-    this.partialCommitMs = options.partialCommitMs ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MS || DEFAULT_PARTIAL_COMMIT_MS);
+    this.partialCommitMs = options.partialCommitMs ?? Number(
+      process.env.EVENHUB_V2_STT_PARTIAL_COMMIT_MS
+      || process.env.EVENHUB_STT_PARTIAL_COMMIT_MS
+      || DEFAULT_PARTIAL_COMMIT_MS,
+    );
     this.partialCommitMinChars = options.partialCommitMinChars ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MIN_CHARS || DEFAULT_PARTIAL_COMMIT_MIN_CHARS);
     this.partialCommitMinWords = options.partialCommitMinWords ?? Number(process.env.EVENHUB_STT_PARTIAL_COMMIT_MIN_WORDS || DEFAULT_PARTIAL_COMMIT_MIN_WORDS);
   }
@@ -331,6 +394,13 @@ export class EvenHubV2Runtime {
     this.candidateBuffer = [];
     this.generatedTranscriptHashes = new Set();
     this.lastDisplayedCueOutputHash = null;
+    this.lastDisplayedCueOutput = "";
+    this.liveTurn = null;
+    this.preparedSpeculative = null;
+    this.finalizedTurns.clear();
+    this.canonicalTurns = [];
+    this.currentAutoJobInput = null;
+    this.pendingSpeculativeTurn = null;
     this.audioBytesReceived = 0;
     this.audioChunksReceived = 0;
     this.lastAudioStats = null;
@@ -368,6 +438,7 @@ export class EvenHubV2Runtime {
         text: this.selectedPrenoteText,
       },
     });
+    this.beginAutoCueProviderSession(this.conversationId);
 
     this.sendMessage("conversation_started", {
       conversationId: this.conversationId,
@@ -418,6 +489,7 @@ export class EvenHubV2Runtime {
   }
 
   private handleAudioDiagnostics(payload: Extract<EvenHubV2ClientMessage, { type: "audio_diagnostics" }>["payload"]): void {
+    if (!payload) return;
     const sourceCounts = payload.sourceCounts || {};
     this.clientAudioDiagnostics = {
       selectedSource: payload.selectedSource || this.clientAudioDiagnostics.selectedSource,
@@ -468,6 +540,29 @@ export class EvenHubV2Runtime {
   private handlePartialTranscript(text: string): void {
     const normalized = normalizeText(text);
     if (!normalized || this.state.conversationStatus !== "active") return;
+    if (!this.liveTurn) {
+      this.liveTurn = {
+        id: makeEvenHubV2Id("turn"),
+        revision: 0,
+        text: normalized,
+        updatedAt: Date.now(),
+      };
+    } else if (!sameSpokenText(this.liveTurn.text, normalized)) {
+      this.liveTurn = {
+        ...this.liveTurn,
+        revision: this.liveTurn.revision + 1,
+        text: normalized,
+        updatedAt: Date.now(),
+      };
+      if (
+        this.preparedSpeculative?.input.questionId === this.liveTurn.id
+        && !sameSpokenText(this.preparedSpeculative.input.triggerWindow, normalized)
+      ) {
+        this.discardPreparedSpeculative("partial_revised");
+      }
+    } else {
+      this.liveTurn.updatedAt = Date.now();
+    }
     this.lastPartialText = normalized;
     this.sendMessage("transcript_partial", {
       text: normalized,
@@ -479,47 +574,46 @@ export class EvenHubV2Runtime {
   private async commitFinalTranscript(text: string, source: string): Promise<EvenHubV2TranscriptLineRecord | null> {
     const normalized = normalizeText(text);
     const canCommit = this.state.conversationStatus === "active" || this.state.conversationStatus === "ending";
-    if (!normalized || normalized === this.lastFinalText || !canCommit || !this.conversationId) {
+    if (!normalized || !canCommit || !this.conversationId) {
       return null;
     }
 
+    const hadLiveTurn = Boolean(this.liveTurn);
+    if (!hadLiveTurn && normalized === this.lastFinalText) return null;
+    const liveTurn = this.liveTurn || {
+      id: makeEvenHubV2Id("turn"),
+      revision: 0,
+      text: normalized,
+      updatedAt: Date.now(),
+    };
+    const finalRevision = sameSpokenText(liveTurn.text, normalized)
+      ? liveTurn.revision
+      : liveTurn.revision + 1;
+    const finalTurn = {
+      ...liveTurn,
+      revision: finalRevision,
+      text: normalized,
+      updatedAt: Date.now(),
+    };
+    this.clearPartialCommitTimer();
+
     const receivedAt = new Date().toISOString();
-    let line: EvenHubV2TranscriptLineRecord | null = null;
-    const previousLine = this.transcriptLines[this.transcriptLines.length - 1];
-    if (source !== "partial_timeout" && previousLine?.source === "partial_timeout" && this.shouldReplacePartialTimeout(previousLine.text, normalized)) {
-      line = this.store.updateTranscriptLine({
-        id: previousLine.id,
-        text: normalized,
-        receivedAt,
-        source,
-      });
-      if (line) {
-        this.transcriptLines[this.transcriptLines.length - 1] = line;
-        this.candidateBuffer = this.candidateBuffer.map((item) => item.id === line!.id ? line! : item);
-      }
-    }
-    if (!line) {
-      line = this.store.addTranscriptLine({
-        id: makeEvenHubV2Id("line"),
-        conversationId: this.conversationId,
-        userId: this.userId,
-        lineIndex: this.transcriptLines.length,
-        text: normalized,
-        receivedAt,
-        source,
-      });
-      this.transcriptLines.push(line);
-    }
+    const line = this.store.addTranscriptLine({
+      id: makeEvenHubV2Id("line"),
+      conversationId: this.conversationId,
+      userId: this.userId,
+      lineIndex: this.transcriptLines.length,
+      text: normalized,
+      receivedAt,
+      source,
+    });
+    this.transcriptLines.push(line);
     this.lastFinalText = normalized;
-    if (source !== "partial_timeout") {
-      this.lastPartialText = "";
-    } else if (normalized === this.lastPartialText) {
-      this.lastPartialText = "";
-    }
+    this.lastPartialText = "";
+    this.liveTurn = null;
     this.finalSavedCount += 1;
     this.logTranscriptProgress("saved_final", normalized, source);
     if (this.state.conversationStatus === "active") {
-      this.candidateBuffer.push(line);
       this.sendMessage("transcript_final", {
         lineId: line.id,
         index: line.lineIndex,
@@ -527,7 +621,54 @@ export class EvenHubV2Runtime {
         receivedAt: line.receivedAt,
         offsetMs: this.offsetForIso(line.receivedAt),
       });
-      this.scheduleCueFlush();
+
+      const readback = isLikelyCueReadback(normalized, this.lastDisplayedCueOutput);
+      const previousTurns = this.canonicalTurns.slice(-4);
+      this.canonicalTurns.push({
+        lineId: line.id,
+        text: normalized,
+        role: readback ? "xiang_readback" : "unknown",
+      });
+
+      if (readback) {
+        this.writeSkippedAttempt("cue_readback", [{ turnId: finalTurn.id, revision: finalTurn.revision, line, previousTurns }]);
+        return line;
+      }
+
+      if (
+        this.preparedSpeculative?.input.questionId === finalTurn.id
+        && sameSpokenText(this.preparedSpeculative.input.triggerWindow, normalized)
+      ) {
+        const prepared = this.preparedSpeculative;
+        this.preparedSpeculative = null;
+        this.publishGeneratedDraft(prepared, [line.id]);
+        return line;
+      }
+
+      if (this.preparedSpeculative?.input.questionId === finalTurn.id) {
+        this.discardPreparedSpeculative("final_revised");
+      }
+
+      const activeSpeculationMatches = Boolean(
+        this.currentAutoJobInput?.speculative
+        && this.currentAutoJobInput.questionId === finalTurn.id
+        && sameSpokenText(this.currentAutoJobInput.triggerWindow, normalized),
+      );
+      if (activeSpeculationMatches) {
+        this.finalizedTurns.set(finalTurn.id, {
+          revision: finalTurn.revision,
+          text: normalized,
+          lineId: line.id,
+        });
+      } else {
+        this.candidateBuffer.push({
+          turnId: finalTurn.id,
+          revision: finalTurn.revision,
+          line,
+          previousTurns,
+        });
+        this.scheduleCueFlush();
+      }
     }
     return line;
   }
@@ -571,61 +712,107 @@ export class EvenHubV2Runtime {
     }
     if (!this.candidateBuffer.length) return;
 
-    const windowLines = this.candidateBuffer.slice(-3);
-    this.candidateBuffer = [];
-    const triggerWindow = windowLines.map((line) => line.text).join("\n");
+    const candidate = this.candidateBuffer.shift()!;
+    const triggerWindow = candidate.line.text;
     const inputHash = hashText(triggerWindow);
     if (this.generatedTranscriptHashes.has(inputHash)) {
-      this.writeSkippedAttempt("duplicate_transcript_hash", windowLines, triggerWindow, inputHash);
+      this.writeSkippedAttempt("duplicate_transcript_hash", [candidate], triggerWindow, inputHash);
       return;
     }
     this.generatedTranscriptHashes.add(inputHash);
 
-    const requestId = makeEvenHubV2Id("auto_req");
-    const attemptId = makeEvenHubV2Id("attempt");
-    const sourceTranscriptLineIds = windowLines.map((line) => line.id);
-    this.state.activeAutoJobs.set(requestId, "running");
-    const startedAt = Date.now();
-
-    const job = this.runAutoCueJob({
-      attemptId,
-      requestId,
+    await this.startAutoCueJob({
+      attemptId: makeEvenHubV2Id("attempt"),
+      requestId: makeEvenHubV2Id("auto_req"),
+      questionId: candidate.turnId,
+      sourceRevision: candidate.revision,
       triggerWindow,
       inputHash,
-      sourceTranscriptLineIds,
-      startedAt,
-    }).finally(() => {
-      this.state.activeAutoJobs.delete(requestId);
+      sourceTranscriptLineIds: [candidate.line.id],
+      previousTurns: candidate.previousTurns,
+      startedAt: Date.now(),
+      speculative: false,
+    });
+  }
+
+  private async startSpeculativeCue(turn: LiveTranscriptTurn): Promise<void> {
+    if (!this.conversationId || this.state.conversationStatus !== "active") return;
+    if (this.currentAutoJob) {
+      this.pendingSpeculativeTurn = { ...turn };
+      return;
+    }
+    if (
+      this.preparedSpeculative?.input.questionId === turn.id
+      && this.preparedSpeculative.input.sourceRevision === turn.revision
+    ) return;
+
+    if (this.preparedSpeculative) this.discardPreparedSpeculative("superseded_partial");
+    const triggerWindow = turn.text;
+    await this.startAutoCueJob({
+      attemptId: makeEvenHubV2Id("attempt"),
+      requestId: makeEvenHubV2Id("auto_req"),
+      questionId: turn.id,
+      sourceRevision: turn.revision,
+      triggerWindow,
+      inputHash: hashText(triggerWindow),
+      sourceTranscriptLineIds: [],
+      previousTurns: this.canonicalTurns.slice(-4),
+      startedAt: Date.now(),
+      speculative: true,
+    });
+  }
+
+  private async startAutoCueJob(input: CueJobInput): Promise<void> {
+    this.state.activeAutoJobs.set(input.requestId, "running");
+    this.currentAutoJobInput = input;
+    const job = this.runAutoCueJob(input).finally(() => {
+      this.state.activeAutoJobs.delete(input.requestId);
+      if (this.currentAutoJobInput?.requestId === input.requestId) {
+        this.currentAutoJobInput = null;
+      }
       this.currentAutoJob = null;
-      if (this.pendingFlush) {
+      const pendingSpeculation = this.pendingSpeculativeTurn;
+      this.pendingSpeculativeTurn = null;
+      if (this.pendingFlush || this.candidateBuffer.length) {
         this.pendingFlush = false;
         this.scheduleCueFlush();
+      } else if (
+        pendingSpeculation
+        && this.liveTurn?.id === pendingSpeculation.id
+        && this.liveTurn.revision === pendingSpeculation.revision
+      ) {
+        void this.startSpeculativeCue(pendingSpeculation);
       }
     });
-
     this.currentAutoJob = job;
     await job;
   }
 
-  private async runAutoCueJob(input: {
-    attemptId: string;
-    requestId: string;
-    triggerWindow: string;
-    inputHash: string;
-    sourceTranscriptLineIds: string[];
-    startedAt: number;
-  }): Promise<void> {
+  private recentCanonicalContext(
+    turns: Array<{ lineId: string; text: string; role: "unknown" | "xiang_readback" }>,
+  ): string {
+    return turns
+      .map((turn) => `${turn.role === "xiang_readback" ? "Xiang answer" : "Conversation turn"}: ${turn.text}`)
+      .join("\n");
+  }
+
+  private async runAutoCueJob(input: CueJobInput): Promise<void> {
     if (!this.conversationId) return;
-    const recentTranscript = this.transcriptLines.slice(-8).map((line) => line.text).join("\n");
-    const routerLines = this.transcriptLines.slice(-3);
+    const recentTranscript = this.recentCanonicalContext(input.previousTurns);
+    const routerLines = [
+      ...input.previousTurns
+        .slice(-2)
+        .map((turn) => turn.text),
+      input.triggerWindow,
+    ].slice(-3);
     let router: CueOpportunityRouterResult | null = null;
     let routerError = "";
     if (this.cueOpportunityRouter) {
       try {
         router = await this.cueOpportunityRouter.predict({
-          segmentMinus2: routerLines.at(-3)?.text || "",
-          segmentMinus1: routerLines.at(-2)?.text || "",
-          current: routerLines.at(-1)?.text || "",
+          segmentMinus2: routerLines.at(-3) || "",
+          segmentMinus1: routerLines.at(-2) || "",
+          current: routerLines.at(-1) || "",
         });
       } catch (error) {
         routerError = error instanceof Error ? error.message : String(error);
@@ -635,6 +822,7 @@ export class EvenHubV2Runtime {
     const context = await this.contextAdapter.build({
       userId: this.userId,
       conversationId: this.conversationId,
+      currentQuestion: input.triggerWindow,
       triggerWindow: input.triggerWindow,
       recentTranscript,
       selectedPrenoteIds: this.selectedPrenoteIds,
@@ -654,11 +842,22 @@ export class EvenHubV2Runtime {
       promptContextSnapshot: context.contextSnapshot,
       trace: {
         memoryUsedIds: context.memoryUsedIds,
+        interviewAnswerCardIds: context.interviewAnswerCardIds,
         prenoteUsedIds: context.prenoteUsedIds,
         router,
         routerError,
       },
     });
+
+    const providerLifecycle = this.providerLifecycle?.localConversationId === this.conversationId
+      ? this.providerLifecycle
+      : null;
+    if (!input.speculative && providerLifecycle) {
+      await providerLifecycle.commitChain.catch(() => undefined);
+    }
+    const providerSession = input.speculative
+      ? providerLifecycle?.session || null
+      : await providerLifecycle?.sessionPromise.catch(() => null) || null;
 
     let result: AutoCueGenerationResult;
     try {
@@ -668,6 +867,8 @@ export class EvenHubV2Runtime {
         contextSnapshot: context.contextSnapshot,
         settings: this.settings,
         router,
+        session: providerSession,
+        speculative: input.speculative,
       });
     } catch (error) {
       this.store.updateAutoCueAttempt(input.attemptId, {
@@ -677,6 +878,7 @@ export class EvenHubV2Runtime {
         trace: {
           error: error instanceof Error ? error.message : String(error),
           memoryUsedIds: context.memoryUsedIds,
+          interviewAnswerCardIds: context.interviewAnswerCardIds,
           prenoteUsedIds: context.prenoteUsedIds,
           router,
           routerError,
@@ -686,6 +888,60 @@ export class EvenHubV2Runtime {
     }
 
     const cue = normalizeAutoCueOutput(result.data);
+    const draft: GeneratedCueDraft = { input, result: { ...result, data: cue }, context, router, routerError };
+    if (!input.speculative) {
+      this.publishGeneratedDraft(draft, input.sourceTranscriptLineIds);
+      return;
+    }
+
+    const finalized = this.finalizedTurns.get(input.questionId);
+    if (finalized) {
+      if (sameSpokenText(input.triggerWindow, finalized.text)) {
+        this.publishGeneratedDraft(draft, [finalized.lineId]);
+      } else {
+        this.markDraftStale(draft, "final_revised");
+      }
+      this.finalizedTurns.delete(input.questionId);
+      return;
+    }
+
+    if (
+      this.liveTurn?.id === input.questionId
+      && this.liveTurn.revision === input.sourceRevision
+      && sameSpokenText(this.liveTurn.text, input.triggerWindow)
+    ) {
+      this.preparedSpeculative = draft;
+      this.store.updateAutoCueAttempt(input.attemptId, {
+        status: "queued",
+        category: cue.category,
+        confidence: cue.confidence,
+        title: cue.title,
+        g2Title: cue.g2Title,
+        output: cue.output,
+        reason: cue.reason,
+        rawOutput: result.rawText,
+        model: result.model,
+        latencyMs: Date.now() - input.startedAt,
+        trace: {
+          speculative: true,
+          prepared: true,
+          memoryUsedIds: context.memoryUsedIds,
+          interviewAnswerCardIds: context.interviewAnswerCardIds,
+          prenoteUsedIds: context.prenoteUsedIds,
+          router,
+          routerError,
+          generationLane: result.lane,
+          providerConversationId: providerSession?.providerConversationId || "",
+        },
+      });
+      return;
+    }
+
+    this.markDraftStale(draft, "partial_revised");
+  }
+
+  private publishGeneratedDraft(draft: GeneratedCueDraft, sourceTranscriptLineIds: string[]): EvenHubV2CueRecord | null {
+    const cue = normalizeAutoCueOutput(draft.result.data);
     const outputHash = hashText(cue.output);
     const displayDecision = shouldDisplayAutoCue({
       cue,
@@ -693,9 +949,8 @@ export class EvenHubV2Runtime {
       outputHash,
       conversationActive: this.state.conversationStatus === "active",
     });
-
-    if (!displayDecision.ok) {
-      this.store.updateAutoCueAttempt(input.attemptId, {
+    if (!displayDecision.ok || !this.conversationId) {
+      this.store.updateAutoCueAttempt(draft.input.attemptId, {
         status: this.state.conversationStatus === "active" ? "skipped" : "stale",
         category: cue.category,
         confidence: cue.confidence,
@@ -703,58 +958,39 @@ export class EvenHubV2Runtime {
         g2Title: cue.g2Title,
         output: cue.output,
         reason: cue.reason,
-        rawOutput: result.rawText,
-        model: result.model,
-        latencyMs: Date.now() - input.startedAt,
-        skippedReason: displayDecision.reason,
+        rawOutput: draft.result.rawText,
+        model: draft.result.model,
+        latencyMs: Date.now() - draft.input.startedAt,
+        skippedReason: displayDecision.ok ? "conversation_missing" : displayDecision.reason,
         trace: {
-          memoryUsedIds: context.memoryUsedIds,
-          prenoteUsedIds: context.prenoteUsedIds,
-          router,
-          routerError,
+          speculative: draft.input.speculative,
+          memoryUsedIds: draft.context.memoryUsedIds,
+          interviewAnswerCardIds: draft.context.interviewAnswerCardIds,
+          prenoteUsedIds: draft.context.prenoteUsedIds,
+          router: draft.router,
+          routerError: draft.routerError,
+          generationLane: draft.result.lane,
         },
       });
-      return;
+      return null;
     }
 
-    if (!this.conversationId || this.state.conversationStatus !== "active") {
-      this.store.updateAutoCueAttempt(input.attemptId, {
-        status: "stale",
-        category: cue.category,
-        confidence: cue.confidence,
-        title: cue.title,
-        g2Title: cue.g2Title,
-        output: cue.output,
-        reason: cue.reason,
-        rawOutput: result.rawText,
-        model: result.model,
-        latencyMs: Date.now() - input.startedAt,
-        skippedReason: "stale_after_validation",
-        trace: {
-          memoryUsedIds: context.memoryUsedIds,
-          prenoteUsedIds: context.prenoteUsedIds,
-          router,
-          routerError,
-        },
-      });
-      return;
-    }
-
-    const createdAt = new Date().toISOString();
     const storedCue = this.store.createCue({
       id: makeEvenHubV2Id("cue"),
       conversationId: this.conversationId,
       userId: this.userId,
-      attemptId: input.attemptId,
-      category: cue.category,
+      attemptId: draft.input.attemptId,
+      category: cue.category as Exclude<typeof cue.category, "none">,
       title: cue.title,
       g2Title: cue.g2Title,
+      preview: cue.preview,
       output: cue.output,
-      sourceTranscriptLineIds: input.sourceTranscriptLineIds,
-      createdAt,
+      sourceTranscriptLineIds,
+      createdAt: new Date().toISOString(),
     });
     this.lastDisplayedCueOutputHash = outputHash;
-    this.store.updateAutoCueAttempt(input.attemptId, {
+    this.lastDisplayedCueOutput = cue.output;
+    this.store.updateAutoCueAttempt(draft.input.attemptId, {
       status: "created",
       category: cue.category,
       confidence: cue.confidence,
@@ -762,24 +998,163 @@ export class EvenHubV2Runtime {
       g2Title: cue.g2Title,
       output: cue.output,
       reason: cue.reason,
-      rawOutput: result.rawText,
-      model: result.model,
-      latencyMs: Date.now() - input.startedAt,
+      rawOutput: draft.result.rawText,
+      model: draft.result.model,
+      latencyMs: Date.now() - draft.input.startedAt,
       trace: {
         cueId: storedCue.id,
-        memoryUsedIds: context.memoryUsedIds,
-        prenoteUsedIds: context.prenoteUsedIds,
-        router,
-        routerError,
+        speculative: draft.input.speculative,
+        memoryUsedIds: draft.context.memoryUsedIds,
+        interviewAnswerCardIds: draft.context.interviewAnswerCardIds,
+        prenoteUsedIds: draft.context.prenoteUsedIds,
+        router: draft.router,
+        routerError: draft.routerError,
+        generationLane: draft.result.lane,
       },
     });
     this.sendCueCreated(storedCue);
+    if (draft.input.speculative || draft.result.lane === "stateless_fallback") {
+      this.queueCanonicalTurnCommit(draft);
+    }
+    return storedCue;
+  }
+
+  private markDraftStale(draft: GeneratedCueDraft, reason: string): void {
+    const cue = normalizeAutoCueOutput(draft.result.data);
+    this.store.updateAutoCueAttempt(draft.input.attemptId, {
+      status: "stale",
+      category: cue.category,
+      confidence: cue.confidence,
+      title: cue.title,
+      g2Title: cue.g2Title,
+      output: cue.output,
+      reason: cue.reason,
+      rawOutput: draft.result.rawText,
+      model: draft.result.model,
+      latencyMs: Date.now() - draft.input.startedAt,
+      skippedReason: reason,
+      trace: {
+        speculative: draft.input.speculative,
+        memoryUsedIds: draft.context.memoryUsedIds,
+        interviewAnswerCardIds: draft.context.interviewAnswerCardIds,
+        prenoteUsedIds: draft.context.prenoteUsedIds,
+        router: draft.router,
+        routerError: draft.routerError,
+        generationLane: draft.result.lane,
+      },
+    });
+  }
+
+  private discardPreparedSpeculative(reason: string): void {
+    const prepared = this.preparedSpeculative;
+    if (!prepared) return;
+    this.preparedSpeculative = null;
+    this.markDraftStale(prepared, reason);
+  }
+
+  private beginAutoCueProviderSession(localConversationId: string): void {
+    if (!this.autoCueGenerator.startSession) {
+      this.providerLifecycle = null;
+      return;
+    }
+
+    this.store.updateOpenAiConversationState({
+      conversationId: localConversationId,
+      status: "creating",
+    });
+    const lifecycle: AutoCueProviderLifecycle = {
+      localConversationId,
+      session: null,
+      sessionPromise: Promise.resolve(null),
+      commitChain: Promise.resolve(),
+    };
+    lifecycle.sessionPromise = this.autoCueGenerator.startSession({
+      localConversationId,
+      userId: this.userId,
+    }).then((session) => {
+      lifecycle.session = session;
+      if (session) {
+        this.store.updateOpenAiConversationState({
+          conversationId: localConversationId,
+          providerConversationId: session.providerConversationId,
+          status: "active",
+          promptVersion: session.promptVersion,
+          interviewGuideVersion: session.interviewGuideVersion,
+        });
+      } else {
+        this.store.updateOpenAiConversationState({
+          conversationId: localConversationId,
+          status: "failed",
+        });
+      }
+      return session;
+    }).catch((error) => {
+      console.warn(`[EvenHubV2] OpenAI conversation create failed open: ${error instanceof Error ? error.message : String(error)}`);
+      this.store.updateOpenAiConversationState({
+        conversationId: localConversationId,
+        status: "failed",
+      });
+      return null;
+    });
+    this.providerLifecycle = lifecycle;
+  }
+
+  private queueCanonicalTurnCommit(draft: GeneratedCueDraft): void {
+    const lifecycle = this.providerLifecycle;
+    if (
+      !lifecycle
+      || lifecycle.localConversationId !== this.conversationId
+      || !this.autoCueGenerator.commitCanonicalTurn
+    ) return;
+
+    lifecycle.commitChain = lifecycle.commitChain
+      .catch(() => undefined)
+      .then(async () => {
+        const session = lifecycle.session || await lifecycle.sessionPromise;
+        if (!session) return;
+        await this.autoCueGenerator.commitCanonicalTurn!({
+          session,
+          question: draft.input.triggerWindow,
+          result: draft.result,
+        });
+      })
+      .catch((error) => {
+        console.warn(`[EvenHubV2] canonical cue commit failed open: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  }
+
+  private async cleanupAutoCueProviderSession(
+    lifecycle: AutoCueProviderLifecycle,
+    activeJob: Promise<void> | null,
+  ): Promise<void> {
+    await activeJob?.catch(() => undefined);
+    await lifecycle.commitChain.catch(() => undefined);
+    const session = lifecycle.session || await lifecycle.sessionPromise.catch(() => null);
+    if (!session || !this.autoCueGenerator.endSession) return;
+
+    this.store.updateOpenAiConversationState({
+      conversationId: lifecycle.localConversationId,
+      status: "deleting",
+    });
+    try {
+      await this.autoCueGenerator.endSession(session);
+      this.store.updateOpenAiConversationState({
+        conversationId: lifecycle.localConversationId,
+        status: "deleted",
+      });
+    } catch (error) {
+      console.warn(`[EvenHubV2] OpenAI conversation delete failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.store.updateOpenAiConversationState({
+        conversationId: lifecycle.localConversationId,
+        status: "failed",
+      });
+    }
   }
 
   private writeSkippedAttempt(
     reason: string,
-    lines: EvenHubV2TranscriptLineRecord[] = this.candidateBuffer.splice(0),
-    triggerWindow = lines.map((line) => line.text).join("\n"),
+    lines: FinalCueCandidate[] = this.candidateBuffer.splice(0),
+    triggerWindow = lines.map((candidate) => candidate.line.text).join("\n"),
     inputHash = hashText(triggerWindow || reason),
   ): void {
     if (!this.conversationId) return;
@@ -792,7 +1167,7 @@ export class EvenHubV2Runtime {
       status: "skipped",
       inputHash,
       inputWindow: triggerWindow,
-      sourceTranscriptLineIds: lines.map((line) => line.id),
+      sourceTranscriptLineIds: lines.map((candidate) => candidate.line.id),
       promptContextSnapshot: "",
       trace: { reason },
     });
@@ -817,10 +1192,14 @@ export class EvenHubV2Runtime {
     this.clearCueFlushTimer();
     await this.stopAudio("conversation_ending");
     await new Promise((resolve) => setTimeout(resolve, this.finalFlushTimeoutMs));
-    await this.commitPendingPartialTranscript();
+    this.discardPreparedSpeculative("conversation_ended");
 
     const endedAt = new Date().toISOString();
     const conversationId = this.conversationId;
+    const providerLifecycle = this.providerLifecycle?.localConversationId === conversationId
+      ? this.providerLifecycle
+      : null;
+    const activeAutoJob = this.currentAutoJob;
     this.store.endConversation({
       conversationId,
       endedAt,
@@ -835,7 +1214,13 @@ export class EvenHubV2Runtime {
     this.state.conversationStatus = "ended";
     this.state.audioStatus = "stopped";
     this.conversationId = null;
+    this.providerLifecycle = null;
     this.candidateBuffer = [];
+    this.liveTurn = null;
+    this.preparedSpeculative = null;
+    this.finalizedTurns.clear();
+    this.currentAutoJobInput = null;
+    this.pendingSpeculativeTurn = null;
     this.clearPartialCommitTimer();
     const audioStats = this.audioStatsSummary();
     console.info(`[EvenHubV2] conversation ended id=${conversationId} chunks=${this.audioChunksReceived} bytes=${this.audioBytesReceived} partials=${this.sttPartialCount} finals=${this.sttFinalCount} saved=${this.finalSavedCount} audio=${JSON.stringify(audioStats)}`);
@@ -847,6 +1232,9 @@ export class EvenHubV2Runtime {
       audioStats,
     }, conversationId);
     this.summaryRunner.enqueue(conversationId);
+    if (providerLifecycle) {
+      void this.cleanupAutoCueProviderSession(providerLifecycle, activeAutoJob);
+    }
   }
 
   private sendCueCreated(cue: EvenHubV2CueRecord): void {
@@ -856,6 +1244,8 @@ export class EvenHubV2Runtime {
       category: cue.category,
       title: cue.title,
       g2Title: cue.g2Title,
+      preview: cue.preview,
+      fullAnswer: cue.output,
       output: cue.output,
       sourceTranscriptLineIds: parseJsonArray(cue.sourceTranscriptLineIdsJson),
       createdAt: cue.createdAt,
@@ -904,12 +1294,13 @@ export class EvenHubV2Runtime {
     const text = this.lastPartialText.trim();
     if (!text) return;
     this.clearPartialCommitTimer();
-    this.lastPartialText = "";
     if (!this.shouldCommitPartialTimeout(text)) {
       this.logTranscriptProgress("partial_timeout_skipped", text, "partial_timeout");
       return;
     }
-    await this.commitFinalTranscript(text, "partial_timeout");
+    const turn = this.liveTurn;
+    if (!turn || !sameSpokenText(turn.text, text)) return;
+    await this.startSpeculativeCue(turn);
   }
 
   private shouldCommitPartialTimeout(text: string): boolean {
@@ -920,12 +1311,6 @@ export class EvenHubV2Runtime {
       return normalized.split(/\s+/).filter(Boolean).length >= this.partialCommitMinWords;
     }
     return Array.from(normalized).length >= this.partialCommitMinChars;
-  }
-
-  private shouldReplacePartialTimeout(partial: string, final: string): boolean {
-    const left = normalizeText(partial).toLowerCase();
-    const right = normalizeText(final).toLowerCase();
-    return Boolean(left && right && (right.startsWith(left) || left.startsWith(right)));
   }
 
   private logAudioProgress(reason: string): void {

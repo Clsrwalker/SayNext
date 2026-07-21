@@ -5,6 +5,7 @@ export type CanonicalProjectId =
   | "dalparkaid"
   | "study_session_tracker"
   | "ai_meeting_monitor"
+  | "cueflow"
   | "unknown";
 
 export type MemoryOrigin =
@@ -197,6 +198,19 @@ function resolveCanonicalProjectId(input: MemoryIdentityInput): {
   const aliases: string[] = [];
   const reasons: string[] = [];
 
+  if (sourceRef.startsWith("job:")) {
+    return { canonicalProjectId: "unknown", aliases, reasons: ["alias:job_memory"] };
+  }
+
+  if (
+    sourceRef.startsWith("cueflow-project:")
+    || hasAny(text, ["cueflow", "cue flow"])
+  ) {
+    aliases.push("CueFlow", "Cue Flow");
+    reasons.push("alias:cueflow");
+    return { canonicalProjectId: "cueflow", aliases, reasons };
+  }
+
   if (
     sourceRef.startsWith("doc:saynext")
     || sourceRef.includes("project-saynext")
@@ -346,7 +360,10 @@ export function classifyMemoryQueryIntent(query: string): MemoryQueryClassificat
     };
   }
 
-  if (hasAny(text, ["runtime", "flow", "process transcript", "process transcripts", "partial transcript", "stale response", "stale responses"])) {
+  if (
+    hasAny(text, ["runtime", "process transcript", "process transcripts", "partial transcript", "stale response", "stale responses"])
+    || /\bflow\b/.test(text)
+  ) {
     return {
       intent: "runtime_flow",
       preferredPool: "factual",

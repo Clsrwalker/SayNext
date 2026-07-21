@@ -231,6 +231,8 @@ export const getEvenHubV2Conversation = (c: Context) => {
       category: cue.category,
       title: cue.title,
       g2Title: cue.g2Title,
+      preview: cue.preview,
+      fullAnswer: cue.output,
       output: cue.output,
       sourceTranscriptLineIds: parseStoredJson<string[]>(cue.sourceTranscriptLineIdsJson, []),
       createdAt: cue.createdAt,

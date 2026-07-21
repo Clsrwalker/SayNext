@@ -21,6 +21,18 @@ export interface CueOpportunityRouter {
   predict(input: CueOpportunityRouterInput): Promise<CueOpportunityRouterResult>;
 }
 
+export async function prewarmCueOpportunityRouter(router: CueOpportunityRouter): Promise<void> {
+  try {
+    await router.predict({
+      segmentMinus2: "",
+      segmentMinus1: "",
+      current: "Thanks, that makes sense.",
+    });
+  } catch (error) {
+    console.warn(`[EvenHubV2] cue router warmup failed open: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 type PendingRequest = {
   startedAt: number;
   resolve: (value: CueOpportunityRouterResult) => void;
@@ -157,7 +169,9 @@ export class OnnxCueOpportunityRouter implements CueOpportunityRouter {
 
 export function createCueOpportunityRouterFromEnv(): CueOpportunityRouter | null {
   if (process.env.EVENHUB_V2_CUE_ROUTER_ENABLED !== "true") return null;
-  return new OnnxCueOpportunityRouter();
+  const router = new OnnxCueOpportunityRouter();
+  void prewarmCueOpportunityRouter(router);
+  return router;
 }
 
 export const evenHubV2CueOpportunityRouter = createCueOpportunityRouterFromEnv();

@@ -62,6 +62,8 @@ export type EvenHubV2CuePayload = {
   category: Exclude<AutoCueCategory, "none">;
   title: string;
   g2Title: string;
+  preview: string;
+  fullAnswer: string;
   output: string;
   sourceTranscriptLineIds: string[];
   createdAt: string;
@@ -135,7 +137,7 @@ export type ParseEvenHubV2Result =
 export function defaultEvenHubV2Settings(): EvenHubV2Settings {
   return {
     language: "english",
-    cueDurationMs: 10000,
+    cueDurationMs: "forever",
     autoPopup: true,
     showAiCue: true,
     showTranscript: true,

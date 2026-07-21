@@ -1,0 +1,218 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const DEEPSENSE_INTERVIEW_GUIDE_ID = "deepsense-full-stack-ai-developer-2026";
+export const DEEPSENSE_INTERVIEW_GUIDE_VERSION = "2026-07-20-v1";
+
+const GUIDE_PATH = join(dirname(fileURLToPath(import.meta.url)), "deepsense-interview-guide.md");
+
+export type InterviewAnswerCard = {
+  id: string;
+  question: string;
+  guidance: string;
+  exampleAnswer: string;
+  section: string;
+};
+
+function compact(value: string): string {
+  return value.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72) || "question";
+}
+
+function normalizeForMatch(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\bpipe line\b/g, "pipeline")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const MATCH_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "about", "between", "can", "could", "difference", "do", "does", "for", "have", "how",
+  "i", "in", "is", "it", "me", "of", "on", "or", "our", "the", "this", "to", "we", "what",
+  "when", "why", "with", "would", "you", "your",
+]);
+
+function terms(value: string): string[] {
+  return normalizeForMatch(value)
+    .split(" ")
+    .filter((term) => term.length > 1 && !MATCH_STOP_WORDS.has(term));
+}
+
+function bigrams(value: string): Set<string> {
+  const normalized = normalizeForMatch(value).replace(/\s+/g, " ");
+  const result = new Set<string>();
+  for (let index = 0; index < normalized.length - 1; index += 1) {
+    result.add(normalized.slice(index, index + 2));
+  }
+  return result;
+}
+
+function diceSimilarity(left: string, right: string): number {
+  const leftBigrams = bigrams(left);
+  const rightBigrams = bigrams(right);
+  if (!leftBigrams.size || !rightBigrams.size) return 0;
+  let overlap = 0;
+  for (const value of leftBigrams) if (rightBigrams.has(value)) overlap += 1;
+  return (2 * overlap) / (leftBigrams.size + rightBigrams.size);
+}
+
+function cardScore(query: string, question: string): number {
+  const normalizedQuery = normalizeForMatch(query);
+  const normalizedQuestion = normalizeForMatch(question);
+  if (!normalizedQuery || !normalizedQuestion) return 0;
+  if (normalizedQuery.includes(normalizedQuestion) || normalizedQuestion.includes(normalizedQuery)) return 1;
+
+  const queryTerms = new Set(terms(query));
+  const questionTerms = new Set(terms(question));
+  let overlap = 0;
+  for (const term of questionTerms) if (queryTerms.has(term)) overlap += 1;
+  if (overlap === 0) return 0;
+  const questionCoverage = questionTerms.size ? overlap / questionTerms.size : 0;
+  return questionCoverage * 0.72 + diceSimilarity(query, question) * 0.28;
+}
+
+export function loadDeepSenseInterviewGuide(): string {
+  return readFileSync(GUIDE_PATH, "utf8");
+}
+
+export function parseDeepSenseInterviewGuide(markdown: string): InterviewAnswerCard[] {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const cards: InterviewAnswerCard[] = [];
+  let activeSection = "";
+  let question = "";
+  let body: string[] = [];
+
+  const flush = () => {
+    if (!activeSection || !question) return;
+    const quoted = body
+      .filter((line) => /^>\s?/.test(line))
+      .map((line) => line.replace(/^>\s?/, "").trim())
+      .filter(Boolean)
+      .join(" ");
+    const guidance = body
+      .filter((line) => !/^>\s?/.test(line) && !/^---\s*$/.test(line))
+      .join("\n");
+    cards.push({
+      id: `${DEEPSENSE_INTERVIEW_GUIDE_ID}:${slugify(question)}`,
+      question: question.trim(),
+      guidance: compact(guidance).slice(0, 1800),
+      exampleAnswer: compact(quoted).slice(0, 2200),
+      section: activeSection,
+    });
+  };
+
+  for (const line of lines) {
+    const section = line.match(/^#\s+([A-J])\.\s+(.+)$/);
+    if (section) {
+      flush();
+      question = "";
+      body = [];
+      activeSection = `${section[1]}. ${section[2].trim()}`;
+      continue;
+    }
+    if (/^#\s+/.test(line)) {
+      flush();
+      question = "";
+      body = [];
+      activeSection = "";
+      continue;
+    }
+    const heading = line.match(/^##\s+(.+)$/);
+    if (activeSection && heading) {
+      flush();
+      question = heading[1].trim();
+      body = [];
+      continue;
+    }
+    if (activeSection && question) body.push(line);
+  }
+  flush();
+  return cards;
+}
+
+let cachedCards: InterviewAnswerCard[] | null = null;
+
+export function getDeepSenseInterviewCards(): InterviewAnswerCard[] {
+  if (!cachedCards) cachedCards = parseDeepSenseInterviewGuide(loadDeepSenseInterviewGuide());
+  return cachedCards;
+}
+
+export function findDeepSenseInterviewCard(
+  query: string,
+  cards: InterviewAnswerCard[] = getDeepSenseInterviewCards(),
+): InterviewAnswerCard | null {
+  let best: { card: InterviewAnswerCard; score: number } | null = null;
+  for (const card of cards) {
+    const score = cardScore(query, card.question);
+    if (!best || score > best.score) best = { card, score };
+  }
+  return best && best.score >= 0.52 ? best.card : null;
+}
+
+function exactCard(cards: InterviewAnswerCard[], question: string): InterviewAnswerCard | null {
+  const normalized = normalizeForMatch(question);
+  return cards.find((card) => normalizeForMatch(card.question) === normalized) || null;
+}
+
+export function buildDeepSenseInterviewSeed(
+  cards: InterviewAnswerCard[] = getDeepSenseInterviewCards(),
+): string {
+  const exemplarQuestions = [
+    "Tell me a little about yourself.",
+    "How would you design a chatbot that answers questions from our website?",
+    "Tell me about your SayNext or Hybrid Search Memory Assistant project.",
+    "Describe a difficult bug and how you found the root cause.",
+  ];
+  const examples = exemplarQuestions
+    .map((question) => exactCard(cards, question))
+    .filter((card): card is InterviewAnswerCard => Boolean(card?.exampleAnswer))
+    .map((card) => `Question: ${card.question}\nExample answer: ${card.exampleAnswer}`)
+    .join("\n\n");
+
+  return `Active interview: DeepSense Full-Stack AI Developer Co-op, Fall 2026.
+
+Role grounding:
+- The work covers public and internal chatbots, RAG, document matching and ranking, internal project tools, testing, monitoring, documentation, AWS, Python or JavaScript, REST APIs, and LLM integrations.
+- Professor Lu sent Xiang the role. Xiang was interested because the actual project resembles systems he already chose to build, not only because he needs a co-op.
+- Prefer CueFlow, SayNext, and AI Meeting Monitor for conversational AI. Prefer JobLens AI for document matching and another AWS example. ElderAlbum is a smaller serverless AWS example.
+- Do not claim production-scale users, senior experience, or hands-on mastery of LangChain, LlamaIndex, LangGraph, AutoGen, CrewAI, Pinecone, Chroma, or Weaviate unless an explicit personal fact confirms it.
+
+Answer modules:
+1. Personal/fit: current background -> recent work -> concrete connection to this role.
+2. Definition: plain explanation -> one example -> one limitation.
+3. System design: clarify users/data/permissions -> simplest end-to-end flow -> reliability and evaluation.
+4. Experience: actual problem -> Xiang's action -> result -> what changed afterward.
+5. RAG: ingest -> clean -> chunk -> index -> hybrid retrieve -> rerank -> grounded answer/citations -> evaluate.
+6. Reliability: validate structured output, abstain on weak evidence, log failures, test unanswerable cases, monitor real use.
+7. Agent safety: least privilege, allowlisted tools, validation, idempotency, confirmation for side effects, audit logs.
+8. Multi-service debugging: reproduce -> isolate boundary -> inspect contract/data shape -> fix -> regression test/observability.
+9. AWS: start with workload and trade-off, then name only services Xiang actually used in the selected project.
+10. Behavioral: use a real low-drama technical example; never invent a colleague, conflict, user, or production incident.
+
+Style transfer rule:
+The examples below demonstrate content order, specificity, and natural spoken tone. Do not copy them when the current question is different. Vary wording so Xiang does not sound memorized.
+
+Representative answer examples:
+${examples}`.trim();
+}
+
+export function formatInterviewAnswerCard(card: InterviewAnswerCard): string {
+  return [
+    `[interview-answer:${card.id}] ${card.question} | ${card.section}`,
+    card.guidance ? `Answer guidance:\n${card.guidance}` : "",
+    card.exampleAnswer ? `Natural example, adapt rather than copy:\n${card.exampleAnswer}` : "",
+  ].filter(Boolean).join("\n");
+}

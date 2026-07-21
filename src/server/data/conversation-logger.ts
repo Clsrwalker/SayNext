@@ -4375,6 +4375,8 @@ function displayProjectLabel(projectId: CanonicalProjectId): string {
       return "AI Meeting Monitor";
     case "saynext":
       return "SayNext";
+    case "cueflow":
+      return "CueFlow";
     default:
       return "Unknown";
   }

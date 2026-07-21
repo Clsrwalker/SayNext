@@ -96,7 +96,9 @@ describe("conversation detail mapping", () => {
           category: "concept",
           title: "Concept",
           g2Title: "Concept",
-          output: "Cue output",
+          preview: "Cue preview.",
+          fullAnswer: "Cue preview. Complete cue answer.",
+          output: "Cue preview. Complete cue answer.",
           createdAt: "2026-06-12T10:01:00.000Z",
         },
       ],
@@ -106,6 +108,8 @@ describe("conversation detail mapping", () => {
     expect(record.summary.keyPoints[0].details).toEqual(["Detail"]);
     expect(record.summary.actionItems[0].checked).toBe(true);
     expect(record.cueHistory[0].title).toBe("Concept");
+    expect(record.cueHistory[0].preview).toBe("Cue preview.");
+    expect(record.cueHistory[0].fullAnswer).toBe("Cue preview. Complete cue answer.");
   });
 
   test("uses summary title when conversation title is still default", () => {

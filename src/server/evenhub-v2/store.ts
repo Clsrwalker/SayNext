@@ -21,6 +21,10 @@ export type EvenHubV2ConversationRecord = {
   settingsJson: string;
   usedPrenoteJson: string;
   lastPartialAtEnd: string;
+  openAiConversationId: string;
+  openAiConversationStatus: string;
+  openAiPromptVersion: string;
+  interviewGuideVersion: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -69,6 +73,7 @@ export type EvenHubV2CueRecord = {
   category: Exclude<AutoCueCategory, "none">;
   title: string;
   g2Title: string;
+  preview: string;
   output: string;
   sourceTranscriptLineIdsJson: string;
   createdAt: string;
@@ -157,6 +162,7 @@ export type CreateCueInput = {
   category: Exclude<AutoCueCategory, "none">;
   title: string;
   g2Title: string;
+  preview: string;
   output: string;
   sourceTranscriptLineIds: string[];
   createdAt: string;
@@ -220,6 +226,12 @@ function parseJson<T>(value: string, fallback: T): T {
   }
 }
 
+function ensureColumn(db: Database, table: string, column: string, definition: string): void {
+  const columns = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+  if (columns.some((item) => item.name === column)) return;
+  db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
 export class EvenHubV2Store {
   private db: Database | null = null;
 
@@ -261,10 +273,18 @@ export class EvenHubV2Store {
         settings_json TEXT NOT NULL DEFAULT '{}',
         used_prenote_json TEXT NOT NULL DEFAULT '{}',
         last_partial_at_end TEXT NOT NULL DEFAULT '',
+        openai_conversation_id TEXT NOT NULL DEFAULT '',
+        openai_conversation_status TEXT NOT NULL DEFAULT '',
+        openai_prompt_version TEXT NOT NULL DEFAULT '',
+        interview_guide_version TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    ensureColumn(db, "evenhub_v2_conversations", "openai_conversation_id", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "evenhub_v2_conversations", "openai_conversation_status", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "evenhub_v2_conversations", "openai_prompt_version", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "evenhub_v2_conversations", "interview_guide_version", "TEXT NOT NULL DEFAULT ''");
     db.run("CREATE INDEX IF NOT EXISTS idx_evenhub_v2_conversations_user_time ON evenhub_v2_conversations(user_id, started_at DESC)");
 
     db.run(`
@@ -330,12 +350,14 @@ export class EvenHubV2Store {
         category TEXT NOT NULL,
         title TEXT NOT NULL,
         g2_title TEXT NOT NULL,
+        preview TEXT NOT NULL DEFAULT '',
         output TEXT NOT NULL,
         source_transcript_line_ids_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         FOREIGN KEY(conversation_id) REFERENCES evenhub_v2_conversations(id) ON DELETE CASCADE
       )
     `);
+    ensureColumn(db, "evenhub_v2_cues", "preview", "TEXT NOT NULL DEFAULT ''");
     db.run("CREATE INDEX IF NOT EXISTS idx_evenhub_v2_cues_conversation ON evenhub_v2_cues(conversation_id, created_at DESC)");
 
     db.run(`
@@ -417,6 +439,30 @@ export class EvenHubV2Store {
       SET status = 'ended', ended_at = ?, duration_ms = ?, last_partial_at_end = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(input.endedAt, input.durationMs, input.lastPartialAtEnd || "", input.conversationId);
+  }
+
+  updateOpenAiConversationState(input: {
+    conversationId: string;
+    providerConversationId?: string;
+    status: "creating" | "active" | "failed" | "deleting" | "deleted";
+    promptVersion?: string;
+    interviewGuideVersion?: string;
+  }): void {
+    this.getDb().query(`
+      UPDATE evenhub_v2_conversations
+      SET openai_conversation_id = COALESCE(NULLIF(?, ''), openai_conversation_id),
+          openai_conversation_status = ?,
+          openai_prompt_version = COALESCE(NULLIF(?, ''), openai_prompt_version),
+          interview_guide_version = COALESCE(NULLIF(?, ''), interview_guide_version),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      input.providerConversationId || "",
+      input.status,
+      input.promptVersion || "",
+      input.interviewGuideVersion || "",
+      input.conversationId,
+    );
   }
 
   getConversation(conversationId: string): EvenHubV2ConversationRecord | null {
@@ -555,9 +601,9 @@ export class EvenHubV2Store {
     const db = this.getDb();
     db.query(`
       INSERT INTO evenhub_v2_cues (
-        id, conversation_id, user_id, attempt_id, category, title, g2_title, output,
+        id, conversation_id, user_id, attempt_id, category, title, g2_title, preview, output,
         source_transcript_line_ids_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.id,
       input.conversationId,
@@ -566,6 +612,7 @@ export class EvenHubV2Store {
       input.category,
       input.title,
       input.g2Title,
+      input.preview,
       input.output,
       asJson(input.sourceTranscriptLineIds),
       input.createdAt,
@@ -751,6 +798,10 @@ function EvenHubV2ConversationRecordMapper(row: any): EvenHubV2ConversationRecor
     settingsJson: row.settings_json,
     usedPrenoteJson: row.used_prenote_json,
     lastPartialAtEnd: row.last_partial_at_end,
+    openAiConversationId: row.openai_conversation_id || "",
+    openAiConversationStatus: row.openai_conversation_status || "",
+    openAiPromptVersion: row.openai_prompt_version || "",
+    interviewGuideVersion: row.interview_guide_version || "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -805,6 +856,7 @@ function EvenHubV2CueRecordMapper(row: any): EvenHubV2CueRecord {
     category: row.category,
     title: row.title,
     g2Title: row.g2_title,
+    preview: row.preview || row.output,
     output: row.output,
     sourceTranscriptLineIdsJson: row.source_transcript_line_ids_json,
     createdAt: row.created_at,

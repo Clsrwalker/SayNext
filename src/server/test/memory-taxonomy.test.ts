@@ -102,6 +102,30 @@ describe("resolveMemoryIdentity", () => {
     expect(studyTracker.canonicalProjectId).toBe("study_session_tracker");
     expect(meetingMonitor.canonicalProjectId).toBe("ai_meeting_monitor");
   });
+
+  test("keeps CueFlow identity even when its interview framing mentions SayNext", () => {
+    const result = resolveMemoryIdentity({
+      sourceRef: "cueflow-project:tradeoffs-limitations:2026-07-20",
+      title: "Project CueFlow - AWS trade-offs, testing, and honest limitations",
+      content: "CueFlow uses API Gateway, Lambda, SQS, DynamoDB, and S3. SayNext is a related comparison project.",
+      keywords: ["CueFlow", "AWS", "WebSocket", "SQS"],
+      category: "project_experience",
+    });
+
+    expect(result.canonicalProjectId).toBe("cueflow");
+  });
+
+  test("does not classify a job-specific interview memory as one mentioned project", () => {
+    const result = resolveMemoryIdentity({
+      sourceRef: "job:deepsense-full-stack-ai-developer-fall-2026",
+      title: "DeepSense Full-Stack AI Developer co-op - role fit",
+      content: "The fit combines SayNext, JobLens, ElderAlbum, and AI Meeting Monitor experience.",
+      keywords: ["DeepSense", "RAG chatbot", "document matching", "AWS"],
+      category: "interview_job",
+    });
+
+    expect(result.canonicalProjectId).toBe("unknown");
+  });
 });
 
 describe("classifyMemoryQueryIntent", () => {
@@ -112,6 +136,7 @@ describe("classifyMemoryQueryIntent", () => {
     ["What did the user evaluation find for DalParkAid?", "technical_decision", "factual", "dalparkaid"],
     ["Tell me a time you improved JobLens", "behavioral_story", "behavioral", "joblens"],
     ["What impact did ElderAlbum have?", "impact_story", "behavioral", "elderalbum"],
+    ["Explain the CueFlow AWS architecture", "architecture", "factual", "cueflow"],
     ["What is backpropagation?", "project_definition", "factual", "unknown"],
   ];
 

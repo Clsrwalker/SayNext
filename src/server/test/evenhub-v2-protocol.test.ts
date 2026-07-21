@@ -1,9 +1,14 @@
 import { expect, test } from "bun:test";
 import {
   createEvenHubV2ClientMessage,
+  defaultEvenHubV2Settings,
   EVENHUB_V2_PROTOCOL_VERSION,
   parseEvenHubV2ClientMessage,
 } from "../evenhub-v2/protocol";
+
+test("EvenHub v2 keeps automatic cues visible by default", () => {
+  expect(defaultEvenHubV2Settings().cueDurationMs).toBe("forever");
+});
 
 test("parseEvenHubV2ClientMessage requires the v2 envelope", () => {
   expect(parseEvenHubV2ClientMessage(JSON.stringify({ type: "hello" }))).toMatchObject({

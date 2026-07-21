@@ -70,7 +70,7 @@ const DEFAULT_SETTINGS: ConversationSettings = {
     transcript: true,
   },
   autoPopup: true,
-  cueDuration: 10000,
+  cueDuration: "forever",
 };
 
 type Screen = "home" | "settings" | "noteEditor" | "live" | "history" | "conversationSettings";
@@ -1148,7 +1148,7 @@ function renderCuePanel(cues: AiCue[]) {
               <span className="cue-icon">{cueIcon(cue.category)}</span>
               <div>
                 <h3>{cue.title}</h3>
-                <p>{cue.output}</p>
+                <p>{cue.preview || cue.output}</p>
               </div>
             </article>
           )) : <p>-</p>}
@@ -1250,7 +1250,7 @@ function renderCueDetailModal(cue: AiCue, onClose: () => void) {
             <X size={24} strokeWidth={1.8} />
           </button>
         </header>
-        <p>{cue.output}</p>
+        <p>{cue.fullAnswer || cue.output}</p>
       </article>
     </div>
   );

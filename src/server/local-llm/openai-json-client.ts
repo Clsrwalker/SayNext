@@ -2,9 +2,15 @@ const DEFAULT_OPENAI_MODEL = "gpt-5.4-nano";
 const DEFAULT_TIMEOUT_MS = 180000;
 
 export interface OpenAiJsonGenerateOptions {
+  apiKey?: string;
+  baseUrl?: string;
+  fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
   model?: string;
   system?: string;
   prompt: string;
+  conversationId?: string;
+  promptCacheKey?: string;
+  includeJsonInstruction?: boolean;
   temperature?: number | null;
   timeoutMs?: number;
 }
@@ -45,7 +51,7 @@ export function getSessionMemoryOpenAiModel(): string {
 }
 
 export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions): Promise<OpenAiJsonResult<T>> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
@@ -55,7 +61,9 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const system = [
     options.system,
-    "Return valid JSON only. Do not include markdown, explanation, or extra text.",
+    options.includeJsonInstruction === false
+      ? ""
+      : "Return valid JSON only. Do not include markdown, explanation, or extra text.",
   ].filter(Boolean).join("\n\n");
 
   const body: Record<string, unknown> = {
@@ -72,11 +80,14 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
       },
     ],
   };
+  if (options.conversationId) body.conversation = options.conversationId;
+  if (options.promptCacheKey) body.prompt_cache_key = options.promptCacheKey;
   if (options.temperature !== null) {
     body.temperature = options.temperature ?? 0.05;
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const baseUrl = (options.baseUrl || "https://api.openai.com").replace(/\/$/, "");
+  const response = await (options.fetchImpl || fetch)(`${baseUrl}/v1/responses`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

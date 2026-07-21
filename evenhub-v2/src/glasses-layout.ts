@@ -132,9 +132,9 @@ export function buildGlassTranscriptContent(lines: TranscriptLine[]): string {
   return content || "Listening...";
 }
 
-function cueContent(cue: AiCue | undefined): string {
+function cueContent(cue: AiCue | undefined, detail = false): string {
   if (!cue) return "";
-  return cleanText(cue.output, 360);
+  return cleanText(detail ? cue.fullAnswer || cue.output : cue.preview || cue.output, detail ? 2400 : 360);
 }
 
 function cueBox(content: string, eventCapture = true): GlassTextContainerSpec {
@@ -258,7 +258,7 @@ export function buildGlassesPage(params: {
       view: params.state.view,
       containers: [
         ...headerContainers(now),
-        cueBox(showAiCue ? cueContent(activeCue) || "No cue selected." : "", true),
+        cueBox(showAiCue ? cueContent(activeCue, true) || "No cue selected." : "", true),
         ...(showTranscript ? [transcriptBox(transcript, false)] : []),
       ],
     };

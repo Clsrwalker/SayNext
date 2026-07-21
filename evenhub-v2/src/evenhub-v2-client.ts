@@ -28,6 +28,8 @@ export type EvenHubV2ServerMessage =
       category: AiCue["category"];
       title: string;
       g2Title: string;
+      preview?: string;
+      fullAnswer?: string;
       output: string;
       sourceTranscriptLineIds: string[];
       createdAt: string;
@@ -87,6 +89,8 @@ type ConversationDetailResponse = {
     category: AiCue["category"];
     title: string;
     g2Title?: string;
+    preview?: string;
+    fullAnswer?: string;
     output: string;
     createdAt: string;
   }>;
@@ -308,7 +312,9 @@ export function recordFromConversationDetail(data: ConversationDetailResponse): 
       category: cue.category,
       title: cue.title,
       g2Title: cue.g2Title,
-      output: cue.output,
+      preview: cue.preview || cue.output,
+      fullAnswer: cue.fullAnswer || cue.output,
+      output: cue.fullAnswer || cue.output,
       createdAt: cue.createdAt,
       source: "auto",
     })),
@@ -367,7 +373,9 @@ export function cueFromServer(message: Extract<EvenHubV2ServerMessage, { type: "
     category: payload?.category || "concept",
     title: payload?.title || payload?.g2Title || "Cue",
     g2Title: payload?.g2Title,
-    output: payload?.output || "",
+    preview: payload?.preview || payload?.output || "",
+    fullAnswer: payload?.fullAnswer || payload?.output || "",
+    output: payload?.fullAnswer || payload?.output || "",
     createdAt: payload?.createdAt || new Date().toISOString(),
     source: "auto",
   };

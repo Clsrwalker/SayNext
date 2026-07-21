@@ -13,6 +13,8 @@ export type AiCue = {
   category: CueCategory;
   title: string;
   g2Title?: string;
+  preview?: string;
+  fullAnswer?: string;
   output: string;
   createdAt: string;
   source: "manual" | "auto";

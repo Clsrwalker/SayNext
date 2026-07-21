@@ -81,6 +81,32 @@ describe("buildGlassesPage", () => {
     }
   });
 
+  test("shows the short preview on main and the complete answer in cue detail", () => {
+    const cue = {
+      ...TEST_CUES[0],
+      preview: "A short answer preview.",
+      fullAnswer: "A short answer preview. This second sentence contains the implementation detail needed to finish the answer.",
+      output: "A short answer preview. This second sentence contains the implementation detail needed to finish the answer.",
+    };
+    const main = buildGlassesPage({
+      state: startLiveGlasses(cue.id),
+      cues: [cue],
+      prenote: null,
+      transcript: TEST_TRANSCRIPT,
+    });
+    const detail = buildGlassesPage({
+      state: { ...startLiveGlasses(cue.id), view: "cue_detail" },
+      cues: [cue],
+      prenote: null,
+      transcript: TEST_TRANSCRIPT,
+    });
+
+    const mainCue = main.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
+    const detailCue = detail.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
+    expect(mainCue?.kind === "text" ? mainCue.content : "").toBe("A short answer preview.");
+    expect(detailCue?.kind === "text" ? detailCue.content : "").toContain("implementation detail");
+  });
+
   test("can hide transcript from the glasses page without affecting phone data", () => {
     const page = buildGlassesPage({
       state: startLiveGlasses(TEST_CUES[0].id),
