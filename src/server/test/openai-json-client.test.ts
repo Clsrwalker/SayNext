@@ -34,3 +34,23 @@ test("OpenAI JSON client can attach a Responses request to a conversation", asyn
     }],
   }]);
 });
+
+test("OpenAI JSON client sends reasoning effort and can omit temperature for GPT-5.6", async () => {
+  let requestBody: Record<string, unknown> = {};
+
+  await generateOpenAiJson<{ ok: boolean }>({
+    apiKey: "test-key",
+    baseUrl: "https://api.openai.test",
+    fetchImpl: async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body || "{}"));
+      return new Response(JSON.stringify({ output_text: "{\"ok\":true}" }), { status: 200 });
+    },
+    model: "gpt-5.6-luna",
+    prompt: "Dynamic cue input",
+    reasoningEffort: "low",
+    temperature: null,
+  });
+
+  expect(requestBody.reasoning).toEqual({ effort: "low" });
+  expect("temperature" in requestBody).toBe(false);
+});

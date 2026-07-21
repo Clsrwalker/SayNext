@@ -263,3 +263,60 @@ test("OpenAI auto cue falls back to stateless generation when a conversation req
   expect(jsonCalls[1].conversationId).toBeUndefined();
   expect(result.lane).toBe("stateless_fallback");
 });
+
+test("OpenAI auto cue uses Luna low without temperature and falls back to GPT-5.4 mini", async () => {
+  const jsonCalls: Array<Record<string, unknown>> = [];
+  const generator = new OpenAiAutoCueGenerator({
+    model: "gpt-5.6-luna",
+    fallbackModel: "gpt-5.4-mini",
+    reasoningEffort: "low",
+    conversationClient: {
+      async createSession() { return { id: "conv_openai_1" }; },
+      async commitCanonicalTurn() {},
+      async deleteSession() {},
+    },
+    jsonGenerator: async (options) => {
+      jsonCalls.push(options as unknown as Record<string, unknown>);
+      if (options.model === "gpt-5.6-luna") throw new Error("luna unavailable");
+      return {
+        data: {
+          category: "response",
+          confidence: 0.9,
+          title: "Fallback",
+          g2Title: "Fallback",
+          preview: "Fallback answer.",
+          fullAnswer: "Fallback answer.",
+          output: "Fallback answer.",
+          reason: "primary_failed",
+        },
+        rawText: "{}",
+        model: "gpt-5.4-mini",
+      };
+    },
+  });
+
+  const result = await generator.generate({
+    triggerWindow: "Tell me about yourself.",
+    recentTranscript: "",
+    contextSnapshot: "Current question or request:\nTell me about yourself.",
+    settings: defaultEvenHubV2Settings(),
+    router: null,
+    session: {
+      providerConversationId: "conv_openai_1",
+      promptVersion: "test",
+      interviewGuideVersion: "test",
+    },
+    speculative: false,
+  });
+
+  expect(jsonCalls).toHaveLength(2);
+  expect(jsonCalls[0].model).toBe("gpt-5.6-luna");
+  expect(jsonCalls[0].reasoningEffort).toBe("low");
+  expect(jsonCalls[0].temperature).toBeNull();
+  expect(jsonCalls[0].conversationId).toBe("conv_openai_1");
+  expect(jsonCalls[1].model).toBe("gpt-5.4-mini");
+  expect(jsonCalls[1].conversationId).toBeUndefined();
+  expect(jsonCalls[1].prompt).toContain("You are SayNext's automatic cue writer");
+  expect(result.model).toBe("gpt-5.4-mini");
+  expect(result.lane).toBe("stateless_fallback");
+});

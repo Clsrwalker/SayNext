@@ -140,20 +140,29 @@ type OpenAiJsonGenerator = (
 
 export type OpenAiAutoCueGeneratorOptions = {
   model?: string;
+  fallbackModel?: string;
+  reasoningEffort?: NonNullable<OpenAiJsonGenerateOptions["reasoningEffort"]>;
   conversationClient?: OpenAiConversationClientLike;
   jsonGenerator?: OpenAiJsonGenerator;
 };
 
 export class OpenAiAutoCueGenerator implements AutoCueGenerator {
   private readonly model: string;
+  private readonly fallbackModel: string;
+  private readonly reasoningEffort: NonNullable<OpenAiJsonGenerateOptions["reasoningEffort"]>;
   private readonly conversationClient: OpenAiConversationClientLike;
   private readonly jsonGenerator: OpenAiJsonGenerator;
 
   constructor(options: OpenAiAutoCueGeneratorOptions = {}) {
     this.model = options.model
       || process.env.EVENHUB_V2_AUTO_CUE_MODEL
-      || process.env.SAYNEXT_MODEL
+      || "gpt-5.6-luna";
+    this.fallbackModel = options.fallbackModel
+      || process.env.EVENHUB_V2_AUTO_CUE_FALLBACK_MODEL
       || "gpt-5.4-mini";
+    this.reasoningEffort = options.reasoningEffort
+      || parseReasoningEffort(process.env.EVENHUB_V2_AUTO_CUE_REASONING_EFFORT)
+      || "low";
     this.conversationClient = options.conversationClient || new OpenAiConversationClient();
     this.jsonGenerator = options.jsonGenerator || generateOpenAiJson;
   }
@@ -180,13 +189,21 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
         : "stateless_fallback";
     let prompt = canonical ? buildAutoCueTurnPrompt(input) : buildAutoCuePrompt(input);
     let result: OpenAiJsonResult<AutoCueGeneratorOutput>;
+    let activeModel = this.model;
     try {
-      result = await this.request(input, prompt, canonical ? input.session?.providerConversationId : undefined);
+      result = await this.request(
+        input,
+        prompt,
+        activeModel,
+        canonical ? input.session?.providerConversationId : undefined,
+      );
     } catch (error) {
-      if (!canonical) throw error;
+      if (!this.canFallback(activeModel)) throw error;
       lane = "stateless_fallback";
       prompt = buildAutoCuePrompt(input);
-      result = await this.request(input, prompt);
+      activeModel = this.fallbackModel;
+      console.warn(`[EvenHubV2] auto cue model ${this.model} failed; using ${activeModel}: ${error instanceof Error ? error.message : String(error)}`);
+      result = await this.request(input, prompt, activeModel);
     }
 
     const normalized = normalizeAutoCueOutput(result.data);
@@ -196,14 +213,17 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
         result = await this.request(
           input,
           retryPrompt,
+          activeModel,
           lane === "canonical_conversation" ? input.session?.providerConversationId : undefined,
         );
       } catch (error) {
-        if (lane !== "canonical_conversation") throw error;
+        if (!this.canFallback(activeModel)) throw error;
         lane = "stateless_fallback";
+        activeModel = this.fallbackModel;
         result = await this.request(
           input,
           `${buildAutoCuePrompt(input)}\n\nThe previous result had no usable output. Return a response cue with concrete words Xiang can say now.`,
+          activeModel,
         );
       }
     }
@@ -235,18 +255,34 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
   private request(
     _input: AutoCueGeneratorInput,
     prompt: string,
+    model: string,
     conversationId?: string,
   ): Promise<OpenAiJsonResult<AutoCueGeneratorOutput>> {
+    const isGpt56 = model.startsWith("gpt-5.6");
     return this.jsonGenerator({
-      model: this.model,
+      model,
       prompt,
       conversationId,
       promptCacheKey: conversationId ? undefined : AUTO_CUE_PROMPT_CACHE_KEY,
       includeJsonInstruction: !conversationId,
-      temperature: 0.05,
+      reasoningEffort: isGpt56 ? this.reasoningEffort : undefined,
+      temperature: isGpt56 ? null : 0.05,
       timeoutMs: Number(process.env.EVENHUB_V2_AUTO_CUE_TIMEOUT_MS || 90000),
     });
   }
+
+  private canFallback(activeModel: string): boolean {
+    return Boolean(this.fallbackModel && this.fallbackModel !== activeModel);
+  }
+}
+
+function parseReasoningEffort(
+  value: string | undefined,
+): OpenAiJsonGenerateOptions["reasoningEffort"] | undefined {
+  if (value === "none" || value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max") {
+    return value;
+  }
+  return undefined;
 }
 
 export function buildAutoCueSessionSeed(): string {

@@ -11,6 +11,7 @@ export interface OpenAiJsonGenerateOptions {
   conversationId?: string;
   promptCacheKey?: string;
   includeJsonInstruction?: boolean;
+  reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
   temperature?: number | null;
   timeoutMs?: number;
 }
@@ -82,6 +83,9 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
   };
   if (options.conversationId) body.conversation = options.conversationId;
   if (options.promptCacheKey) body.prompt_cache_key = options.promptCacheKey;
+  if (options.reasoningEffort) {
+    body.reasoning = { effort: options.reasoningEffort };
+  }
   if (options.temperature !== null) {
     body.temperature = options.temperature ?? 0.05;
   }
