@@ -320,3 +320,39 @@ test("OpenAI auto cue uses Luna low without temperature and falls back to GPT-5.
   expect(result.model).toBe("gpt-5.4-mini");
   expect(result.lane).toBe("stateless_fallback");
 });
+
+test("OpenAI auto cue does not invoke the fallback after a request is cancelled", async () => {
+  const jsonCalls: Array<Record<string, unknown>> = [];
+  const controller = new AbortController();
+  controller.abort();
+  const generator = new OpenAiAutoCueGenerator({
+    model: "gpt-5.6-luna",
+    fallbackModel: "gpt-5.4-mini",
+    jsonGenerator: async (options) => {
+      jsonCalls.push(options as unknown as Record<string, unknown>);
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      throw error;
+    },
+  });
+
+  let caught: unknown;
+  try {
+    await generator.generate({
+      triggerWindow: "Can you walk me through your",
+      recentTranscript: "",
+      contextSnapshot: "Current partial question.",
+      settings: defaultEvenHubV2Settings(),
+      router: null,
+      speculative: true,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(Error);
+  expect((caught as Error).name).toBe("AbortError");
+  expect(jsonCalls).toHaveLength(1);
+  expect(jsonCalls[0].signal).toBe(controller.signal);
+});

@@ -474,6 +474,126 @@ test("EvenHubV2Runtime prepares a stable partial but publishes only after the ma
   expect(sent.filter((message) => message.type === "cue_created")).toHaveLength(1);
 });
 
+test("EvenHubV2Runtime keeps an in-flight speculative job when the final still matches", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const calls: AutoCueGeneratorInput[] = [];
+  let resolveSpeculative!: (value: AutoCueGenerationResult) => void;
+  const generator: AutoCueGenerator = {
+    generate(input) {
+      calls.push(input);
+      return new Promise<AutoCueGenerationResult>((resolve) => {
+        resolveSpeculative = resolve;
+      });
+    },
+  };
+  const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 5,
+    partialCommitMinChars: 4,
+    partialCommitMinWords: 2,
+    cueOpportunityRouter: null,
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "Could you explain the deployment trade-off",
+    isFinal: false,
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  expect(calls).toHaveLength(1);
+  expect(calls[0].speculative).toBe(true);
+
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "Could you explain the deployment trade-off",
+    isFinal: true,
+  }));
+  await runtime.flushCueBufferNow();
+  expect(calls).toHaveLength(1);
+
+  resolveSpeculative(validCue({
+    category: "response",
+    output: "I would start with the simpler deployment and scale it only after measuring the bottleneck.",
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  expect(store.listCues(conversationId)).toHaveLength(1);
+  expect(sent.filter((message) => message.type === "cue_created")).toHaveLength(1);
+});
+
+test("EvenHubV2Runtime lets a revised final preempt an in-flight speculative job", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const calls: AutoCueGeneratorInput[] = [];
+  const resolvers: Array<(value: AutoCueGenerationResult) => void> = [];
+  const generator: AutoCueGenerator = {
+    generate(input) {
+      calls.push(input);
+      return new Promise<AutoCueGenerationResult>((resolve) => {
+        resolvers.push(resolve);
+      });
+    },
+  };
+  const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 5,
+    partialCommitMinChars: 4,
+    partialCommitMinWords: 2,
+    cueOpportunityRouter: null,
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "Can you walk me through your",
+    isFinal: false,
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  expect(calls).toHaveLength(1);
+  expect(calls[0].speculative).toBe(true);
+
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "Can you walk me through your background?",
+    isFinal: true,
+  }));
+  const canonicalFlush = runtime.flushCueBufferNow();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(calls).toHaveLength(2);
+  expect(calls[1].speculative).toBe(false);
+  expect(calls[1].triggerWindow).toBe("Can you walk me through your background?");
+
+  resolvers[0](validCue({
+    title: "Incomplete question",
+    g2Title: "Incomplete",
+    output: "What part would you like me to explain?",
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(runtime.snapshot.activeAutoJobs.size).toBe(1);
+
+  resolvers[1](validCue({
+    category: "response",
+    title: "Background",
+    g2Title: "Background",
+    output: "I am a MACS student focused on practical full-stack AI and cloud applications.",
+  }));
+  await canonicalFlush;
+
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  const cues = store.listCues(conversationId);
+  expect(cues).toHaveLength(1);
+  expect(cues[0].output).toContain("MACS student");
+  expect(sent.filter((message) => message.type === "cue_created")).toHaveLength(1);
+
+  const attempts = store.getDb().query(`
+    SELECT status, skipped_reason
+    FROM evenhub_v2_auto_cue_attempts
+    WHERE conversation_id = ?
+    ORDER BY created_at
+  `).all(conversationId) as Array<{ status: string; skipped_reason: string }>;
+  expect(attempts.some((attempt) => (
+    attempt.status === "stale" && attempt.skipped_reason === "final_preempted"
+  ))).toBe(true);
+});
+
 test("EvenHubV2Runtime keeps partial revisions out of canonical transcript and publishes one final cue", async () => {
   const sent: EvenHubV2ServerMessage[] = [];
   const generator = new FakeAutoCueGenerator(validCue());

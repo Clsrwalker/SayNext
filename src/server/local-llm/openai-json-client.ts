@@ -14,6 +14,7 @@ export interface OpenAiJsonGenerateOptions {
   reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
   temperature?: number | null;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface OpenAiJsonResult<T> {
@@ -59,6 +60,9 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
 
   const model = options.model || getSessionMemoryOpenAiModel();
   const controller = new AbortController();
+  const abortFromExternalSignal = () => controller.abort();
+  if (options.signal?.aborted) abortFromExternalSignal();
+  else options.signal?.addEventListener("abort", abortFromExternalSignal, { once: true });
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const system = [
     options.system,
@@ -99,7 +103,10 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
     },
     signal: controller.signal,
     body: JSON.stringify(body),
-  }).finally(() => clearTimeout(timeout));
+  }).finally(() => {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abortFromExternalSignal);
+  });
 
   if (!response.ok) {
     throw new Error(`OpenAI JSON request failed: ${response.status} ${await response.text()}`);

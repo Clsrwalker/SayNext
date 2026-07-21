@@ -54,3 +54,38 @@ test("OpenAI JSON client sends reasoning effort and can omit temperature for GPT
   expect(requestBody.reasoning).toEqual({ effort: "low" });
   expect("temperature" in requestBody).toBe(false);
 });
+
+test("OpenAI JSON client forwards external cancellation to the active fetch", async () => {
+  const externalController = new AbortController();
+  let observedSignal: AbortSignal | null | undefined;
+  const request = generateOpenAiJson<{ ok: boolean }>({
+    apiKey: "test-key",
+    baseUrl: "https://api.openai.test",
+    fetchImpl: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      observedSignal = init?.signal;
+      const rejectAbort = () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (observedSignal?.aborted) rejectAbort();
+      else observedSignal?.addEventListener("abort", rejectAbort, { once: true });
+    }),
+    model: "gpt-test",
+    prompt: "Dynamic cue input",
+    signal: externalController.signal,
+  });
+
+  await Promise.resolve();
+  externalController.abort();
+
+  let caught: unknown;
+  try {
+    await request;
+  } catch (error) {
+    caught = error;
+  }
+  expect(observedSignal?.aborted).toBe(true);
+  expect(caught).toBeInstanceOf(Error);
+  expect((caught as Error).name).toBe("AbortError");
+});

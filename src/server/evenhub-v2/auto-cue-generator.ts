@@ -22,6 +22,7 @@ export type AutoCueGeneratorInput = {
   router: CueOpportunityRouterResult | null;
   session?: AutoCueSession | null;
   speculative?: boolean;
+  signal?: AbortSignal;
 };
 
 export type AutoCueSession = {
@@ -198,6 +199,7 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
         canonical ? input.session?.providerConversationId : undefined,
       );
     } catch (error) {
+      if (input.signal?.aborted) throw error;
       if (!this.canFallback(activeModel)) throw error;
       lane = "stateless_fallback";
       prompt = buildAutoCuePrompt(input);
@@ -208,6 +210,11 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
 
     const normalized = normalizeAutoCueOutput(result.data);
     if (normalized.category !== "none" && !normalized.fullAnswer) {
+      if (input.signal?.aborted) {
+        const error = new Error("Auto cue generation was cancelled.");
+        error.name = "AbortError";
+        throw error;
+      }
       const retryPrompt = `${prompt}\n\nThe previous result had no usable output. Return a response cue with concrete words Xiang can say now.`;
       try {
         result = await this.request(
@@ -217,6 +224,7 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
           lane === "canonical_conversation" ? input.session?.providerConversationId : undefined,
         );
       } catch (error) {
+        if (input.signal?.aborted) throw error;
         if (!this.canFallback(activeModel)) throw error;
         lane = "stateless_fallback";
         activeModel = this.fallbackModel;
@@ -253,7 +261,7 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
   }
 
   private request(
-    _input: AutoCueGeneratorInput,
+    input: AutoCueGeneratorInput,
     prompt: string,
     model: string,
     conversationId?: string,
@@ -268,6 +276,7 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
       reasoningEffort: isGpt56 ? this.reasoningEffort : undefined,
       temperature: isGpt56 ? null : 0.05,
       timeoutMs: Number(process.env.EVENHUB_V2_AUTO_CUE_TIMEOUT_MS || 90000),
+      signal: input.signal,
     });
   }
 

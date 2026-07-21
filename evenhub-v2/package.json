@@ -1,6 +1,6 @@
 {
   "name": "evenhub-v2",
-  "version": "0.2.55",
+  "version": "0.2.56",
   "private": true,
   "type": "module",
   "scripts": {

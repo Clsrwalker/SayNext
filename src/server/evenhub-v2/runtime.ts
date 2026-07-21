@@ -193,6 +193,8 @@ export class EvenHubV2Runtime {
   private cueFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private currentAutoJob: Promise<void> | null = null;
   private currentAutoJobInput: CueJobInput | null = null;
+  private currentAutoJobAbortController: AbortController | null = null;
+  private readonly preemptedAutoJobReasons = new Map<string, string>();
   private pendingSpeculativeTurn: LiveTranscriptTurn | null = null;
   private providerLifecycle: AutoCueProviderLifecycle | null = null;
   private liveTurn: LiveTranscriptTurn | null = null;
@@ -661,6 +663,7 @@ export class EvenHubV2Runtime {
           lineId: line.id,
         });
       } else {
+        this.preemptRevisedSpeculative(finalTurn.id);
         this.candidateBuffer.push({
           turnId: finalTurn.id,
           revision: finalTurn.revision,
@@ -763,13 +766,16 @@ export class EvenHubV2Runtime {
   }
 
   private async startAutoCueJob(input: CueJobInput): Promise<void> {
+    const abortController = new AbortController();
     this.state.activeAutoJobs.set(input.requestId, "running");
     this.currentAutoJobInput = input;
-    const job = this.runAutoCueJob(input).finally(() => {
+    this.currentAutoJobAbortController = abortController;
+    const job = this.runAutoCueJob(input, abortController.signal).finally(() => {
       this.state.activeAutoJobs.delete(input.requestId);
-      if (this.currentAutoJobInput?.requestId === input.requestId) {
-        this.currentAutoJobInput = null;
-      }
+      this.preemptedAutoJobReasons.delete(input.requestId);
+      if (this.currentAutoJobInput?.requestId !== input.requestId) return;
+      this.currentAutoJobInput = null;
+      this.currentAutoJobAbortController = null;
       this.currentAutoJob = null;
       const pendingSpeculation = this.pendingSpeculativeTurn;
       this.pendingSpeculativeTurn = null;
@@ -788,6 +794,20 @@ export class EvenHubV2Runtime {
     await job;
   }
 
+  private preemptRevisedSpeculative(questionId: string): void {
+    const input = this.currentAutoJobInput;
+    if (!input?.speculative || input.questionId !== questionId) return;
+
+    this.preemptedAutoJobReasons.set(input.requestId, "final_preempted");
+    this.currentAutoJobAbortController?.abort();
+    this.currentAutoJobInput = null;
+    this.currentAutoJobAbortController = null;
+    this.currentAutoJob = null;
+    if (this.pendingSpeculativeTurn?.id === questionId) {
+      this.pendingSpeculativeTurn = null;
+    }
+  }
+
   private recentCanonicalContext(
     turns: Array<{ lineId: string; text: string; role: "unknown" | "xiang_readback" }>,
   ): string {
@@ -796,7 +816,7 @@ export class EvenHubV2Runtime {
       .join("\n");
   }
 
-  private async runAutoCueJob(input: CueJobInput): Promise<void> {
+  private async runAutoCueJob(input: CueJobInput, signal: AbortSignal): Promise<void> {
     if (!this.conversationId) return;
     const recentTranscript = this.recentCanonicalContext(input.previousTurns);
     const routerLines = [
@@ -869,12 +889,14 @@ export class EvenHubV2Runtime {
         router,
         session: providerSession,
         speculative: input.speculative,
+        signal,
       });
     } catch (error) {
+      const preemptedReason = this.preemptedAutoJobReasons.get(input.requestId);
       this.store.updateAutoCueAttempt(input.attemptId, {
-        status: "failed",
+        status: preemptedReason || signal.aborted ? "stale" : "failed",
         latencyMs: Date.now() - input.startedAt,
-        skippedReason: "generator_error",
+        skippedReason: preemptedReason || (signal.aborted ? "generator_aborted" : "generator_error"),
         trace: {
           error: error instanceof Error ? error.message : String(error),
           memoryUsedIds: context.memoryUsedIds,
@@ -889,6 +911,11 @@ export class EvenHubV2Runtime {
 
     const cue = normalizeAutoCueOutput(result.data);
     const draft: GeneratedCueDraft = { input, result: { ...result, data: cue }, context, router, routerError };
+    const preemptedReason = this.preemptedAutoJobReasons.get(input.requestId);
+    if (preemptedReason || signal.aborted) {
+      this.markDraftStale(draft, preemptedReason || "generator_aborted");
+      return;
+    }
     if (!input.speculative) {
       this.publishGeneratedDraft(draft, input.sourceTranscriptLineIds);
       return;
