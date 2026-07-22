@@ -4,7 +4,7 @@ export const EVENHUB_V2_PROTOCOL_VERSION = "evenhub-v2.1";
 export type ConversationStatus = "idle" | "active" | "ending" | "ended";
 export type AudioStatus = "stopped" | "starting" | "listening" | "reconnecting" | "failed";
 export type AutoCueJobStatus = "queued" | "running" | "created" | "skipped" | "failed" | "stale";
-export type AutoCueCategory = "response" | "concept" | "suggestion" | "person" | "none";
+export type AutoCueCategory = "response" | "concept" | "suggestion" | "person" | "code" | "none";
 export type EvenHubV2AudioSource = "glasses" | "phone";
 export type EvenHubV2ObservedAudioSource = EvenHubV2AudioSource | "unknown";
 
@@ -65,6 +65,9 @@ export type EvenHubV2CuePayload = {
   preview: string;
   fullAnswer: string;
   output: string;
+  language: string;
+  code: string;
+  explanation: string;
   sourceTranscriptLineIds: string[];
   createdAt: string;
 };

@@ -15,7 +15,7 @@ function cue(id: string, category: AiCue["category"]): AiCue {
 
 describe("cue groups", () => {
   test("keeps the official category order", () => {
-    expect(CUE_CATEGORY_ORDER).toEqual(["concept", "response", "suggestion", "person"]);
+    expect(CUE_CATEGORY_ORDER).toEqual(["concept", "response", "suggestion", "person", "code"]);
   });
 
   test("groups cue history by category", () => {
@@ -29,5 +29,6 @@ describe("cue groups", () => {
     expect(groups.response.map((item) => item.id)).toEqual(["one", "three"]);
     expect(groups.suggestion).toEqual([]);
     expect(groups.person).toEqual([]);
+    expect(groups.code).toEqual([]);
   });
 });

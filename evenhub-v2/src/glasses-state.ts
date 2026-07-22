@@ -83,7 +83,7 @@ export function applyGlassGesture(
       return { state: { ...state, view: "exit_confirm" }, effect: "exit_confirm" };
     }
     if (gesture === "click") {
-      return { state: { ...state, view: "main" }, effect: "none" };
+      return { state: { ...state, view: "main" }, effect: "start_conversation" };
     }
     return { state, effect: "none" };
   }

@@ -50,6 +50,8 @@ const CUE_ID = 2;
 const MENU_ID = 4;
 const DETAIL_ID = 5;
 const HEADER_RIGHT_ID = 7;
+const START_ID = 8;
+const IDLE_HELP_ID = 9;
 
 function headerContainers(now: Date): GlassTextContainerSpec[] {
   const time = now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
@@ -73,6 +75,17 @@ function cleanText(value: string, maxChars: number): string {
   const compact = value.replace(/\s+/g, " ").trim();
   if (compact.length <= maxChars) return compact;
   return `${compact.slice(0, maxChars - 3).trimEnd()}...`;
+}
+
+export function normalizeGlassCode(value: string): string {
+  const lines = value
+    .replace(/\r\n?/g, "\n")
+    .replace(/\t/g, "  ")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/g, ""));
+  while (lines.length && !lines[0].trim()) lines.shift();
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return lines.join("\n");
 }
 
 function wrapSubtitleText(value: string, maxChars: number): string[] {
@@ -134,6 +147,7 @@ export function buildGlassTranscriptContent(lines: TranscriptLine[]): string {
 
 function cueContent(cue: AiCue | undefined, detail = false): string {
   if (!cue) return "";
+  if (cue.category === "code") return normalizeGlassCode(cue.code || cue.output);
   return cleanText(detail ? cue.fullAnswer || cue.output : cue.preview || cue.output, detail ? 2400 : 360);
 }
 
@@ -196,8 +210,46 @@ export function buildGlassesPage(params: {
       view: params.state.view,
       containers: [
         ...headerContainers(now),
-        cueBox(showAiCue ? "SayNext ready.\nDouble click to exit confirmation." : "", true),
-        ...(showTranscript ? [transcriptBox("Start a conversation from the phone page.", false)] : []),
+        {
+          kind: "text",
+          id: CUE_ID,
+          name: "idle-title",
+          x: 12,
+          y: 48,
+          width: 552,
+          height: 44,
+          content: "SayNext ready",
+          padding: 0,
+          eventCapture: false,
+        },
+        {
+          kind: "list",
+          id: START_ID,
+          name: "start-conversation",
+          x: 64,
+          y: 96,
+          width: 448,
+          height: 76,
+          items: ["Start conversation"],
+          selectedIndex: 0,
+          borderWidth: 0,
+          borderColor: 8,
+          borderRadius: 6,
+          padding: 4,
+          eventCapture: true,
+        },
+        {
+          kind: "text",
+          id: IDLE_HELP_ID,
+          name: "idle-help",
+          x: 12,
+          y: 204,
+          width: 552,
+          height: 56,
+          content: "Click to start  |  Double click to exit",
+          padding: 0,
+          eventCapture: false,
+        },
       ],
     };
   }

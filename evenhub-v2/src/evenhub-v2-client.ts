@@ -31,6 +31,9 @@ export type EvenHubV2ServerMessage =
       preview?: string;
       fullAnswer?: string;
       output: string;
+      language?: string;
+      code?: string;
+      explanation?: string;
       sourceTranscriptLineIds: string[];
       createdAt: string;
     }>
@@ -92,6 +95,9 @@ type ConversationDetailResponse = {
     preview?: string;
     fullAnswer?: string;
     output: string;
+    language?: string;
+    code?: string;
+    explanation?: string;
     createdAt: string;
   }>;
 };
@@ -307,17 +313,23 @@ export function recordFromConversationDetail(data: ConversationDetailResponse): 
       time: offsetLabel(new Date(line.receivedAt).getTime() - startedAt) || timeFromIso(line.receivedAt),
       text: line.text,
     })),
-    cueHistory: data.cues.map((cue): AiCue => ({
-      id: cue.id,
-      category: cue.category,
-      title: cue.title,
-      g2Title: cue.g2Title,
-      preview: cue.preview || cue.output,
-      fullAnswer: cue.fullAnswer || cue.output,
-      output: cue.fullAnswer || cue.output,
-      createdAt: cue.createdAt,
-      source: "auto",
-    })),
+    cueHistory: data.cues.map((cue): AiCue => {
+      const output = cue.category === "code" ? cue.code || cue.output : cue.fullAnswer || cue.output;
+      return {
+        id: cue.id,
+        category: cue.category,
+        title: cue.title,
+        g2Title: cue.g2Title,
+        preview: cue.preview || cue.explanation || output,
+        fullAnswer: cue.fullAnswer || cue.explanation || output,
+        output,
+        language: cue.language,
+        code: cue.code,
+        explanation: cue.explanation,
+        createdAt: cue.createdAt,
+        source: "auto",
+      };
+    }),
     usedPrenote: data.conversation.usedPrenote?.text ? {
       id: data.conversation.usedPrenote.ids?.join(",") || "used-prenote",
       title: "Used Prenote",
@@ -368,14 +380,20 @@ export function conversationStartPayload(settings: ConversationSettings, prenote
 
 export function cueFromServer(message: Extract<EvenHubV2ServerMessage, { type: "cue_created" }>): AiCue {
   const payload = message.payload;
+  const output = payload?.category === "code"
+    ? payload.code || payload.output || ""
+    : payload?.fullAnswer || payload?.output || "";
   return {
     id: payload?.cueId || makeId("cue"),
     category: payload?.category || "concept",
     title: payload?.title || payload?.g2Title || "Cue",
     g2Title: payload?.g2Title,
-    preview: payload?.preview || payload?.output || "",
-    fullAnswer: payload?.fullAnswer || payload?.output || "",
-    output: payload?.fullAnswer || payload?.output || "",
+    preview: payload?.preview || payload?.explanation || output,
+    fullAnswer: payload?.fullAnswer || payload?.explanation || output,
+    output,
+    language: payload?.language,
+    code: payload?.code,
+    explanation: payload?.explanation,
     createdAt: payload?.createdAt || new Date().toISOString(),
     source: "auto",
   };

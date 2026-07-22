@@ -4,6 +4,7 @@ import {
   BookOpen,
   Check,
   ChevronRight,
+  Code2,
   Lightbulb,
   MoreHorizontal,
   Pause,
@@ -106,6 +107,7 @@ function cueIcon(category: CueCategory) {
   if (category === "concept") return <BookOpen size={22} strokeWidth={1.7} />;
   if (category === "response") return <span className="question-icon">?</span>;
   if (category === "suggestion") return <Lightbulb size={22} strokeWidth={1.7} />;
+  if (category === "code") return <Code2 size={22} strokeWidth={1.7} />;
   return <UserRound size={22} strokeWidth={1.7} />;
 }
 
@@ -634,6 +636,11 @@ export default function App() {
       suppressMenuDoubleClickUntilRef.current = nowMs + DETAIL_BACK_DOUBLE_CLICK_SUPPRESS_MS;
     }
 
+    if (decision.effect === "start_conversation") {
+      startConversation();
+      return;
+    }
+
     commitGlassState(decision.state);
     if (decision.effect === "manual_generate") {
       setConnectionStatus("manual_disabled");
@@ -695,9 +702,12 @@ export default function App() {
   }
 
   function startConversation() {
-    const voiceInput = normalizeSupportedVoiceInput(settings.voiceInput);
-    const startSettings = voiceInput === settings.voiceInput ? settings : { ...settings, voiceInput };
-    const payload = conversationStartPayload(startSettings, activePrenote);
+    const currentSettings = settingsRef.current;
+    const voiceInput = normalizeSupportedVoiceInput(currentSettings.voiceInput);
+    const startSettings = voiceInput === currentSettings.voiceInput
+      ? currentSettings
+      : { ...currentSettings, voiceInput };
+    const payload = conversationStartPayload(startSettings, activePrenoteRef.current);
     activeAudioSourceRef.current = voiceInput;
     audioSourceMismatchCountRef.current = 0;
     resetAudioDiagnostics();
@@ -707,6 +717,7 @@ export default function App() {
       setConnectionStatus("connecting_backend");
     }
     pendingAudioStartRef.current = true;
+    isListeningRef.current = true;
     setIsListening(true);
     setElapsedSeconds(0);
     setCues([]);
@@ -1250,7 +1261,16 @@ function renderCueDetailModal(cue: AiCue, onClose: () => void) {
             <X size={24} strokeWidth={1.8} />
           </button>
         </header>
-        <p>{cue.fullAnswer || cue.output}</p>
+        {cue.category === "code" ? (
+          <>
+            {cue.explanation || cue.fullAnswer ? (
+              <p className="cue-code-explanation">{cue.explanation || cue.fullAnswer}</p>
+            ) : null}
+            <pre className="cue-code-block">
+              <code>{cue.code || cue.output}</code>
+            </pre>
+          </>
+        ) : <p>{cue.fullAnswer || cue.output}</p>}
       </article>
     </div>
   );

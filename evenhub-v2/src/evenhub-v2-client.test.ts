@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { partialTranscriptFromServer, recordFromConversationDetail, resolveBackendOrigin, transcriptFromServer } from "./evenhub-v2-client";
+import { cueFromServer, partialTranscriptFromServer, recordFromConversationDetail, resolveBackendOrigin, transcriptFromServer } from "./evenhub-v2-client";
 
 describe("resolveBackendOrigin", () => {
   test("uses env override when provided", () => {
@@ -133,5 +133,71 @@ describe("conversation detail mapping", () => {
     });
 
     expect(record.title).toBe("Generated Summary Title");
+  });
+
+  test("preserves structured code cue fields from saved conversation detail", () => {
+    const code = "function add(a: number, b: number) {\n  return a + b;\n}";
+    const record = recordFromConversationDetail({
+      conversation: {
+        id: "conv-code",
+        title: "Code interview",
+        startedAt: "2026-07-21T10:00:00.000Z",
+        endedAt: "2026-07-21T10:01:00.000Z",
+        durationMs: 60_000,
+      },
+      transcript: [],
+      cues: [{
+        id: "cue-code",
+        category: "code",
+        title: "Add numbers",
+        g2Title: "Add numbers",
+        preview: "Return the sum.",
+        fullAnswer: "This function returns the sum of two numbers.",
+        output: code,
+        language: "typescript",
+        code,
+        explanation: "This function returns the sum of two numbers.",
+        createdAt: "2026-07-21T10:00:30.000Z",
+      }],
+    });
+
+    expect(record.cueHistory[0]).toMatchObject({
+      category: "code",
+      language: "typescript",
+      code,
+      explanation: "This function returns the sum of two numbers.",
+      output: code,
+    });
+  });
+});
+
+describe("server cue mapping", () => {
+  test("preserves structured code from a live cue_created message", () => {
+    const code = "const result = values.map((value) => value * 2);";
+    const cue = cueFromServer({
+      protocolVersion: "evenhub-v2.1",
+      messageId: "server-code-1",
+      timestamp: "2026-07-21T10:00:00.000Z",
+      type: "cue_created",
+      payload: {
+        cueId: "cue-live-code",
+        attemptId: "attempt-code",
+        category: "code",
+        title: "Double values",
+        g2Title: "Double values",
+        preview: "Map each value.",
+        fullAnswer: "I map each value and multiply it by two.",
+        output: code,
+        language: "typescript",
+        code,
+        explanation: "I map each value and multiply it by two.",
+        sourceTranscriptLineIds: [],
+        createdAt: "2026-07-21T10:00:00.000Z",
+      },
+    });
+
+    expect(cue.code).toBe(code);
+    expect(cue.output).toBe(code);
+    expect(cue.explanation).toContain("multiply it by two");
   });
 });

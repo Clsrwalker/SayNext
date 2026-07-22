@@ -35,9 +35,21 @@ describe("buildMenuItems", () => {
 });
 
 describe("applyGlassGesture", () => {
-  test("initial state is idle until the phone starts a conversation", () => {
+  test("initial state is idle until a conversation starts", () => {
     expect(INITIAL_GLASS_STATE.view).toBe("root_idle");
     expect(INITIAL_GLASS_STATE.latestCueId).toBeNull();
+  });
+
+  test("root idle click starts a conversation while double click keeps exit confirmation", () => {
+    const menuItems = buildMenuItems({ prenote: null, cues: [] });
+
+    const start = applyGlassGesture(INITIAL_GLASS_STATE, "click", menuItems);
+    expect(start.state.view).toBe("main");
+    expect(start.effect).toBe("start_conversation");
+
+    const exit = applyGlassGesture(INITIAL_GLASS_STATE, "double_click", menuItems);
+    expect(exit.state.view).toBe("exit_confirm");
+    expect(exit.effect).toBe("exit_confirm");
   });
 
   test("foreground enter does not switch idle glasses into listening mode", () => {

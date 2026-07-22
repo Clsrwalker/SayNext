@@ -242,6 +242,7 @@ export interface PersonalMemorySearchResult extends PersonalMemoryRecord {
   score: number;
   lexicalRank?: number;
   vectorRank?: number;
+  vectorScore?: number;
   keywordScore: number;
 }
 
@@ -282,6 +283,18 @@ export interface MemoryRetrievalDebug {
 }
 
 export type SessionMemoryCandidateStatus = "pending" | "approved" | "rejected" | "promoted";
+
+const PROMOTABLE_PERSONAL_MEMORY_CANDIDATE_TYPES = new Set([
+  "personal_fact",
+  "preference",
+  "speaking_style",
+  "project_detail",
+  "correction",
+]);
+
+export function isPromotablePersonalMemoryCandidateType(candidateType: string): boolean {
+  return PROMOTABLE_PERSONAL_MEMORY_CANDIDATE_TYPES.has(candidateType.trim());
+}
 
 export interface SessionMemoryCandidateRecord {
   id: number;
@@ -487,6 +500,7 @@ const PERSONAL_MEMORY_QUERY_EMBEDDING_CACHE_MAX = Number(process.env.PERSONAL_ME
 const PERSONAL_MEMORY_EMBEDDING_INPUT_VERSION = process.env.PERSONAL_MEMORY_EMBEDDING_INPUT_VERSION || "personal-memory-embedding-v1";
 const prenoteQueryEmbeddingCache = new Map<string, { embedding: number[]; model: string; expiresAt: number }>();
 const personalMemoryQueryEmbeddingCache = new Map<string, PersonalMemoryEmbeddingInfo & { expiresAt: number }>();
+const personalMemoryQueryEmbeddingInFlight = new Map<string, Promise<PersonalMemoryEmbeddingInfo>>();
 export type PrenoteRetrievalMode = "fast" | "semantic";
 export type MemoryContextPackingMode = "full" | "excerpt" | "tagged_cards";
 type PersonalMemoryEmbeddingProvider = "local" | "openai";
@@ -1013,20 +1027,32 @@ async function createPersonalMemoryQueryEmbedding(query: string): Promise<Person
     const { expiresAt: _expiresAt, ...value } = cached;
     return value;
   }
+  const existingRequest = personalMemoryQueryEmbeddingInFlight.get(cacheKey);
+  if (existingRequest) return existingRequest;
 
-  const value = (await createPersonalMemoryEmbeddings([normalizedQuery]))[0]
-    ?? createLocalPersonalMemoryEmbeddingInfo(normalizedQuery, "fallback", "missing_embedding_result");
-  if (PERSONAL_MEMORY_QUERY_EMBEDDING_CACHE_TTL_MS > 0) {
-    if (personalMemoryQueryEmbeddingCache.size >= PERSONAL_MEMORY_QUERY_EMBEDDING_CACHE_MAX) {
-      const oldestKey = personalMemoryQueryEmbeddingCache.keys().next().value;
-      if (oldestKey) personalMemoryQueryEmbeddingCache.delete(oldestKey);
-    }
-    personalMemoryQueryEmbeddingCache.set(cacheKey, {
-      ...value,
-      expiresAt: now + PERSONAL_MEMORY_QUERY_EMBEDDING_CACHE_TTL_MS,
+  const request = createPersonalMemoryEmbeddings([normalizedQuery])
+    .then((results) => {
+      const value = results[0]
+        ?? createLocalPersonalMemoryEmbeddingInfo(normalizedQuery, "fallback", "missing_embedding_result");
+      if (PERSONAL_MEMORY_QUERY_EMBEDDING_CACHE_TTL_MS > 0) {
+        if (personalMemoryQueryEmbeddingCache.size >= PERSONAL_MEMORY_QUERY_EMBEDDING_CACHE_MAX) {
+          const oldestKey = personalMemoryQueryEmbeddingCache.keys().next().value;
+          if (oldestKey) personalMemoryQueryEmbeddingCache.delete(oldestKey);
+        }
+        personalMemoryQueryEmbeddingCache.set(cacheKey, {
+          ...value,
+          expiresAt: Date.now() + PERSONAL_MEMORY_QUERY_EMBEDDING_CACHE_TTL_MS,
+        });
+      }
+      return value;
+    })
+    .finally(() => {
+      if (personalMemoryQueryEmbeddingInFlight.get(cacheKey) === request) {
+        personalMemoryQueryEmbeddingInFlight.delete(cacheKey);
+      }
     });
-  }
-  return value;
+  personalMemoryQueryEmbeddingInFlight.set(cacheKey, request);
+  return request;
 }
 
 function canComparePersonalMemoryEmbedding(queryEmbedding: PersonalMemoryEmbeddingInfo, memory: PersonalMemoryRecord): boolean {
@@ -4613,6 +4639,7 @@ function buildPersonalMemoryRetrievalDebug(params: {
   const normalizedQuery = params.cleanedQuery.toLowerCase();
   const rawIntentQuery = params.debug.query.trim() || params.cleanedQuery;
   const queryClassification = classifyMemoryQueryIntent(rawIntentQuery);
+  const vectorThreshold = params.debug.embeddingModel === "local-hybrid" ? 0.08 : 0.28;
 
   params.debug.query = rawIntentQuery;
   params.debug.mode = MEMORY_RETRIEVAL_MODE;
@@ -4629,9 +4656,16 @@ function buildPersonalMemoryRetrievalDebug(params: {
         + personalMemoryTaxonomyBoost(queryClassification, memory);
       const softPenalty = params.softPenalties?.get(memory.id) ?? 0;
       const lexicalComponent = lexicalRank ? 1 / (60 + lexicalRank) : 0;
-      const vectorComponent = vectorRank && vectorScore > 0.08 ? 1 / (60 + vectorRank) : 0;
+      const hasVectorSignal = Boolean(vectorRank && vectorScore >= vectorThreshold);
+      const vectorComponent = hasVectorSignal ? 1 / (60 + (vectorRank || 0)) : 0;
+      const semanticComponent = hasVectorSignal ? vectorScore * 0.08 : 0;
       const keywordComponent = keywordScore * 0.04;
-      const deterministicScore = lexicalComponent * 0.55 + vectorComponent * 0.35 + keywordComponent + intentBoost + softPenalty;
+      const deterministicScore = lexicalComponent * 0.55
+        + vectorComponent * 0.35
+        + semanticComponent
+        + keywordComponent
+        + intentBoost
+        + softPenalty;
       const included = includedById.has(memory.id);
       const includedResult = includedById.get(memory.id);
       const reasons: string[] = [...(params.retrievalReasons?.get(memory.id) ?? [])];
@@ -4647,8 +4681,8 @@ function buildPersonalMemoryRetrievalDebug(params: {
       if (isLikelyPublicMonologue(normalizedQuery) || isLikelyCompleteDialogueExcerpt(normalizedQuery)) {
         reasons.push("query_signal:public_or_third_party_transcript");
       }
-      if (!lexicalRank && keywordScore === 0 && intentBoost === 0) {
-        reasons.push("rejected:no_lexical_keyword_or_intent_match");
+      if (!lexicalRank && keywordScore === 0 && intentBoost === 0 && !hasVectorSignal) {
+        reasons.push("rejected:no_lexical_keyword_intent_or_vector_match");
       } else if (deterministicScore <= 0 || (keywordScore === 0 && intentBoost === 0 && deterministicScore < 0.02)) {
         reasons.push("rejected:score_below_existing_threshold");
       }
@@ -6023,6 +6057,7 @@ class ConversationLogger {
     }
 
     const queryEmbedding = queryEmbeddingInfo ?? createLocalPersonalMemoryEmbeddingInfo(cleanedQuery);
+    const vectorThreshold = queryEmbedding.model === "local-hybrid" ? 0.08 : 0.28;
     if (debug) {
       debug.embeddingProvider = queryEmbedding.provider;
       debug.embeddingModel = queryEmbedding.model;
@@ -6624,14 +6659,20 @@ class ConversationLogger {
           return acc;
         }
 
-        if (!lexicalRank && keywordScore === 0 && intentBoost === 0) {
+        const hasVectorSignal = Boolean(vectorRank && vectorScore >= vectorThreshold);
+        if (!lexicalRank && keywordScore === 0 && intentBoost === 0 && !hasVectorSignal) {
           return acc;
         }
 
         const lexicalComponent = lexicalRank ? 1 / (60 + lexicalRank) : 0;
-        const vectorComponent = vectorRank && vectorScore > 0.08 ? 1 / (60 + vectorRank) : 0;
+        const vectorComponent = hasVectorSignal ? 1 / (60 + (vectorRank || 0)) : 0;
+        const semanticComponent = hasVectorSignal ? vectorScore * 0.08 : 0;
         const keywordComponent = keywordScore * 0.04;
-        const baseScore = lexicalComponent * 0.55 + vectorComponent * 0.35 + keywordComponent + intentBoost;
+        const baseScore = lexicalComponent * 0.55
+          + vectorComponent * 0.35
+          + semanticComponent
+          + keywordComponent
+          + intentBoost;
         const score = baseScore + softPenalty;
         if (softPenalty !== 0) softPenalties.set(memory.id, softPenalty);
 
@@ -6644,6 +6685,7 @@ class ConversationLogger {
           score,
           lexicalRank,
           vectorRank,
+          vectorScore,
           keywordScore,
         });
         return acc;
@@ -6909,9 +6951,8 @@ class ConversationLogger {
 
     const candidate = this.getSessionMemoryCandidate(userId, id);
     if (!candidate || candidate.status === "rejected") return null;
-    if (candidate.candidateType === "event_summary") return null;
+    if (!isPromotablePersonalMemoryCandidateType(candidate.candidateType)) return null;
 
-    const source = candidate.candidateType === "knowledge_fact" ? "knowledge" : "pipeline";
     const sourceRef = `session-memory:${candidate.id}`;
     const memory = this.createPersonalMemory({
       userId,
@@ -6922,7 +6963,7 @@ class ConversationLogger {
       usageRule: candidate.usageRule,
       keywords: candidate.keywords,
       status: "active",
-      source,
+      source: "pipeline",
       sourceRef,
       upsertBySource: true,
     });

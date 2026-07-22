@@ -33,6 +33,32 @@ describe("buildGlassesPage", () => {
     expect(GLASS_TRANSCRIPT_LINE_CHARS).toBe(48);
   });
 
+  test("root idle shows an R1-selectable start conversation control", () => {
+    const page = buildGlassesPage({
+      state: {
+        view: "root_idle",
+        selectedIndex: 0,
+        activeCueId: null,
+        latestCueId: null,
+        autoCueVisibleUntil: null,
+      },
+      cues: [],
+      prenote: null,
+      transcript: [],
+    });
+
+    const start = page.containers.find((container) => container.kind === "list" && container.name === "start-conversation");
+    expect(start?.kind).toBe("list");
+    if (start?.kind === "list") {
+      expect(start.items).toEqual(["Start conversation"]);
+      expect(start.selectedIndex).toBe(0);
+      expect(start.eventCapture).toBe(true);
+    }
+    expect(page.containers.some(
+      (container) => container.kind === "text" && container.content.includes("from the phone"),
+    )).toBe(false);
+  });
+
   test("main layout has header, AI cue box, and three-line transcript box", () => {
     const page = buildGlassesPage({
       state: startLiveGlasses(TEST_CUES[0].id),
@@ -105,6 +131,46 @@ describe("buildGlassesPage", () => {
     const detailCue = detail.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
     expect(mainCue?.kind === "text" ? mainCue.content : "").toBe("A short answer preview.");
     expect(detailCue?.kind === "text" ? detailCue.content : "").toContain("implementation detail");
+  });
+
+  test("code cue keeps complete source, newlines, and indentation in the scrollable cue container", () => {
+    const middle = Array.from(
+      { length: 20 },
+      (_, index) => `  const value${index} = nums[${index % 3}];`,
+    ).join("\n");
+    const code = `function solve(nums: number[]) {\n${middle}\n\n  return nums.length;\n}`;
+    const cue = {
+      id: "cue-code-1",
+      category: "code" as const,
+      title: "Solve array",
+      g2Title: "Solve array",
+      preview: "Use one pass.",
+      fullAnswer: "I use one pass through the array.",
+      output: code,
+      language: "typescript",
+      code,
+      explanation: "I use one pass through the array.",
+      createdAt: "2026-07-21T10:00:00.000Z",
+      source: "auto" as const,
+    };
+    const page = buildGlassesPage({
+      state: startLiveGlasses(cue.id),
+      cues: [cue],
+      prenote: null,
+      transcript: TEST_TRANSCRIPT,
+    });
+    const codeContainer = page.containers.find(
+      (container) => container.kind === "text" && container.name === "ai-cue",
+    );
+
+    expect(codeContainer?.kind).toBe("text");
+    if (codeContainer?.kind === "text") {
+      expect(codeContainer.eventCapture).toBe(true);
+      expect(codeContainer.content).toBe(code);
+      expect(codeContainer.content).toContain("\n  const value0");
+      expect(codeContainer.content).toContain("\n\n  return nums.length;\n}");
+      expect(codeContainer.content).not.toContain("...");
+    }
   });
 
   test("can hide transcript from the glasses page without affecting phone data", () => {

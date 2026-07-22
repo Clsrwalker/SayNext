@@ -75,6 +75,9 @@ export type EvenHubV2CueRecord = {
   g2Title: string;
   preview: string;
   output: string;
+  language: string;
+  code: string;
+  explanation: string;
   sourceTranscriptLineIdsJson: string;
   createdAt: string;
 };
@@ -164,6 +167,9 @@ export type CreateCueInput = {
   g2Title: string;
   preview: string;
   output: string;
+  language?: string;
+  code?: string;
+  explanation?: string;
   sourceTranscriptLineIds: string[];
   createdAt: string;
 };
@@ -352,12 +358,18 @@ export class EvenHubV2Store {
         g2_title TEXT NOT NULL,
         preview TEXT NOT NULL DEFAULT '',
         output TEXT NOT NULL,
+        language TEXT NOT NULL DEFAULT '',
+        code TEXT NOT NULL DEFAULT '',
+        explanation TEXT NOT NULL DEFAULT '',
         source_transcript_line_ids_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         FOREIGN KEY(conversation_id) REFERENCES evenhub_v2_conversations(id) ON DELETE CASCADE
       )
     `);
     ensureColumn(db, "evenhub_v2_cues", "preview", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "evenhub_v2_cues", "language", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "evenhub_v2_cues", "code", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "evenhub_v2_cues", "explanation", "TEXT NOT NULL DEFAULT ''");
     db.run("CREATE INDEX IF NOT EXISTS idx_evenhub_v2_cues_conversation ON evenhub_v2_cues(conversation_id, created_at DESC)");
 
     db.run(`
@@ -602,8 +614,8 @@ export class EvenHubV2Store {
     db.query(`
       INSERT INTO evenhub_v2_cues (
         id, conversation_id, user_id, attempt_id, category, title, g2_title, preview, output,
-        source_transcript_line_ids_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        language, code, explanation, source_transcript_line_ids_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.id,
       input.conversationId,
@@ -614,6 +626,9 @@ export class EvenHubV2Store {
       input.g2Title,
       input.preview,
       input.output,
+      input.language || "",
+      input.code || "",
+      input.explanation || "",
       asJson(input.sourceTranscriptLineIds),
       input.createdAt,
     );
@@ -858,6 +873,9 @@ function EvenHubV2CueRecordMapper(row: any): EvenHubV2CueRecord {
     g2Title: row.g2_title,
     preview: row.preview || row.output,
     output: row.output,
+    language: row.language || "",
+    code: row.code || "",
+    explanation: row.explanation || "",
     sourceTranscriptLineIdsJson: row.source_transcript_line_ids_json,
     createdAt: row.created_at,
   };

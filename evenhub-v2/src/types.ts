@@ -1,4 +1,4 @@
-export type CueCategory = "response" | "concept" | "suggestion" | "person";
+export type CueCategory = "response" | "concept" | "suggestion" | "person" | "code";
 export type CueDuration = 5000 | 10000 | 15000 | "forever";
 export type VoiceInput = "glasses" | "phone";
 export type SpeechLanguage = "english" | "chinese" | "auto";
@@ -16,6 +16,9 @@ export type AiCue = {
   preview?: string;
   fullAnswer?: string;
   output: string;
+  language?: string;
+  code?: string;
+  explanation?: string;
   createdAt: string;
   source: "manual" | "auto";
 };
@@ -93,7 +96,7 @@ export type GlassRuntimeState = {
   autoCueVisibleUntil: number | null;
 };
 
-export type GlassEffect = "manual_generate" | "exit_confirm" | "none";
+export type GlassEffect = "start_conversation" | "manual_generate" | "exit_confirm" | "none";
 
 export type GlassTransition = {
   state: GlassRuntimeState;

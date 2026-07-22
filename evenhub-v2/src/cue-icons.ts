@@ -1,17 +1,19 @@
 import type { CueCategory } from "./types";
 
 export const PHONE_CUE_LABEL: Record<CueCategory, string> = {
-  response: "回应",
-  concept: "概念",
-  suggestion: "建议",
-  person: "人物介绍",
+  response: "\u56de\u5e94",
+  concept: "\u6982\u5ff5",
+  suggestion: "\u5efa\u8bae",
+  person: "\u4eba\u7269\u4ecb\u7ecd",
+  code: "Code",
 };
 
 export const G2_CUE_PREFIX: Record<CueCategory, string> = {
-  concept: "▤",
+  concept: "\u25a4",
   response: "?",
-  suggestion: "◇",
-  person: "○",
+  suggestion: "\u25c7",
+  person: "\u25cb",
+  code: "[C]",
 };
 
 export function formatG2CueTitle(category: CueCategory, title: string): string {

@@ -126,6 +126,9 @@ function validCue(overrides: Partial<AutoCueGenerationResult["data"]> = {}): Aut
     preview: overrides.preview || answer,
     fullAnswer: answer,
     output: answer,
+    language: "",
+    code: "",
+    explanation: "",
     reason: "clear concept explanation",
     ...overrides,
   };
@@ -142,6 +145,7 @@ const noMemoryContextAdapter: EvenHubV2ContextAdapter = {
       contextSnapshot: `Trigger window:\n${input.triggerWindow}`,
       memoryUsedIds: [],
       interviewAnswerCardIds: [],
+      answerPolicyCardIds: [],
       prenoteUsedIds: input.selectedPrenoteIds,
     };
   },
@@ -209,6 +213,104 @@ test("EvenHubV2Runtime creates a cue from final transcript through the auto pipe
     && message.payload?.fullAnswer === generatedCue.data.fullAnswer)).toBe(true);
   expect(store.listTranscriptLines(conversationId)).toHaveLength(1);
   expect(store.listCues(conversationId)).toHaveLength(1);
+  const attempt = store.getDb().query(
+    "SELECT trace_json FROM evenhub_v2_auto_cue_attempts WHERE conversation_id = ? LIMIT 1",
+  ).get(conversationId) as { trace_json: string };
+  expect(JSON.parse(attempt.trace_json).contextLatencyMs).toBeGreaterThanOrEqual(0);
+});
+
+test("EvenHubV2Runtime starts routing and memory context work concurrently", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const events: string[] = [];
+  let releaseRouter!: () => void;
+  let releaseContext!: () => void;
+  const routerGate = new Promise<void>((resolve) => { releaseRouter = resolve; });
+  const contextGate = new Promise<void>((resolve) => { releaseContext = resolve; });
+  const router: CueOpportunityRouter = {
+    async predict() {
+      events.push("router:start");
+      await routerGate;
+      return cueNeededRouterResult();
+    },
+  };
+  const contextAdapter: EvenHubV2ContextAdapter = {
+    async build(input) {
+      events.push("context:start");
+      await contextGate;
+      return {
+        contextSnapshot: input.triggerWindow,
+        memoryUsedIds: [],
+        interviewAnswerCardIds: [],
+        answerPolicyCardIds: [],
+        prenoteUsedIds: [],
+      };
+    },
+  };
+  const { runtime } = makeRuntime(new FakeAutoCueGenerator(validCue()), sent, new EvenHubV2Store(":memory:"), {
+    cueOpportunityRouter: router,
+    contextAdapter,
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "Can you explain your experience building a RAG chatbot?",
+    isFinal: true,
+  }));
+  const flush = runtime.flushCueBufferNow();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(events).toEqual(expect.arrayContaining(["router:start", "context:start"]));
+  releaseRouter();
+  releaseContext();
+  await flush;
+});
+
+test("EvenHubV2Runtime publishes and stores a structured code cue without flattening it", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const code = [
+    "function firstPair(nums: number[], target: number) {",
+    "  const seen = new Map<number, number>();",
+    "",
+    "  for (let i = 0; i < nums.length; i++) {",
+    "    const need = target - nums[i];",
+    "    if (seen.has(need)) return [seen.get(need), i];",
+    "    seen.set(nums[i], i);",
+    "  }",
+    "",
+    "  return [];",
+    "}",
+  ].join("\n");
+  const generator = new FakeAutoCueGenerator(validCue({
+    category: "code",
+    title: "First matching pair",
+    g2Title: "First pair",
+    preview: "Use a map to find the complement in one pass.",
+    fullAnswer: "I keep previously seen values in a map, so each complement lookup is constant time on average.",
+    output: code,
+    language: "typescript",
+    code,
+    explanation: "I keep previously seen values in a map, so each complement lookup is constant time on average.",
+  }));
+  const { runtime, store } = makeRuntime(generator, sent);
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+    text: "Can you write a TypeScript function that returns the first pair of indexes whose values add up to a target?",
+    isFinal: true,
+  }));
+  await runtime.flushCueBufferNow();
+
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  const message = sent.find((item) => item.type === "cue_created");
+  expect(message?.payload).toMatchObject({
+    category: "code",
+    language: "typescript",
+    code,
+    output: code,
+    explanation: "I keep previously seen values in a map, so each complement lookup is constant time on average.",
+  });
+  expect(store.listCues(conversationId)[0]).toMatchObject({ code, language: "typescript" });
 });
 
 test("EvenHubV2Runtime creates one provider conversation and passes it to canonical final generation", async () => {
@@ -1077,6 +1179,75 @@ test("EvenHubV2Store deletes a conversation with transcript and cues", () => {
   expect(store.listCues(conversationId)).toHaveLength(0);
   const attempts = store.getDb().query("SELECT * FROM evenhub_v2_auto_cue_attempts WHERE conversation_id = ?").all(conversationId) as any[];
   expect(attempts).toHaveLength(0);
+});
+
+test("EvenHubV2Store persists structured code cue fields exactly", () => {
+  const store = new EvenHubV2Store(":memory:");
+  const conversationId = "conv-code";
+  const code = [
+    "function twoSum(nums: number[], target: number) {",
+    "  const seen = new Map<number, number>();",
+    "",
+    "  for (let i = 0; i < nums.length; i++) {",
+    "    const need = target - nums[i];",
+    "    if (seen.has(need)) return [seen.get(need), i];",
+    "    seen.set(nums[i], i);",
+    "  }",
+    "",
+    "  return [];",
+    "}",
+  ].join("\n");
+  store.createConversation({
+    id: conversationId,
+    userId: "test-user",
+    clientSessionId: "client-code",
+    title: "Code interview",
+    startedAt: "2026-07-21T00:00:00.000Z",
+    settings: {
+      language: "english",
+      cueDurationMs: "forever",
+      autoPopup: true,
+      showAiCue: true,
+      showTranscript: true,
+    },
+    usedPrenote: { ids: [], text: "" },
+  });
+  store.createAutoCueAttempt({
+    id: "attempt-code",
+    conversationId,
+    userId: "test-user",
+    requestId: "req-code",
+    status: "running",
+    inputHash: "hash-code",
+    inputWindow: "Write two sum",
+    sourceTranscriptLineIds: [],
+    promptContextSnapshot: "",
+  });
+
+  store.createCue({
+    id: "cue-code",
+    conversationId,
+    userId: "test-user",
+    attemptId: "attempt-code",
+    category: "code",
+    title: "Two sum",
+    g2Title: "Two sum",
+    preview: "Use a map for complements.",
+    output: code,
+    language: "typescript",
+    code,
+    explanation: "I store each value and look up its complement in one pass.",
+    sourceTranscriptLineIds: [],
+    createdAt: "2026-07-21T00:00:01.000Z",
+  });
+
+  expect(store.getCue("cue-code")).toMatchObject({
+    category: "code",
+    language: "typescript",
+    code,
+    explanation: "I store each value and look up its complement in one pass.",
+    output: code,
+  });
 });
 
 test("EvenHubV2Store persists the OpenAI conversation lifecycle", () => {

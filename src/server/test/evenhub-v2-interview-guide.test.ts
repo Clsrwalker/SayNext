@@ -39,6 +39,54 @@ test("DeepSense guide does not match an unrelated technical comparison", () => {
   expect(unrelated).toBeNull();
 });
 
+test("DeepSense guide does not treat a code walkthrough as a background question", () => {
+  const cards = parseDeepSenseInterviewGuide(loadDeepSenseInterviewGuide());
+
+  const codeWalkthrough = findDeepSenseInterviewCard(
+    "cool, now walk me through that code and tell me the time and space complexity",
+    cards,
+  );
+  const realBackground = findDeepSenseInterviewCard(
+    "could you walk me through your background",
+    cards,
+  );
+
+  expect(codeWalkthrough).toBeNull();
+  expect(realBackground?.question).toBe("Can you walk me through your background?");
+});
+
+test("DeepSense guide distinguishes RAG design from RAG testing", () => {
+  const cards = parseDeepSenseInterviewGuide(loadDeepSenseInterviewGuide());
+
+  const design = findDeepSenseInterviewCard(
+    "okay so how would you design the rag chatbot for our website and internal docs",
+    cards,
+  );
+  const testing = findDeepSenseInterviewCard(
+    "and how do you actually test that rag pipe line before shipping it",
+    cards,
+  );
+
+  expect(design?.question).toBe("How would you design a chatbot that answers questions from our website?");
+  expect(testing?.question).toBe("How would you test a RAG pipeline?");
+});
+
+test("DeepSense guide maps noisy debugging and company-fit questions to their own intents", () => {
+  const cards = parseDeepSenseInterviewGuide(loadDeepSenseInterviewGuide());
+
+  const debugging = findDeepSenseInterviewCard(
+    "tell me about when the integration broke and how you narrowed down what was wrong",
+    cards,
+  );
+  const companyFit = findDeepSenseInterviewCard(
+    "yeah so why deep sense and why this full stack ai co op specifically",
+    cards,
+  );
+
+  expect(debugging?.question).toBe("Describe a difficult bug and how you found the root cause.");
+  expect(companyFit?.question).toBe("Why do you want to work with DeepSense?");
+});
+
 test("DeepSense session seed keeps role grounding and representative examples without embedding all cards", () => {
   const cards = parseDeepSenseInterviewGuide(loadDeepSenseInterviewGuide());
   const seed = buildDeepSenseInterviewSeed(cards);

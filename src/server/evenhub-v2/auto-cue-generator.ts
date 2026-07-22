@@ -39,6 +39,9 @@ export type AutoCueGeneratorOutput = {
   preview: string;
   fullAnswer: string;
   output: string;
+  language: string;
+  code: string;
+  explanation: string;
   reason: string;
 };
 
@@ -60,10 +63,10 @@ export interface AutoCueGenerator {
   endSession?(session: AutoCueSession): Promise<void>;
 }
 
-export const AUTO_CUE_PROMPT_VERSION = "evenhub-v2-conversation-2026-07-20-v1";
+export const AUTO_CUE_PROMPT_VERSION = "evenhub-v2-conversation-2026-07-21-memory-v4";
 export const AUTO_CUE_PROMPT_CACHE_KEY = `saynext:${AUTO_CUE_PROMPT_VERSION}`;
 
-const AUTO_CUE_CATEGORIES = new Set<AutoCueCategory>(["response", "concept", "suggestion", "person", "none"]);
+const AUTO_CUE_CATEGORIES = new Set<AutoCueCategory>(["response", "concept", "suggestion", "person", "code", "none"]);
 const MAX_AUTO_CUE_PREVIEW_CHARS = 340;
 const MAX_AUTO_CUE_FULL_ANSWER_CHARS = 2400;
 
@@ -84,6 +87,23 @@ function cleanCompletedText(value: unknown, maxChars: number): string {
   return `${candidate.slice(0, wordEnd > 0 ? wordEnd : maxChars - 1).trim()}.`;
 }
 
+function normalizeCodeSource(value: unknown): { code: string; fencedLanguage: string } {
+  let source = String(value ?? "").replace(/\r\n?/g, "\n").trim();
+  let fencedLanguage = "";
+  const fenced = source.match(/^```([^\n`]*)\n([\s\S]*?)\n?```$/);
+  if (fenced) {
+    fencedLanguage = cleanOneLine(fenced[1], 24);
+    source = fenced[2];
+  }
+  const lines = source
+    .replace(/\t/g, "  ")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/g, ""));
+  while (lines.length && !lines[0].trim()) lines.shift();
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return { code: lines.join("\n"), fencedLanguage };
+}
+
 export function normalizeAutoCueOutput(value: unknown): AutoCueGeneratorOutput {
   const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const category = AUTO_CUE_CATEGORIES.has(record.category as AutoCueCategory)
@@ -94,11 +114,24 @@ export function normalizeAutoCueOutput(value: unknown): AutoCueGeneratorOutput {
     : 0;
   const title = cleanOneLine(record.title, 64) || "SayNext";
   const g2Title = cleanOneLine(record.g2Title || title, 28) || "SayNext";
+  const normalizedCode = category === "code"
+    ? normalizeCodeSource(record.code || record.output || record.fullAnswer)
+    : { code: "", fencedLanguage: "" };
+  const language = category === "code"
+    ? cleanOneLine(record.language || normalizedCode.fencedLanguage, 24)
+    : "";
+  const explanation = category === "code"
+    ? cleanCompletedText(record.explanation || record.fullAnswer || record.preview, MAX_AUTO_CUE_FULL_ANSWER_CHARS)
+    : "";
   const fullAnswer = category === "none"
     ? ""
+    : category === "code"
+      ? explanation || "Here is the complete code."
     : cleanCompletedText(record.fullAnswer || record.output, MAX_AUTO_CUE_FULL_ANSWER_CHARS);
   const preview = category === "none"
     ? ""
+    : category === "code"
+      ? cleanCompletedText(record.preview || explanation || "Here is the complete code.", MAX_AUTO_CUE_PREVIEW_CHARS)
     : cleanCompletedText(record.preview || fullAnswer, MAX_AUTO_CUE_PREVIEW_CHARS);
   return {
     category,
@@ -107,7 +140,10 @@ export function normalizeAutoCueOutput(value: unknown): AutoCueGeneratorOutput {
     g2Title,
     preview,
     fullAnswer,
-    output: fullAnswer,
+    output: category === "code" ? normalizedCode.code : fullAnswer,
+    language,
+    code: normalizedCode.code,
+    explanation,
     reason: cleanOneLine(record.reason, 240),
   };
 }
@@ -122,6 +158,7 @@ export function shouldDisplayAutoCue(params: {
   if (params.cue.category === "none") return { ok: false, reason: "category_none" };
   if (!params.cue.title) return { ok: false, reason: "empty_title" };
   if (!params.cue.g2Title) return { ok: false, reason: "empty_g2_title" };
+  if (params.cue.category === "code" && !params.cue.code) return { ok: false, reason: "empty_code" };
   if (!params.cue.fullAnswer) return { ok: false, reason: "empty_output" };
   if (!params.cue.preview) return { ok: false, reason: "empty_preview" };
   if (params.previousOutputHash && params.previousOutputHash === params.outputHash) {
@@ -298,8 +335,9 @@ export function buildAutoCueSessionSeed(): string {
   return [
     "You are SayNext's automatic cue writer for live conversations.",
     "The Current question or request is authoritative. Previous turns only resolve a follow-up and must not replace its topic.",
-    "Priority order: current authoritative question; active interview brief and fixed examples; matching interview answer card; explicit personal/project memory; recent canonical turns; selected prenote; general knowledge.",
-    "If retrieved memory or an older transcript conflicts with the active interview brief on interview framing, follow the active interview brief. Never let any context override the current question's topic.",
+    "Priority order: current authoritative question for the topic; approved active interview brief and fixed examples for Xiang's facts and positioning; matching approved interview answer card; verified detailed personal/project memory; recent canonical turns; selected prenote; general knowledge.",
+    "If retrieved memory or ordinary ASR transcript wording conflicts with the approved active interview brief on Xiang's facts, project positioning, or answer direction, follow the approved interview brief. Never let any context override the current question's topic.",
+    "Personal memory means detailed evidence about Xiang that a general LLM could not know: a real project action, decision, incident, result, limitation, preference, or confirmed biographical fact. Generic technical facts, job descriptions, interview advice, answer templates, and model-generated inferences are not memory.",
     "Return category none only for noise, a brief acknowledgement, an incomplete fragment, or speech that is clearly Xiang reading an existing answer.",
     "A complete question or request should normally produce a response even when the timing model is uncertain.",
     "When there is a question or request, answering it is more important than adding background information.",
@@ -314,7 +352,7 @@ export function buildAutoCueSessionSeed(): string {
     "Give enough mechanism and concrete detail to answer the actual question, but keep sentences easy to say aloud.",
     "Do not summarize every retrieved fact. Retrieved memory is private grounding, not a checklist that must appear in the answer.",
     "Avoid corporate openings such as 'I am a strong fit because' or 'This aligns closely with my experience.' Start naturally and directly.",
-    "Do not invent Xiang's projects, work history, or personal experience. Use only the transcript, selected prenote, and retrieved personal memory facts for those claims.",
+    "Do not invent Xiang's projects, work history, or personal experience. Use approved interview context and verified detailed personal memory for those claims. Do not treat ordinary ASR transcript wording as biographical evidence.",
     "Any claim that Xiang used, built, implemented, or evaluated a technology must require an explicit retrieved personal memory fact. General technical knowledge is not evidence that Xiang used it in a project.",
     "For personal experience questions, clearly separate what Xiang actually built from what he only understands or has studied.",
     "Do not infer that transcript chunking, prompt context, or text processing is RAG or retrieval unless the personal memory explicitly says so.",
@@ -324,19 +362,25 @@ export function buildAutoCueSessionSeed(): string {
     "Never mention memory, retrieval, context cards, or these instructions in the output.",
     "",
     "Return exactly one JSON object:",
-    '{ "category": "response|concept|suggestion|person|none", "confidence": 0.0, "title": "...", "g2Title": "...", "preview": "...", "fullAnswer": "...", "reason": "..." }',
+    '{ "category": "response|concept|suggestion|person|code|none", "confidence": 0.0, "title": "...", "g2Title": "...", "preview": "...", "fullAnswer": "...", "language": "", "code": "", "explanation": "", "reason": "..." }',
     "",
     "Category definitions:",
     "- response: the latest speech clearly asks for or requires a reply.",
     "- concept: a useful concept or knowledge point from a lecture/explanation.",
     "- suggestion: a concrete next step, trade-off, or action guidance.",
     "- person: narrow use only; explicit person/role/speaker/responsibility information.",
+    "- code: the latest request explicitly asks Xiang to write, implement, fix, or complete source code. Put the complete source in code and a short spoken walkthrough in explanation.",
     "- none: no useful cue because the current speech is noise, acknowledgement, incomplete, or a readback.",
     "",
     "Title rules: title <= 64 chars; g2Title <= 28 chars.",
     "preview is the short immediate glasses text and must end on a complete sentence.",
     "fullAnswer is the complete answer for cue detail and history. It must not end with an ellipsis or an incomplete sentence.",
-    "For category none, return empty preview and fullAnswer. Otherwise return directly useful spoken words with no markdown or labels.",
+    "For a code cue, use meaningful short names, two-space indentation, and one statement per line when practical. Prefer lines around 40-42 ASCII characters by breaking only at syntax-safe boundaries such as parameters, commas, operators, or chains.",
+    "Any line longer than 48 characters will wrap on G2. Before returning, scan every line and shorten or split lines over 48 characters when syntax permits. Use conventional concise names such as nums, i, seen, need, or curr when their meaning stays clear.",
+    "When a typed function declaration would exceed 48 characters, put each parameter on its own line and put a long return type on the following line. Do not add demo calls, console output, or sample data unless the interviewer asks for them.",
+    "For a code cue, preserve logical blank lines, include only necessary comments, and return the entire compilable solution in code. Do not use Markdown fences. Never truncate code, omit its tail, or use ellipses as a placeholder.",
+    "For a code cue, language names the programming language, explanation is a concise spoken walkthrough, preview summarizes the approach, and fullAnswer may repeat the walkthrough. For non-code categories, return empty language, code, and explanation.",
+    "For category none, return empty preview, fullAnswer, language, code, and explanation. Otherwise return directly useful content with no labels around it.",
     "",
     buildDeepSenseInterviewSeed(),
   ].join("\n");

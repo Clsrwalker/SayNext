@@ -690,6 +690,136 @@ test("async create and update personal memory use OpenAI embeddings", async () =
   }
 });
 
+test("async personal memory retrieval keeps a strong OpenAI vector-only match", async () => {
+  const userId = `test-memory-vector-only-${Date.now()}`;
+  const createdIds: number[] = [];
+  const oldApiKey = process.env.OPENAI_API_KEY;
+  const oldFetch = globalThis.fetch;
+
+  process.env.OPENAI_API_KEY = "test-openai-key";
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    const inputs = Array.isArray(body.input) ? body.input : [body.input];
+    return new Response(JSON.stringify({
+      data: inputs.map((text: string, index: number) => {
+        const normalized = String(text).toLowerCase();
+        const embedding = normalized.includes("relational index distraction")
+          ? [0, 1, 0]
+          : [1, 0, 0];
+        return { index, embedding };
+      }),
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const relevant = await conversationLogger.createPersonalMemoryAsync({
+      userId,
+      title: "Paraphrase recovery evidence",
+      category: "personal_preference",
+      sensitivity: "low",
+      source: "import",
+      sourceRef: "test:vector-only:relevant",
+      upsertBySource: true,
+      keywords: [],
+      content: "Semantic embeddings recover paraphrases whose wording changes completely.",
+      usageRule: "Use for semantic retrieval tests.",
+    });
+    const distraction = await conversationLogger.createPersonalMemoryAsync({
+      userId,
+      title: "Relational index distraction",
+      category: "personal_preference",
+      sensitivity: "low",
+      source: "import",
+      sourceRef: "test:vector-only:distraction",
+      upsertBySource: true,
+      keywords: [],
+      content: "A separate database indexing note.",
+      usageRule: "Use for unrelated database tests.",
+    });
+    if (relevant) createdIds.push(relevant.id);
+    if (distraction) createdIds.push(distraction.id);
+
+    conversationLogger.rebuildPersonalMemoryFts(userId);
+    const debug = createPersonalMemoryRetrievalDebug("Which method did your project select for unfamiliar phrasing?");
+    const results = await conversationLogger.searchPersonalMemoriesHybridAsync(
+      userId,
+      debug.query,
+      2,
+      debug,
+    );
+    const targetDebug = debug.candidates.find((candidate) => candidate.sourceRef === "test:vector-only:relevant");
+    expect(results[0]?.sourceRef).toBe("test:vector-only:relevant");
+    expect(results[0]?.lexicalRank).toBeUndefined();
+    expect(results[0]?.vectorScore).toBeGreaterThan(0.99);
+    expect(targetDebug?.reasons).toContain("included");
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+    globalThis.fetch = oldFetch;
+    if (oldApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = oldApiKey;
+  }
+});
+
+test("concurrent identical personal-memory searches share one query embedding request", async () => {
+  const userId = `test-memory-query-inflight-${Date.now()}`;
+  const createdIds: number[] = [];
+  const oldApiKey = process.env.OPENAI_API_KEY;
+  const oldFetch = globalThis.fetch;
+  let callCount = 0;
+
+  process.env.OPENAI_API_KEY = "test-openai-key";
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    callCount += 1;
+    const body = JSON.parse(String(init?.body || "{}"));
+    const inputs = Array.isArray(body.input) ? body.input : [body.input];
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Response(JSON.stringify({
+      data: inputs.map((_text: string, index: number) => ({ index, embedding: [1, 0, 0] })),
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const memory = await conversationLogger.createPersonalMemoryAsync({
+      userId,
+      title: "Concurrent embedding retrieval evidence",
+      category: "project_experience",
+      sensitivity: "low",
+      source: "import",
+      sourceRef: "test:query-inflight:memory",
+      upsertBySource: true,
+      keywords: [],
+      content: "Xiang diagnosed an integration failure by tracing an API payload across services.",
+      usageRule: "Use for a behavioral debugging question.",
+    });
+    if (memory) createdIds.push(memory.id);
+    callCount = 0;
+    const query = `How did you diagnose that integration incident ${Date.now()}?`;
+
+    const [first, second] = await Promise.all([
+      conversationLogger.searchPersonalMemoriesHybridAsync(userId, query, 2),
+      conversationLogger.searchPersonalMemoriesHybridAsync(userId, query, 2),
+    ]);
+
+    expect(callCount).toBe(1);
+    expect(second).toEqual(first);
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+    globalThis.fetch = oldFetch;
+    if (oldApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = oldApiKey;
+  }
+});
+
 test("general technical queries soft-penalize project memory instead of silently dropping it", () => {
   const userId = `test-soft-penalty-technical-${Date.now()}`;
   const createdIds: number[] = [];

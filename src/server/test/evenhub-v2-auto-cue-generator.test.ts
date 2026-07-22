@@ -68,6 +68,56 @@ test("normalizeAutoCueOutput keeps the full answer and derives a bounded preview
   expect(cue.output).toBe(cue.fullAnswer);
 });
 
+test("normalizeAutoCueOutput preserves complete structured code without flattening or truncation", () => {
+  const repeatedBody = Array.from(
+    { length: 140 },
+    (_, index) => `  const value${index} = nums[${index % 4}];`,
+  ).join("\r\n");
+  const rawCode = `\`\`\`typescript\r\nfunction collect(nums: number[]) {\r\n${repeatedBody}\r\n\r\n  return nums;\r\n}\r\n\`\`\``;
+  const cue = normalizeAutoCueOutput({
+    category: "code",
+    confidence: 0.94,
+    title: "Collect values",
+    g2Title: "Collect values",
+    language: "typescript",
+    code: rawCode,
+    explanation: "I use a small function and return the collected values.",
+    reason: "explicit coding request",
+  });
+
+  expect(cue.category).toBe("code");
+  expect(cue.language).toBe("typescript");
+  expect(cue.code.startsWith("function collect(nums: number[]) {\n  const value0")).toBe(true);
+  expect(cue.code.endsWith("\n\n  return nums;\n}")).toBe(true);
+  expect(cue.code).not.toContain("```");
+  expect(cue.code.length).toBeGreaterThan(2400);
+  expect(cue.code).not.toContain("...");
+  expect(cue.output).toBe(cue.code);
+  expect(cue.fullAnswer).toBe("I use a small function and return the collected values.");
+});
+
+test("auto cue prompt defines a complete readable code response contract", () => {
+  const prompt = buildAutoCuePrompt({
+    triggerWindow: "Can you write TypeScript for two sum?",
+    recentTranscript: "Interviewer: Please code it now.",
+    contextSnapshot: "No personal memory is needed.",
+    settings: defaultEvenHubV2Settings(),
+    router: null,
+  });
+
+  expect(prompt).toContain("response|concept|suggestion|person|code|none");
+  expect(prompt).toContain('"language"');
+  expect(prompt).toContain('"code"');
+  expect(prompt).toContain('"explanation"');
+  expect(prompt).toContain("two-space indentation");
+  expect(prompt).toContain("Do not use Markdown fences");
+  expect(prompt).toContain("Never truncate code");
+  expect(prompt).toContain("Any line longer than 48 characters will wrap on G2");
+  expect(prompt).toContain("nums, i, seen, need, or curr");
+  expect(prompt).toContain("put each parameter on its own line");
+  expect(prompt).toContain("Do not add demo calls, console output, or sample data");
+});
+
 test("auto cue prompt treats retrieved memory as grounding without inventing experience", () => {
   const prompt = buildAutoCuePrompt({
     triggerWindow: "What AWS services did you use in JobLens AI?",
@@ -183,6 +233,9 @@ test("OpenAI auto cue uses the conversation for canonical finals and stateless c
           preview: "A short answer.",
           fullAnswer: "A short answer.",
           output: "A short answer.",
+          language: "",
+          code: "",
+          explanation: "",
           reason: "question",
         },
         rawText: "{}",
@@ -236,6 +289,9 @@ test("OpenAI auto cue falls back to stateless generation when a conversation req
           preview: "Fallback answer.",
           fullAnswer: "Fallback answer.",
           output: "Fallback answer.",
+          language: "",
+          code: "",
+          explanation: "",
           reason: "question",
         },
         rawText: "{}",
@@ -287,6 +343,9 @@ test("OpenAI auto cue uses Luna low without temperature and falls back to GPT-5.
           preview: "Fallback answer.",
           fullAnswer: "Fallback answer.",
           output: "Fallback answer.",
+          language: "",
+          code: "",
+          explanation: "",
           reason: "primary_failed",
         },
         rawText: "{}",

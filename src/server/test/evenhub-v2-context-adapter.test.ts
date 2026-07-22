@@ -10,10 +10,11 @@ import {
 import { defaultEvenHubV2Settings } from "../evenhub-v2/protocol";
 import type { InterviewAnswerCard } from "../evenhub-v2/interview-guide";
 
-test("EvenHub v2 uses low-latency lexical memory retrieval unless semantic mode is explicit", () => {
-  expect(resolveEvenHubV2MemorySearchMode(undefined)).toBe("lexical");
+test("EvenHub v2 uses adaptive memory retrieval unless a fixed mode is explicit", () => {
+  expect(resolveEvenHubV2MemorySearchMode(undefined)).toBe("adaptive");
+  expect(resolveEvenHubV2MemorySearchMode("lexical")).toBe("lexical");
   expect(resolveEvenHubV2MemorySearchMode("semantic")).toBe("semantic");
-  expect(resolveEvenHubV2MemorySearchMode("unknown")).toBe("lexical");
+  expect(resolveEvenHubV2MemorySearchMode("unknown")).toBe("adaptive");
 });
 
 class FakeMemoryRetriever implements EvenHubV2MemoryRetriever {
@@ -63,6 +64,31 @@ test("EvenHub v2 directly recalls a named project even when generic cloud memory
   expect(selectDirectProjectMemories("Explain an AWS architecture", candidates)).toEqual([]);
 });
 
+test("EvenHub v2 does not treat a passing project mention as project-owned memory", () => {
+  const candidates: EvenHubV2MemoryCandidate[] = [
+    {
+      id: 4721,
+      title: "Project SayNext - architecture",
+      category: "technical_projects",
+      sourceRef: "project:saynext:architecture",
+      content: "SayNext uses a transcript buffer and personal-memory retrieval.",
+      score: 0.72,
+    },
+    {
+      id: 182,
+      title: "Cloud project selection: JobLens AI and ElderAlbum",
+      category: "technical_projects",
+      sourceRef: "doc:cloud-projects:joblens-elderalbum-selection",
+      content: "JobLens is the strongest cloud example. Do not use SayNext for this answer.",
+      usageRule: "Avoid SayNext unless it is explicitly requested.",
+      score: 0.99,
+    },
+  ];
+
+  expect(selectDirectProjectMemories("Explain the SayNext architecture", candidates))
+    .toEqual([expect.objectContaining({ id: 4721 })]);
+});
+
 test("EvenHub v2 directly recalls project evidence for a personal technical experience question", () => {
   const candidates: EvenHubV2MemoryCandidate[] = [
     {
@@ -98,7 +124,7 @@ test("EvenHub v2 directly recalls project evidence for a personal technical expe
   expect(selectDirectExperienceMemories("What is RAG?", candidates)).toEqual([]);
 });
 
-test("EvenHub v2 context retrieves from the authoritative current question with a separate owner", async () => {
+test("EvenHub v2 context retrieves detailed project facts but excludes generic knowledge", async () => {
   const retriever = new FakeMemoryRetriever([
     {
       id: 36,
@@ -130,8 +156,8 @@ test("EvenHub v2 context retrieves from the authoritative current question with 
   expect(retriever.calls[0].query).toContain("What was the main AWS trade-off in JobLens AI?");
   expect(snapshot.contextSnapshot).toContain("Project JobLens AI - cloud architecture");
   expect(snapshot.contextSnapshot).toContain("inline sync for Learner Lab reliability");
-  expect(snapshot.contextSnapshot).toContain("AWS Well-Architected interview answers");
-  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:36", "personal-memory:98"]);
+  expect(snapshot.contextSnapshot).not.toContain("AWS Well-Architected interview answers");
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:36"]);
 });
 
 test("EvenHub v2 context fails open when memory retrieval is unavailable", async () => {
@@ -147,7 +173,7 @@ test("EvenHub v2 context fails open when memory retrieval is unavailable", async
   expect(snapshot.memoryUsedIds).toEqual([]);
 });
 
-test("EvenHub v2 context supplements weak personal interview recall with resume and project memory", async () => {
+test("EvenHub v2 context supplements weak recall with specific profile facts but excludes a shallow project list", async () => {
   const calls: string[] = [];
   const retriever: EvenHubV2MemoryRetriever = {
     async search(_userId, query) {
@@ -192,15 +218,13 @@ test("EvenHub v2 context supplements weak personal interview recall with resume 
     recentTranscript: "Interviewer: Why should we hire you?",
   });
 
-  expect(calls).toHaveLength(2);
-  expect(calls[1]).toBe("Resume Xiang skills profile selected project list interview answer style");
-  expect(snapshot.contextSnapshot.indexOf("Resume - Xiang skills and profile"))
-    .toBeLessThan(snapshot.contextSnapshot.indexOf("RAG lifecycle knowledge"));
-  expect(snapshot.memoryUsedIds).toEqual([
-    "personal-memory:32",
-    "personal-memory:33",
-    "personal-memory:134",
+  expect(calls).toEqual([
+    "Resume Xiang skills profile selected project list interview answer style",
   ]);
+  expect(snapshot.contextSnapshot).toContain("Resume - Xiang skills and profile");
+  expect(snapshot.contextSnapshot).not.toContain("RAG lifecycle knowledge");
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:32"]);
+  expect(snapshot.contextSnapshot).not.toContain("Resume - selected project list");
 });
 
 test("EvenHub v2 context prioritizes an explicitly named project over generic knowledge", async () => {
@@ -238,11 +262,12 @@ test("EvenHub v2 context prioritizes an explicitly named project over generic kn
     recentTranscript: "Interviewer: What did you build in CueFlow?",
   });
 
-  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:4725", "personal-memory:133"]);
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:4725"]);
+  expect(snapshot.contextSnapshot).not.toContain("Cloud architecture best practices");
   expect(snapshot.contextSnapshot).not.toContain("Project JobLens AI");
 });
 
-test("EvenHub v2 context does not replace a direct job memory with the generic profile lane", async () => {
+test("EvenHub v2 does not treat a job card as personal memory", async () => {
   const retriever = new FakeMemoryRetriever([{
     id: 4724,
     title: "DeepSense Full-Stack AI Developer co-op - role fit",
@@ -262,7 +287,8 @@ test("EvenHub v2 context does not replace a direct job memory with the generic p
   });
 
   expect(retriever.calls).toHaveLength(1);
-  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:4724"]);
+  expect(snapshot.memoryUsedIds).toEqual([]);
+  expect(snapshot.contextSnapshot).not.toContain("SayNext, JobLens, and CueFlow");
 });
 
 test("EvenHub v2 intro questions use profile memory and exclude generic lecture cards", async () => {
@@ -310,15 +336,14 @@ test("EvenHub v2 intro questions use profile memory and exclude generic lecture 
   });
 
   expect(calls).toEqual([
-    "Tell me a little bit about yourself.",
     "Resume Xiang skills profile selected project list interview answer style",
   ]);
-  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:32", "personal-memory:33"]);
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:32"]);
   expect(snapshot.contextSnapshot).not.toContain("Cloud architecture best practices");
   expect(snapshot.contextSnapshot).toContain("Current question or request, this is the authoritative topic");
 });
 
-test("EvenHub v2 intro combines profile and the configured active interview instead of lecture memory", async () => {
+test("EvenHub v2 intro gets role framing from an approved answer card instead of job memory", async () => {
   const calls: string[] = [];
   const activeInterviewQuery = "DeepSense Full-Stack AI Developer Fall 2026 interview";
   const retriever: EvenHubV2MemoryRetriever = {
@@ -364,6 +389,13 @@ test("EvenHub v2 intro combines profile and the configured active interview inst
     memoryRetriever: retriever,
     memoryUserId: "xiang-memory-user",
     activeInterviewQuery,
+    interviewCards: [{
+      id: "deepsense:intro",
+      question: "Tell me a little bit about yourself.",
+      guidance: "Professor Lu shared this role with Xiang. Connect CueFlow, SayNext, and AI Meeting Monitor to it.",
+      exampleAnswer: "Yeah, sure. I'm Xiang. I'm doing my MACS at Dal right now.",
+      section: "A. Opening and fit",
+    }],
     memoryLimit: 5,
     memoryMaxChars: 2600,
   });
@@ -376,16 +408,13 @@ test("EvenHub v2 intro combines profile and the configured active interview inst
   });
 
   expect(calls).toEqual([
-    "So tell me a little bit about yourself, okay?",
-    activeInterviewQuery,
     "Resume Xiang skills profile selected project list interview answer style",
   ]);
-  expect(snapshot.memoryUsedIds).toEqual([
-    "personal-memory:32",
-    "personal-memory:4724",
-  ]);
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:32"]);
+  expect(snapshot.interviewAnswerCardIds).toEqual(["interview-answer:deepsense:intro"]);
   expect(snapshot.contextSnapshot).toContain("Professor Lu shared this role with Xiang");
   expect(snapshot.contextSnapshot).toContain("CueFlow, SayNext, and AI Meeting Monitor");
+  expect(snapshot.contextSnapshot).not.toContain("personal-memory:4724");
   expect(snapshot.contextSnapshot).not.toContain("Resume - selected project list");
   expect(snapshot.contextSnapshot).not.toContain("Cloud architecture best practices");
 });
@@ -412,6 +441,106 @@ test("EvenHub v2 does not inject personal project memory into a generic technica
 
   expect(snapshot.memoryUsedIds).toEqual([]);
   expect(snapshot.contextSnapshot).not.toContain("Project CueFlow");
+  expect(retriever.calls).toHaveLength(0);
+});
+
+test("EvenHub v2 skips dynamic memory retrieval for generic code and system-design questions", async () => {
+  const retriever = new FakeMemoryRetriever([{
+    id: 145,
+    title: "Terraform deployment note",
+    category: "knowledge_cloud_architecture",
+    content: "A generic infrastructure note that must not leak into an unrelated code answer.",
+    score: 0.99,
+  }]);
+  const adapter = new LightweightEvenHubV2ContextAdapter({
+    memoryRetriever: retriever,
+    memoryUserId: "xiang-memory-user",
+  });
+
+  const code = await adapter.build({
+    ...contextInput(),
+    currentQuestion: "write a function that returns the first duplicate number and explain the complexity",
+    triggerWindow: "write a function that returns the first duplicate number and explain the complexity",
+    recentTranscript: "Interviewer: Let's move to a coding question.",
+  });
+  const design = await adapter.build({
+    ...contextInput(),
+    currentQuestion: "how would you design a URL shortener for ten million links",
+    triggerWindow: "how would you design a URL shortener for ten million links",
+    recentTranscript: "Interviewer: Now a general system design question.",
+  });
+
+  expect(retriever.calls).toHaveLength(0);
+  expect(code.memoryUsedIds).toEqual([]);
+  expect(design.memoryUsedIds).toEqual([]);
+});
+
+test("EvenHub v2 reuses one retrieval result for speculative and final forms of the same question", async () => {
+  const retriever = new FakeMemoryRetriever([{
+    id: 4721,
+    title: "Project SayNext - architecture",
+    category: "technical_projects",
+    sourceRef: "project:saynext:architecture",
+    content: "SayNext combines live transcripts, retrieval, and generation.",
+    score: 0.92,
+  }]);
+  const adapter = new LightweightEvenHubV2ContextAdapter({
+    memoryRetriever: retriever,
+    memoryUserId: "xiang-memory-user",
+  });
+  const partialQuestion = "uh okay can you explain your SayNext architecture";
+  const finalQuestion = "Can you explain your SayNext architecture?";
+
+  await adapter.build({
+    ...contextInput(),
+    currentQuestion: partialQuestion,
+    triggerWindow: partialQuestion,
+    recentTranscript: "",
+  });
+  await adapter.build({
+    ...contextInput(),
+    currentQuestion: finalQuestion,
+    triggerWindow: finalQuestion,
+    recentTranscript: "Interviewer: Can you explain your SayNext architecture?",
+  });
+
+  expect(retriever.calls).toHaveLength(1);
+});
+
+test("EvenHub v2 resolves a referential follow-up to the recently named project", async () => {
+  const retriever = new FakeMemoryRetriever([
+    {
+      id: 4723,
+      title: "Project SayNext - integration challenge",
+      category: "project_experience",
+      sourceRef: "project:saynext:integration-challenge",
+      content: "The hardest part was keeping live transcript updates and glasses navigation independent.",
+      score: 0.71,
+    },
+    {
+      id: 36,
+      title: "Project JobLens AI - cloud architecture",
+      category: "technical_projects",
+      sourceRef: "project:joblens:architecture",
+      content: "JobLens uses Lambda and DynamoDB.",
+      score: 0.98,
+    },
+  ]);
+  const adapter = new LightweightEvenHubV2ContextAdapter({
+    memoryRetriever: retriever,
+    memoryUserId: "xiang-memory-user",
+  });
+
+  const snapshot = await adapter.build({
+    ...contextInput(),
+    currentQuestion: "what was the hardest part of that?",
+    triggerWindow: "what was the hardest part of that?",
+    recentTranscript: "Interviewer: Can you explain the SayNext architecture?",
+  });
+
+  expect(retriever.calls[0]?.query).toContain("SayNext");
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:4723"]);
+  expect(snapshot.contextSnapshot).not.toContain("Project JobLens AI");
 });
 
 test("EvenHub v2 prioritizes query-specific project evidence over generic profile memory", async () => {
@@ -502,9 +631,75 @@ test("EvenHub v2 adds one matching interview answer card and caps dynamic cards 
   });
 
   expect(snapshot.interviewAnswerCardIds).toEqual(["interview-answer:deepsense:intro"]);
-  expect(snapshot.memoryUsedIds).toHaveLength(2);
-  expect(snapshot.contextSnapshot).toContain("Natural example, adapt rather than copy");
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:32"]);
+  expect(snapshot.contextSnapshot).not.toContain("Project SayNext");
+  expect(snapshot.contextSnapshot).toContain("Approved interview answer context");
+  expect(snapshot.contextSnapshot).toContain("This is not personal-memory evidence");
   expect(snapshot.contextSnapshot).toContain("Current question or request, this is the authoritative topic");
-  expect(snapshot.contextSnapshot.indexOf("Natural example"))
-    .toBeLessThan(snapshot.contextSnapshot.indexOf("Relevant private memory facts"));
+  expect(snapshot.contextSnapshot).toContain("The current question decides what to answer");
+  expect(snapshot.contextSnapshot).toContain("approved interview context overrides retrieved memory");
+  expect(snapshot.contextSnapshot.indexOf("Approved interview answer context"))
+    .toBeLessThan(snapshot.contextSnapshot.indexOf("Verified detailed personal memory facts"));
+});
+
+test("EvenHub v2 strips generated answer advice from otherwise useful personal memory", async () => {
+  const adapter = new LightweightEvenHubV2ContextAdapter({
+    memoryRetriever: new FakeMemoryRetriever([{
+      id: 7100,
+      title: "AI Meeting Monitor integration incident",
+      category: "project_experience",
+      content: [
+        "Near the deadline, the frontend and backend disagreed on API field names.",
+        "Xiang fixed the frontend mapping, verified backend write-back, and smoke-tested the demo flow.",
+        "The final demo worked and the project received an A grade.",
+        "Suggested answer direction: Say I am a strong integration engineer.",
+        "Good answer: This experience taught me the importance of teamwork.",
+      ].join("\n"),
+      score: 1,
+    }]),
+    memoryUserId: "xiang-memory-user",
+  });
+
+  const snapshot = await adapter.build({
+    ...contextInput(),
+    currentQuestion: "Tell me about a difficult integration problem you handled.",
+    triggerWindow: "Tell me about a difficult integration problem you handled.",
+    recentTranscript: "",
+  });
+
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:7100"]);
+  expect(snapshot.contextSnapshot).toContain("frontend mapping");
+  expect(snapshot.contextSnapshot).toContain("received an A grade");
+  expect(snapshot.contextSnapshot).not.toContain("Suggested answer direction");
+  expect(snapshot.contextSnapshot).not.toContain("Good answer");
+  expect(snapshot.contextSnapshot).not.toContain("importance of teamwork");
+});
+
+test("EvenHub v2 adds one reusable answer policy card without treating it as memory", async () => {
+  const adapter = new LightweightEvenHubV2ContextAdapter({
+    memoryRetriever: new FakeMemoryRetriever([{
+      id: 7100,
+      title: "AI Meeting Monitor integration incident",
+      category: "project_experience",
+      content: "Xiang traced an API field mismatch, fixed frontend mapping, verified backend write-back, and smoke-tested the final demo flow.",
+      score: 1,
+    }]),
+    memoryUserId: "xiang-memory-user",
+    interviewCards: [],
+  });
+
+  const snapshot = await adapter.build({
+    ...contextInput(),
+    currentQuestion: "Tell me about some harsh feedback you received in code review.",
+    triggerWindow: "Tell me about some harsh feedback you received in code review.",
+    recentTranscript: "",
+  });
+
+  expect(snapshot.answerPolicyCardIds).toEqual([
+    "answer-policy:behavioral-code-review-feedback",
+  ]);
+  expect(snapshot.contextSnapshot).toContain("Reusable answer policy");
+  expect(snapshot.contextSnapshot).toContain("not personal-memory evidence");
+  expect(snapshot.contextSnapshot).toContain("verified Xiang memory");
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:7100"]);
 });

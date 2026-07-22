@@ -838,6 +838,23 @@ pre {
   white-space: pre-wrap;
 }
 
+.cue-code-explanation {
+  margin: 0 0 14px;
+}
+
+.cue-code-block {
+  max-height: 58vh;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  background: #f2f2f2;
+  color: #171717;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.48;
+  white-space: pre;
+}
+
 .transcript-card {
   padding: 18px 16px;
   height: 100%;

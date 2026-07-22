@@ -84,6 +84,7 @@ type GeneratedCueDraft = {
   input: CueJobInput;
   result: AutoCueGenerationResult;
   context: EvenHubV2ContextSnapshot;
+  contextLatencyMs: number;
   router: CueOpportunityRouterResult | null;
   routerError: string;
 };
@@ -825,21 +826,28 @@ export class EvenHubV2Runtime {
         .map((turn) => turn.text),
       input.triggerWindow,
     ].slice(-3);
-    let router: CueOpportunityRouterResult | null = null;
-    let routerError = "";
-    if (this.cueOpportunityRouter) {
+    const routerPromise = (async (): Promise<{
+      router: CueOpportunityRouterResult | null;
+      routerError: string;
+    }> => {
+      if (!this.cueOpportunityRouter) return { router: null, routerError: "" };
       try {
-        router = await this.cueOpportunityRouter.predict({
-          segmentMinus2: routerLines.at(-3) || "",
-          segmentMinus1: routerLines.at(-2) || "",
-          current: routerLines.at(-1) || "",
-        });
+        return {
+          router: await this.cueOpportunityRouter.predict({
+            segmentMinus2: routerLines.at(-3) || "",
+            segmentMinus1: routerLines.at(-2) || "",
+            current: routerLines.at(-1) || "",
+          }),
+          routerError: "",
+        };
       } catch (error) {
-        routerError = error instanceof Error ? error.message : String(error);
+        const routerError = error instanceof Error ? error.message : String(error);
         console.warn(`[EvenHubV2] cue router failed open: ${routerError}`);
+        return { router: null, routerError };
       }
-    }
-    const context = await this.contextAdapter.build({
+    })();
+    const contextStartedAt = Date.now();
+    const contextPromise = this.contextAdapter.build({
       userId: this.userId,
       conversationId: this.conversationId,
       currentQuestion: input.triggerWindow,
@@ -848,7 +856,25 @@ export class EvenHubV2Runtime {
       selectedPrenoteIds: this.selectedPrenoteIds,
       selectedPrenoteText: this.selectedPrenoteText,
       settings: this.settings,
-    });
+    }).then((context) => ({
+      context,
+      contextLatencyMs: Date.now() - contextStartedAt,
+    }));
+    const providerLifecycle = this.providerLifecycle?.localConversationId === this.conversationId
+      ? this.providerLifecycle
+      : null;
+    const providerSessionPromise = (async () => {
+      if (input.speculative) return providerLifecycle?.session || null;
+      if (providerLifecycle) await providerLifecycle.commitChain.catch(() => undefined);
+      return await providerLifecycle?.sessionPromise.catch(() => null) || null;
+    })();
+    const [routerOutcome, contextOutcome, providerSession] = await Promise.all([
+      routerPromise,
+      contextPromise,
+      providerSessionPromise,
+    ]);
+    const { router, routerError } = routerOutcome;
+    const { context, contextLatencyMs } = contextOutcome;
 
     this.store.createAutoCueAttempt({
       id: input.attemptId,
@@ -863,21 +889,13 @@ export class EvenHubV2Runtime {
       trace: {
         memoryUsedIds: context.memoryUsedIds,
         interviewAnswerCardIds: context.interviewAnswerCardIds,
+        answerPolicyCardIds: context.answerPolicyCardIds,
         prenoteUsedIds: context.prenoteUsedIds,
+        contextLatencyMs,
         router,
         routerError,
       },
     });
-
-    const providerLifecycle = this.providerLifecycle?.localConversationId === this.conversationId
-      ? this.providerLifecycle
-      : null;
-    if (!input.speculative && providerLifecycle) {
-      await providerLifecycle.commitChain.catch(() => undefined);
-    }
-    const providerSession = input.speculative
-      ? providerLifecycle?.session || null
-      : await providerLifecycle?.sessionPromise.catch(() => null) || null;
 
     let result: AutoCueGenerationResult;
     try {
@@ -901,7 +919,9 @@ export class EvenHubV2Runtime {
           error: error instanceof Error ? error.message : String(error),
           memoryUsedIds: context.memoryUsedIds,
           interviewAnswerCardIds: context.interviewAnswerCardIds,
+          answerPolicyCardIds: context.answerPolicyCardIds,
           prenoteUsedIds: context.prenoteUsedIds,
+          contextLatencyMs,
           router,
           routerError,
         },
@@ -910,7 +930,14 @@ export class EvenHubV2Runtime {
     }
 
     const cue = normalizeAutoCueOutput(result.data);
-    const draft: GeneratedCueDraft = { input, result: { ...result, data: cue }, context, router, routerError };
+    const draft: GeneratedCueDraft = {
+      input,
+      result: { ...result, data: cue },
+      context,
+      contextLatencyMs,
+      router,
+      routerError,
+    };
     const preemptedReason = this.preemptedAutoJobReasons.get(input.requestId);
     if (preemptedReason || signal.aborted) {
       this.markDraftStale(draft, preemptedReason || "generator_aborted");
@@ -954,7 +981,9 @@ export class EvenHubV2Runtime {
           prepared: true,
           memoryUsedIds: context.memoryUsedIds,
           interviewAnswerCardIds: context.interviewAnswerCardIds,
+          answerPolicyCardIds: context.answerPolicyCardIds,
           prenoteUsedIds: context.prenoteUsedIds,
+          contextLatencyMs,
           router,
           routerError,
           generationLane: result.lane,
@@ -993,7 +1022,9 @@ export class EvenHubV2Runtime {
           speculative: draft.input.speculative,
           memoryUsedIds: draft.context.memoryUsedIds,
           interviewAnswerCardIds: draft.context.interviewAnswerCardIds,
+          answerPolicyCardIds: draft.context.answerPolicyCardIds,
           prenoteUsedIds: draft.context.prenoteUsedIds,
+          contextLatencyMs: draft.contextLatencyMs,
           router: draft.router,
           routerError: draft.routerError,
           generationLane: draft.result.lane,
@@ -1012,6 +1043,9 @@ export class EvenHubV2Runtime {
       g2Title: cue.g2Title,
       preview: cue.preview,
       output: cue.output,
+      language: cue.language,
+      code: cue.code,
+      explanation: cue.explanation,
       sourceTranscriptLineIds,
       createdAt: new Date().toISOString(),
     });
@@ -1033,7 +1067,9 @@ export class EvenHubV2Runtime {
         speculative: draft.input.speculative,
         memoryUsedIds: draft.context.memoryUsedIds,
         interviewAnswerCardIds: draft.context.interviewAnswerCardIds,
+        answerPolicyCardIds: draft.context.answerPolicyCardIds,
         prenoteUsedIds: draft.context.prenoteUsedIds,
+        contextLatencyMs: draft.contextLatencyMs,
         router: draft.router,
         routerError: draft.routerError,
         generationLane: draft.result.lane,
@@ -1064,7 +1100,9 @@ export class EvenHubV2Runtime {
         speculative: draft.input.speculative,
         memoryUsedIds: draft.context.memoryUsedIds,
         interviewAnswerCardIds: draft.context.interviewAnswerCardIds,
+        answerPolicyCardIds: draft.context.answerPolicyCardIds,
         prenoteUsedIds: draft.context.prenoteUsedIds,
+        contextLatencyMs: draft.contextLatencyMs,
         router: draft.router,
         routerError: draft.routerError,
         generationLane: draft.result.lane,
@@ -1272,8 +1310,11 @@ export class EvenHubV2Runtime {
       title: cue.title,
       g2Title: cue.g2Title,
       preview: cue.preview,
-      fullAnswer: cue.output,
+      fullAnswer: cue.category === "code" ? cue.explanation : cue.output,
       output: cue.output,
+      language: cue.language,
+      code: cue.code,
+      explanation: cue.explanation,
       sourceTranscriptLineIds: parseJsonArray(cue.sourceTranscriptLineIdsJson),
       createdAt: cue.createdAt,
     }, cue.conversationId);

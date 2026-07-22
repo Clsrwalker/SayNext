@@ -35,6 +35,9 @@ function normalizeForMatch(value: string): string {
     .replace(/[’']/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\bpipe line\b/g, "pipeline")
+    .replace(/\bdeep sense\b/g, "deepsense")
+    .replace(/\bnarrowed down what was wrong\b/g, "found the root cause")
+    .replace(/\bintegration broke\b/g, "difficult bug")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -43,6 +46,7 @@ const MATCH_STOP_WORDS = new Set([
   "a", "an", "and", "are", "about", "between", "can", "could", "difference", "do", "does", "for", "have", "how",
   "i", "in", "is", "it", "me", "of", "on", "or", "our", "the", "this", "to", "we", "what",
   "when", "why", "with", "would", "you", "your",
+  "walk", "through",
 ]);
 
 function terms(value: string): string[] {
@@ -69,19 +73,76 @@ function diceSimilarity(left: string, right: string): number {
   return (2 * overlap) / (leftBigrams.size + rightBigrams.size);
 }
 
+type InterviewMatchIntent =
+  | "background"
+  | "company_fit"
+  | "rag_design"
+  | "rag_testing"
+  | "rag_explain"
+  | "debugging"
+  | "code_walkthrough"
+  | "none";
+
+function detectMatchIntent(value: string): InterviewMatchIntent {
+  const normalized = normalizeForMatch(value);
+  if (/\b(?:code|function|algorithm)\b/.test(normalized) && /\b(?:walk|explain|complexity)\b/.test(normalized)) {
+    return "code_walkthrough";
+  }
+  if (/\b(?:deep sense|deepsense|company|role|co op)\b/.test(normalized) && /\b(?:why|interested|fit|work)\b/.test(normalized)) {
+    return "company_fit";
+  }
+  if (/\b(?:about yourself|your background|my background|introduce yourself)\b/.test(normalized)) {
+    return "background";
+  }
+  if (/\b(?:bug|root cause|debug|broke|broken|narrowed down|what was wrong|integration failed)\b/.test(normalized)) {
+    return "debugging";
+  }
+  const ragDomain = /\b(?:rag|retrieval augmented|retrieval pipeline)\b/.test(normalized);
+  if (ragDomain && /\b(?:test|testing|evaluate|evaluation|validate|quality)\b/.test(normalized)) {
+    return "rag_testing";
+  }
+  if (
+    /\b(?:design|build|architecture|implement)\b/.test(normalized)
+    && (
+      ragDomain
+      || (/\bchatbot\b/.test(normalized) && /\b(?:website|internal docs|internal documents|knowledge base)\b/.test(normalized))
+    )
+  ) return "rag_design";
+  if (ragDomain && /\b(?:explain|pipeline|typical|work|works)\b/.test(normalized)) return "rag_explain";
+  return "none";
+}
+
 function cardScore(query: string, question: string): number {
   const normalizedQuery = normalizeForMatch(query);
   const normalizedQuestion = normalizeForMatch(question);
   if (!normalizedQuery || !normalizedQuestion) return 0;
   if (normalizedQuery.includes(normalizedQuestion) || normalizedQuestion.includes(normalizedQuery)) return 1;
 
+  const queryIntent = detectMatchIntent(query);
+  const questionIntent = detectMatchIntent(question);
+  if (queryIntent === "code_walkthrough") return 0;
+  if (queryIntent !== "none" && queryIntent !== questionIntent) return 0;
+
   const queryTerms = new Set(terms(query));
   const questionTerms = new Set(terms(question));
   let overlap = 0;
   for (const term of questionTerms) if (queryTerms.has(term)) overlap += 1;
-  if (overlap === 0) return 0;
+  if (overlap === 0 && queryIntent === "none") return 0;
   const questionCoverage = questionTerms.size ? overlap / questionTerms.size : 0;
-  return questionCoverage * 0.72 + diceSimilarity(query, question) * 0.28;
+  const queryCoverage = queryTerms.size ? overlap / queryTerms.size : 0;
+  const tokenDice = queryTerms.size + questionTerms.size
+    ? (2 * overlap) / (queryTerms.size + questionTerms.size)
+    : 0;
+  const intentBoost = queryIntent !== "none" && queryIntent === questionIntent ? 0.3 : 0;
+  const namedCompanyAdjustment = /\b(?:deep sense|deepsense)\b/.test(normalizedQuery)
+    ? (/\b(?:deep sense|deepsense)\b/.test(normalizedQuestion) ? 0.16 : -0.12)
+    : 0;
+  return tokenDice * 0.4
+    + questionCoverage * 0.2
+    + queryCoverage * 0.15
+    + diceSimilarity(query, question) * 0.25
+    + intentBoost
+    + namedCompanyAdjustment;
 }
 
 export function loadDeepSenseInterviewGuide(): string {
@@ -154,12 +215,14 @@ export function findDeepSenseInterviewCard(
   query: string,
   cards: InterviewAnswerCard[] = getDeepSenseInterviewCards(),
 ): InterviewAnswerCard | null {
+  if (detectMatchIntent(query) === "code_walkthrough") return null;
   let best: { card: InterviewAnswerCard; score: number } | null = null;
   for (const card of cards) {
     const score = cardScore(query, card.question);
     if (!best || score > best.score) best = { card, score };
   }
-  return best && best.score >= 0.52 ? best.card : null;
+  const threshold = detectMatchIntent(query) === "none" ? 0.52 : 0.45;
+  return best && best.score >= threshold ? best.card : null;
 }
 
 function exactCard(cards: InterviewAnswerCard[], question: string): InterviewAnswerCard | null {
@@ -211,7 +274,8 @@ ${examples}`.trim();
 
 export function formatInterviewAnswerCard(card: InterviewAnswerCard): string {
   return [
-    `[interview-answer:${card.id}] ${card.question} | ${card.section}`,
+    `[interview-answer:${card.id}] Approved interview answer context | ${card.question} | ${card.section}`,
+    "This is not personal-memory evidence. It is approved answer direction and style; adapt it only to the current question.",
     card.guidance ? `Answer guidance:\n${card.guidance}` : "",
     card.exampleAnswer ? `Natural example, adapt rather than copy:\n${card.exampleAnswer}` : "",
   ].filter(Boolean).join("\n");
