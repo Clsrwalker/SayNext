@@ -9,6 +9,7 @@ import {
 } from "../evenhub-v2/context-adapter";
 import { defaultEvenHubV2Settings } from "../evenhub-v2/protocol";
 import type { InterviewAnswerCard } from "../evenhub-v2/interview-guide";
+import type { MemoryRouter } from "../evenhub-v2/memory-router";
 
 test("EvenHub v2 uses adaptive memory retrieval unless a fixed mode is explicit", () => {
   expect(resolveEvenHubV2MemorySearchMode(undefined)).toBe("adaptive");
@@ -28,6 +29,79 @@ class FakeMemoryRetriever implements EvenHubV2MemoryRetriever {
     return this.result;
   }
 }
+
+function fixedMemoryRouter(lane: "none" | "profile" | "company_fit" | "named_project" | "personal_experience" | "behavioral"): MemoryRouter {
+  return {
+    async predict() {
+      return {
+        lane,
+        confidence: 0.95,
+        probabilities: { [lane]: 0.95 },
+        model: "test-memory-router",
+        latencyMs: 1,
+      };
+    },
+  };
+}
+
+test("EvenHub v2 memory router can abstain before retrieval", async () => {
+  const retriever = new FakeMemoryRetriever([{
+    id: 32,
+    title: "Resume - Xiang skills and profile",
+    category: "technical_skills",
+    content: "Xiang is a MACS student.",
+    score: 1,
+  }]);
+  const adapter = new LightweightEvenHubV2ContextAdapter({
+    memoryRetriever: retriever,
+    memoryRouter: fixedMemoryRouter("none"),
+  });
+
+  const snapshot = await adapter.build({
+    ...contextInput(),
+    currentQuestion: "How would you design a website chatbot?",
+    triggerWindow: "How would you design a website chatbot?",
+    recentTranscript: "",
+  });
+
+  expect(retriever.calls).toHaveLength(0);
+  expect(snapshot.memoryUsedIds).toEqual([]);
+});
+
+test("EvenHub v2 routed personal questions use lane-scoped semantic retrieval with the actual transcript", async () => {
+  const calls: Array<{ query: string; semantic: boolean | undefined; lane: string | undefined }> = [];
+  const retriever: EvenHubV2MemoryRetriever = {
+    async search(_userId, query, _limit, options) {
+      calls.push({ query, semantic: options?.semantic, lane: options?.lane });
+      return [{
+        id: 230,
+        title: "Xiang programming languages and framework experience",
+        category: "career_profile",
+        content: "Xiang currently uses JavaScript and TypeScript most often and has project experience with Python.",
+        score: 0.9,
+        vectorScore: 0.72,
+      }];
+    },
+  };
+  const adapter = new LightweightEvenHubV2ContextAdapter({
+    memoryRetriever: retriever,
+    memoryRouter: fixedMemoryRouter("profile"),
+  });
+
+  const snapshot = await adapter.build({
+    ...contextInput(),
+    currentQuestion: "How are you comfortable with you- with Python?",
+    triggerWindow: "How are you comfortable with you- with Python?",
+    recentTranscript: "",
+  });
+
+  expect(calls).toEqual([{
+    query: expect.stringContaining("How are you comfortable with you- with Python?"),
+    semantic: true,
+    lane: "profile",
+  }]);
+  expect(snapshot.memoryUsedIds).toEqual(["personal-memory:230"]);
+});
 
 function contextInput() {
   return {
@@ -178,7 +252,7 @@ test("EvenHub v2 context supplements weak recall with specific profile facts but
   const retriever: EvenHubV2MemoryRetriever = {
     async search(_userId, query) {
       calls.push(query);
-      if (query === "Resume Xiang skills profile selected project list interview answer style") {
+      if (query.includes("Why are you a strong fit for this full-stack AI developer job?")) {
         return [
           {
             id: 32,
@@ -219,7 +293,7 @@ test("EvenHub v2 context supplements weak recall with specific profile facts but
   });
 
   expect(calls).toEqual([
-    "Resume Xiang skills profile selected project list interview answer style",
+    expect.stringContaining("Why are you a strong fit for this full-stack AI developer job?"),
   ]);
   expect(snapshot.contextSnapshot).toContain("Resume - Xiang skills and profile");
   expect(snapshot.contextSnapshot).not.toContain("RAG lifecycle knowledge");
@@ -296,7 +370,7 @@ test("EvenHub v2 intro questions use profile memory and exclude generic lecture 
   const retriever: EvenHubV2MemoryRetriever = {
     async search(_userId, query) {
       calls.push(query);
-      if (query === "Resume Xiang skills profile selected project list interview answer style") {
+      if (query.includes("Tell me a little bit about yourself.")) {
         return [
           {
             id: 32,
@@ -336,7 +410,7 @@ test("EvenHub v2 intro questions use profile memory and exclude generic lecture 
   });
 
   expect(calls).toEqual([
-    "Resume Xiang skills profile selected project list interview answer style",
+    expect.stringContaining("Tell me a little bit about yourself."),
   ]);
   expect(snapshot.memoryUsedIds).toEqual(["personal-memory:32"]);
   expect(snapshot.contextSnapshot).not.toContain("Cloud architecture best practices");
@@ -358,7 +432,7 @@ test("EvenHub v2 intro gets role framing from an approved answer card instead of
           score: 1,
         }];
       }
-      if (query === "Resume Xiang skills profile selected project list interview answer style") {
+      if (query.includes("tell me a little bit about yourself")) {
         return [
           {
             id: 32,
@@ -408,7 +482,7 @@ test("EvenHub v2 intro gets role framing from an approved answer card instead of
   });
 
   expect(calls).toEqual([
-    "Resume Xiang skills profile selected project list interview answer style",
+    expect.stringContaining("tell me a little bit about yourself"),
   ]);
   expect(snapshot.memoryUsedIds).toEqual(["personal-memory:32"]);
   expect(snapshot.interviewAnswerCardIds).toEqual(["interview-answer:deepsense:intro"]);
@@ -702,4 +776,24 @@ test("EvenHub v2 adds one reusable answer policy card without treating it as mem
   expect(snapshot.contextSnapshot).toContain("not personal-memory evidence");
   expect(snapshot.contextSnapshot).toContain("verified Xiang memory");
   expect(snapshot.memoryUsedIds).toEqual(["personal-memory:7100"]);
+});
+
+test("EvenHub v2 tracks selected prenote ids without repeating prenote text per turn", async () => {
+  const adapter = new LightweightEvenHubV2ContextAdapter({
+    memoryRetriever: new FakeMemoryRetriever([]),
+    memoryUserId: "xiang-memory-user",
+    interviewCards: [],
+  });
+  const selectedPrenote = "Prepared once at conversation startup, not repeated in each cue request.";
+
+  const snapshot = await adapter.build({
+    ...contextInput(),
+    selectedPrenoteIds: ["pn-once"],
+    selectedPrenoteText: selectedPrenote,
+    recentTranscript: "",
+  });
+
+  expect(snapshot.prenoteUsedIds).toEqual(["pn-once"]);
+  expect(snapshot.contextSnapshot).not.toContain(selectedPrenote);
+  expect(snapshot.contextSnapshot).not.toContain("Selected prenote");
 });

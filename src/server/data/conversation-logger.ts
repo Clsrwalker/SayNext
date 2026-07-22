@@ -5990,6 +5990,44 @@ class ConversationLogger {
     return this.searchPersonalMemoriesHybrid(userId, query, limit, debug, queryEmbeddingInfo);
   }
 
+  async searchPersonalMemoriesVectorAsync(
+    userId: string,
+    query: string,
+    limit = 3,
+  ): Promise<PersonalMemorySearchResult[]> {
+    if (!this.isEnabled()) return [];
+    const cleanedQuery = query.trim();
+    if (!cleanedQuery) return [];
+    const memories = this.listPersonalMemories(userId, { status: "active", limit: 1000 });
+    if (!this.hasOpenAiPersonalMemoryEmbeddings(memories)) return [];
+
+    let queryEmbedding: PersonalMemoryEmbeddingInfo;
+    try {
+      queryEmbedding = await createPersonalMemoryQueryEmbedding(cleanedQuery);
+    } catch (error) {
+      console.warn(`[PersonalMemory] Vector-only query embedding unavailable: ${error instanceof Error ? error.message : error}`);
+      return [];
+    }
+
+    return memories
+      .map((memory) => ({
+        memory,
+        vectorScore: canComparePersonalMemoryEmbedding(queryEmbedding, memory)
+          ? cosineSimilarity(queryEmbedding.embedding, memory.embedding)
+          : Number.NEGATIVE_INFINITY,
+      }))
+      .filter(({ vectorScore }) => Number.isFinite(vectorScore))
+      .sort((left, right) => right.vectorScore - left.vectorScore || left.memory.id - right.memory.id)
+      .slice(0, Math.max(1, Math.min(limit, 1000)))
+      .map(({ memory, vectorScore }, index) => ({
+        ...memory,
+        score: vectorScore,
+        vectorRank: index + 1,
+        vectorScore,
+        keywordScore: 0,
+      }));
+  }
+
   searchPersonalMemoriesHybrid(
     userId: string,
     query: string,

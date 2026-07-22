@@ -19,6 +19,13 @@ import {
   getAnswerPolicyCards,
   type AnswerPolicyCard,
 } from "./answer-policy-cards";
+import {
+  buildMemoryRouterInput,
+  evenHubV2MemoryRouter,
+  fallbackMemoryLane,
+  type MemoryLane,
+  type MemoryRouter,
+} from "./memory-router";
 
 export type EvenHubV2ContextInput = {
   userId: string;
@@ -55,6 +62,7 @@ export type EvenHubV2MemoryCandidate = Pick<
 
 export type EvenHubV2MemorySearchOptions = {
   semantic?: boolean;
+  lane?: MemoryLane;
 };
 
 export interface EvenHubV2MemoryRetriever {
@@ -68,6 +76,7 @@ export interface EvenHubV2MemoryRetriever {
 
 export type LightweightEvenHubV2ContextAdapterOptions = {
   memoryRetriever?: EvenHubV2MemoryRetriever;
+  memoryRouter?: MemoryRouter | null;
   memoryUserId?: string;
   memoryLimit?: number;
   memoryMaxChars?: number;
@@ -94,26 +103,36 @@ class PersonalMemoryRetriever implements EvenHubV2MemoryRetriever {
   ): Promise<EvenHubV2MemoryCandidate[]> {
     const useSemantic = this.mode === "semantic"
       || (this.mode === "adaptive" && options.semantic === true);
-    const hybrid = useSemantic
-      ? await conversationLogger.searchPersonalMemoriesHybridAsync(userId, query, limit)
-      : conversationLogger.searchPersonalMemoriesHybrid(userId, query, limit);
+    const vector = useSemantic
+      ? await conversationLogger.searchPersonalMemoriesVectorAsync(userId, query, 1000)
+      : [];
+    const ranked = vector.length
+      ? vector
+      : useSemantic
+        ? await conversationLogger.searchPersonalMemoriesHybridAsync(userId, query, 1000)
+        : conversationLogger.searchPersonalMemoriesHybrid(userId, query, 1000);
     const activeMemories = conversationLogger
       .listPersonalMemories(userId, { status: "active", limit: 1000 });
     const directProjectMemories = selectDirectProjectMemories(
       query,
       activeMemories.map((memory) => ({ ...memory, score: 0 })),
     );
-    const directExperienceMemories = selectDirectExperienceMemories(
-      query,
-      activeMemories.map((memory) => ({ ...memory, score: 0 })),
-    );
+    const scoped = options.lane
+      ? filterCandidatesForLane(query, options.lane, ranked)
+      : ranked;
+    const directExperienceMemories = vector.length
+      ? []
+      : selectDirectExperienceMemories(
+        query,
+        activeMemories.map((memory) => ({ ...memory, score: 0 })),
+      );
 
     const merged: EvenHubV2MemoryCandidate[] = [];
     const seen = new Set<number>();
     for (const candidate of [
       ...directProjectMemories,
       ...directExperienceMemories,
-      ...hybrid,
+      ...scoped,
     ]) {
       if (seen.has(candidate.id)) continue;
       seen.add(candidate.id);
@@ -216,38 +235,6 @@ export function selectDirectExperienceMemories(
     .map(({ candidate, overlap }) => ({ ...candidate, score: Math.max(candidate.score, 1 + overlap / 10) }));
 }
 
-const INTERVIEW_PROFILE_QUERY = "Resume Xiang skills profile selected project list interview answer style";
-
-type MemoryLane =
-  | "none"
-  | "profile"
-  | "company_fit"
-  | "named_project"
-  | "personal_experience"
-  | "behavioral";
-
-function classifyMemoryLane(query: string): MemoryLane {
-  const normalized = query.toLowerCase();
-  if (
-    /\b(?:tell me (?:a )?(?:little bit )?about yourself|introduce yourself|walk me through your background|who are you)\b/.test(normalized)
-  ) return "profile";
-  if (classifyMemoryQueryIntent(query).canonicalProjectId !== "unknown") return "named_project";
-  if (/\b(?:why (?:this|our)|fit for|hire you|this role|this company)\b/.test(normalized)) return "company_fit";
-  if (/\b(?:tell me (?:about )?(?:a )?time|challenge|conflict|failure|failed|broke|broken|bug|root cause|narrowed down|under pressure|disagreement|difficult|hardest|feedback|criticism|criticized|code review)\b/.test(normalized)) {
-    return "behavioral";
-  }
-  const personalSubject = /\b(?:you|your|yourself|xiang)\b/.test(normalized);
-  if (
-    personalSubject
-    && /\b(?:experience|built|build|worked|used|implemented|developed|contributed|project)\b/.test(normalized)
-  ) return "personal_experience";
-  if (
-    personalSubject
-    && /\b(?:background|skills?|strengths?|weakness(?:es)?|languages?|resume|education)\b/.test(normalized)
-  ) return "profile";
-  return "none";
-}
-
 function isPersonalMemory(candidate: EvenHubV2MemoryCandidate): boolean {
   const categoryAllowed = (
     candidate.source !== "knowledge"
@@ -267,19 +254,26 @@ function isPersonalMemory(candidate: EvenHubV2MemoryCandidate): boolean {
   );
 }
 
-function filterCandidatesForLane(query: string, candidates: EvenHubV2MemoryCandidate[]): EvenHubV2MemoryCandidate[] {
-  const lane = classifyMemoryLane(query);
+function filterCandidatesForLane(
+  query: string,
+  lane: MemoryLane,
+  candidates: EvenHubV2MemoryCandidate[],
+): EvenHubV2MemoryCandidate[] {
   const personalFacts = candidates.filter(isPersonalMemory);
   if (lane === "none") return [];
   if (lane === "profile" || lane === "company_fit") {
     return personalFacts.filter((candidate) => (
-      /^(?:career_profile|technical_profile|technical_skills|identity_education|education_history|developer_identity|speaking_style)/.test(candidate.category)
+      /^(?:career_profile|technical_profile|technical_skills|identity_education|education_history|developer_identity|speaking_style|ai_workflow)/.test(candidate.category)
       || /resume.+(?:profile|project list)/i.test(candidate.title)
     ));
   }
   if (lane === "named_project") {
     const projectId = classifyMemoryQueryIntent(query).canonicalProjectId;
-    return personalFacts.filter((candidate) => resolveProjectOwnership(candidate) === projectId);
+    return personalFacts.filter((candidate) => (
+      projectId === "unknown"
+        ? /^(?:technical_projects(?:_|$)|project_experience$)/.test(candidate.category)
+        : resolveProjectOwnership(candidate) === projectId
+    ));
   }
   return personalFacts;
 }
@@ -365,8 +359,17 @@ function normalizedMemoryCacheKey(value: string): string {
   return terms.join(" ");
 }
 
-function shouldRetrievePersonalMemory(query: string): boolean {
-  return classifyMemoryLane(query) !== "none";
+function retrievalQueryForLane(query: string, lane: MemoryLane): string {
+  if (lane === "profile") {
+    return `${query}\nRetrieval target: verified Xiang identity, education, skills, background, or current work facts that directly answer the question.`;
+  }
+  if (lane === "company_fit") {
+    return `${query}\nRetrieval target: verified Xiang career preferences, technical strengths, work style, and relevant applied experience.`;
+  }
+  if (lane === "behavioral") {
+    return `${query}\nRetrieval target: a verified Xiang-specific incident with concrete actions, debugging steps, decisions, and results.`;
+  }
+  return query;
 }
 
 function packMemoryCandidates(
@@ -405,18 +408,23 @@ function packMemoryCandidates(
 
 export class LightweightEvenHubV2ContextAdapter implements EvenHubV2ContextAdapter {
   private readonly memoryRetriever: EvenHubV2MemoryRetriever;
+  private readonly memoryRouter: MemoryRouter | null;
   private readonly memoryUserId: string;
   private readonly memoryLimit: number;
   private readonly memoryMaxChars: number;
   private readonly interviewCards: InterviewAnswerCard[];
   private readonly answerPolicyCards: AnswerPolicyCard[];
   private readonly retrievalCache = new Map<string, Promise<EvenHubV2MemoryCandidate[]>>();
+  private readonly routeCache = new Map<string, Promise<MemoryLane>>();
 
   constructor(options: LightweightEvenHubV2ContextAdapterOptions = {}) {
     this.memoryRetriever = options.memoryRetriever || new PersonalMemoryRetriever(
       options.memorySearchMode
         || resolveEvenHubV2MemorySearchMode(process.env.EVENHUB_V2_MEMORY_SEARCH_MODE),
     );
+    this.memoryRouter = options.memoryRouter === undefined
+      ? evenHubV2MemoryRouter
+      : options.memoryRouter;
     this.memoryUserId = options.memoryUserId?.trim()
       || process.env.EVENHUB_V2_MEMORY_USER_ID?.trim()
       || "";
@@ -435,9 +443,7 @@ export class LightweightEvenHubV2ContextAdapter implements EvenHubV2ContextAdapt
     lane: MemoryLane,
   ): Promise<EvenHubV2MemoryCandidate[]> {
     if (lane === "none") return Promise.resolve([]);
-    const query = lane === "profile" || lane === "company_fit"
-      ? INTERVIEW_PROFILE_QUERY
-      : memoryQuery;
+    const query = retrievalQueryForLane(memoryQuery, lane);
     const retrievalKey = [
       memoryUserId,
       conversationId,
@@ -447,16 +453,15 @@ export class LightweightEvenHubV2ContextAdapter implements EvenHubV2ContextAdapt
     const cached = this.retrievalCache.get(retrievalKey);
     if (cached) return cached;
 
-    const semantic = lane === "personal_experience" || lane === "behavioral";
     const retrieval = this.memoryRetriever
-      .search(memoryUserId, query, this.memoryLimit, { semantic })
+      .search(memoryUserId, query, this.memoryLimit, { semantic: true, lane })
       .then((raw) => {
         const ordered = lane === "named_project"
           ? selectDirectProjectMemories(memoryQuery, raw)
           : raw;
         return acceptRelevantCandidates(
           lane,
-          filterCandidatesForLane(memoryQuery, ordered),
+          filterCandidatesForLane(memoryQuery, lane, ordered),
         );
       })
       .catch((error) => {
@@ -471,6 +476,39 @@ export class LightweightEvenHubV2ContextAdapter implements EvenHubV2ContextAdapt
     return retrieval;
   }
 
+  private resolveMemoryLane(input: EvenHubV2ContextInput, memoryQuery: string): Promise<MemoryLane> {
+    if (!memoryQuery) return Promise.resolve("none");
+    if (classifyMemoryQueryIntent(memoryQuery).canonicalProjectId !== "unknown") {
+      return Promise.resolve("named_project");
+    }
+    const routerInput = buildMemoryRouterInput({
+      recentTranscript: input.recentTranscript,
+      current: input.currentQuestion || input.triggerWindow,
+    });
+    const cacheKey = [
+      normalizedMemoryCacheKey(routerInput.segmentMinus2),
+      normalizedMemoryCacheKey(routerInput.segmentMinus1),
+      normalizedMemoryCacheKey(routerInput.current),
+    ].join("\n");
+    const cached = this.routeCache.get(cacheKey);
+    if (cached) return cached;
+
+    const routed = this.memoryRouter
+      ? this.memoryRouter.predict(routerInput)
+        .then((result) => result.lane)
+        .catch((error) => {
+          console.warn(`[EvenHubV2] memory router failed open: ${error instanceof Error ? error.message : String(error)}`);
+          return fallbackMemoryLane(routerInput);
+        })
+      : Promise.resolve(fallbackMemoryLane(routerInput));
+    this.routeCache.set(cacheKey, routed);
+    if (this.routeCache.size > 64) {
+      const oldestKey = this.routeCache.keys().next().value;
+      if (oldestKey) this.routeCache.delete(oldestKey);
+    }
+    return routed;
+  }
+
   async build(input: EvenHubV2ContextInput): Promise<EvenHubV2ContextSnapshot> {
     const memoryUserId = this.memoryUserId || input.userId;
     let memoryText = "";
@@ -483,9 +521,9 @@ export class LightweightEvenHubV2ContextAdapter implements EvenHubV2ContextAdapt
     const answerPolicyCard = currentQuestion
       ? findAnswerPolicyCard(currentQuestion, this.answerPolicyCards)
       : null;
-    const lane = classifyMemoryLane(memoryQuery);
+    const lane = await this.resolveMemoryLane(input, memoryQuery);
     const dynamicMemoryCardLimit = lane === "profile" && interviewAnswerCard ? 1 : 2;
-    if (memoryQuery && shouldRetrievePersonalMemory(memoryQuery)) {
+    if (memoryQuery && lane !== "none") {
       try {
         const memories = (await this.retrieveMemories(
           memoryUserId,
@@ -511,9 +549,6 @@ export class LightweightEvenHubV2ContextAdapter implements EvenHubV2ContextAdapt
         "- Reusable answer-policy cards may shape organization and caution, but they can never supply a personal fact or story.",
       ].join("\n"),
       interviewAnswerCard ? formatInterviewAnswerCard(interviewAnswerCard) : "",
-      input.selectedPrenoteText.trim()
-        ? `Selected prenote, use only if directly relevant:\n${input.selectedPrenoteText.trim().slice(0, 2500)}`
-        : "",
       memoryText,
       answerPolicyCard ? formatAnswerPolicyCard(answerPolicyCard) : "",
       input.recentTranscript.trim()

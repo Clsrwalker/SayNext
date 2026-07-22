@@ -31,7 +31,8 @@ import {
   wsUrl,
   type EvenHubV2ServerMessage,
 } from "./evenhub-v2-client";
-import { planPauseToggle } from "./conversation-audio";
+import { planConversationStart, planPauseToggle } from "./conversation-audio";
+import { cueCodeText, cueExplanationText, cueFullText } from "./cue-display";
 import { CUE_CATEGORY_ORDER, groupCuesByCategory } from "./cue-groups";
 import { normalizeGlassGesture, readGlassListSelection, type GlassListSelection } from "./events";
 import {
@@ -79,6 +80,7 @@ type Screen = "home" | "settings" | "noteEditor" | "live" | "history" | "convers
 const MAX_FILES = 5;
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const AUDIO_DIAGNOSTICS_INTERVAL_MS = 5000;
+const AUDIO_FIRST_CHUNK_TIMEOUT_MS = 3000;
 const SETTINGS_SYNC_DEBOUNCE_MS = 500;
 
 type AudioDiagnosticsState = {
@@ -167,8 +169,16 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
   const isListeningRef = useRef(false);
+  const conversationStartPendingRef = useRef(false);
   const pendingStartPayloadRef = useRef<unknown | null>(null);
   const pendingAudioStartRef = useRef(false);
+  const pendingBridgeAudioStartRef = useRef(false);
+  const serverAudioListeningRef = useRef(false);
+  const bridgeAudioEnabledRef = useRef(false);
+  const bridgeAudioEnableInFlightRef = useRef(false);
+  const bridgeAudioCommandRef = useRef(0);
+  const firstAudioChunkTimerRef = useRef<number | null>(null);
+  const clientAudioErrorRef = useRef<string | null>(null);
   const activeAudioSourceRef = useRef<VoiceInput>("glasses");
   const audioSourceMismatchCountRef = useRef(0);
   const audioDiagnosticsRef = useRef<AudioDiagnosticsState>(emptyAudioDiagnostics());
@@ -383,9 +393,7 @@ export default function App() {
           void glassRendererRef.current.render(latestPage).catch(handleGlassRenderError);
         }
         if (isListeningRef.current) {
-          void bridge.setAudioEnabled(true, activeAudioSourceRef.current).then((enabled) => {
-            if (!enabled) setConnectionStatus(micFailedStatus(activeAudioSourceRef.current));
-          }).catch(() => setConnectionStatus(micErrorStatus(activeAudioSourceRef.current)));
+          setBridgeAudioEnabled(true, activeAudioSourceRef.current);
         }
       })
       .catch(handleGlassRenderError)
@@ -396,6 +404,10 @@ export default function App() {
 
   useEffect(() => () => {
     glassRendererRef.current?.dispose();
+    if (firstAudioChunkTimerRef.current) {
+      window.clearTimeout(firstAudioChunkTimerRef.current);
+      firstAudioChunkTimerRef.current = null;
+    }
   }, []);
 
   const elapsedLabel = useMemo(() => {
@@ -458,6 +470,10 @@ export default function App() {
     const diagnostics = audioDiagnosticsRef.current;
     diagnostics.chunkCount += 1;
     diagnostics.byteCount += byteCount;
+    if (diagnostics.chunkCount === 1) {
+      clearFirstAudioChunkTimer();
+      clientAudioErrorRef.current = null;
+    }
     diagnostics.sourceCounts[source] += 1;
     if (isExplicitAudioSourceMismatch(activeAudioSourceRef.current, source)) {
       diagnostics.mismatchCount += 1;
@@ -484,13 +500,69 @@ export default function App() {
     return source === "phone" ? "phone_mic_error" : "g2_mic_error";
   }
 
+  function micNoAudioStatus(source: VoiceInput) {
+    return source === "phone" ? "phone_mic_no_audio" : "g2_mic_no_audio";
+  }
+
+  function clearFirstAudioChunkTimer() {
+    if (!firstAudioChunkTimerRef.current) return;
+    window.clearTimeout(firstAudioChunkTimerRef.current);
+    firstAudioChunkTimerRef.current = null;
+  }
+
+  function armFirstAudioChunkTimer(source: VoiceInput) {
+    clearFirstAudioChunkTimer();
+    firstAudioChunkTimerRef.current = window.setTimeout(() => {
+      firstAudioChunkTimerRef.current = null;
+      if (!isListeningRef.current || audioDiagnosticsRef.current.chunkCount > 0) return;
+      const status = micNoAudioStatus(source);
+      clientAudioErrorRef.current = status;
+      setConnectionStatus(status);
+    }, AUDIO_FIRST_CHUNK_TIMEOUT_MS);
+  }
+
   function setBridgeAudioEnabled(enabled: boolean, source = activeAudioSourceRef.current) {
     const bridge = bridgeRef.current;
-    if (!bridge) return;
-    void bridge.setAudioEnabled(enabled, source).then((ok) => {
-      if (!ok && enabled) setConnectionStatus(micFailedStatus(source));
+    if (!enabled) {
+      pendingBridgeAudioStartRef.current = false;
+      bridgeAudioEnabledRef.current = false;
+      bridgeAudioEnableInFlightRef.current = false;
+      clientAudioErrorRef.current = null;
+      clearFirstAudioChunkTimer();
+      bridgeAudioCommandRef.current += 1;
+      if (bridge) void bridge.setAudioEnabled(false, source).catch(() => undefined);
+      return;
+    }
+
+    if (!bridge) {
+      pendingBridgeAudioStartRef.current = true;
+      return;
+    }
+    if (bridgeAudioEnabledRef.current || bridgeAudioEnableInFlightRef.current) return;
+
+    pendingBridgeAudioStartRef.current = false;
+    const command = ++bridgeAudioCommandRef.current;
+    bridgeAudioEnableInFlightRef.current = true;
+    void bridge.setAudioEnabled(true, source).then((ok) => {
+      if (command !== bridgeAudioCommandRef.current) return;
+      bridgeAudioEnableInFlightRef.current = false;
+      if (!isListeningRef.current) return;
+      if (!ok) {
+        const status = micFailedStatus(source);
+        clientAudioErrorRef.current = status;
+        setConnectionStatus(status);
+        return;
+      }
+      bridgeAudioEnabledRef.current = true;
+      clientAudioErrorRef.current = null;
+      armFirstAudioChunkTimer(source);
     }).catch(() => {
-      if (enabled) setConnectionStatus(micErrorStatus(source));
+      if (command !== bridgeAudioCommandRef.current) return;
+      bridgeAudioEnableInFlightRef.current = false;
+      if (!isListeningRef.current) return;
+      const status = micErrorStatus(source);
+      clientAudioErrorRef.current = status;
+      setConnectionStatus(status);
     });
   }
 
@@ -501,6 +573,7 @@ export default function App() {
     }
     if (message.type === "conversation_started") {
       const id = message.payload?.conversationId || message.conversationId || null;
+      conversationStartPendingRef.current = false;
       setActiveConversationId(id);
       activeConversationIdRef.current = id;
       setConnectionStatus("listening_ready");
@@ -513,7 +586,18 @@ export default function App() {
       return;
     }
     if (message.type === "audio_status") {
-      setConnectionStatus(message.payload?.audioStatus || "audio");
+      const audioStatus = message.payload?.audioStatus || "audio";
+      serverAudioListeningRef.current = audioStatus === "listening";
+      if (audioStatus === "listening" && pendingBridgeAudioStartRef.current && isListeningRef.current) {
+        pendingBridgeAudioStartRef.current = false;
+        window.setTimeout(() => {
+          if (!isListeningRef.current || !serverAudioListeningRef.current) return;
+          setBridgeAudioEnabled(true, activeAudioSourceRef.current);
+        }, 0);
+      } else if (audioStatus === "failed") {
+        pendingBridgeAudioStartRef.current = false;
+      }
+      if (!clientAudioErrorRef.current) setConnectionStatus(audioStatus);
       return;
     }
     if (message.type === "transcript_partial") {
@@ -570,6 +654,11 @@ export default function App() {
     }
     if (message.type === "conversation_saved") {
       const id = message.payload?.conversationId || message.conversationId || activeConversationIdRef.current;
+      conversationStartPendingRef.current = false;
+      pendingAudioStartRef.current = false;
+      pendingBridgeAudioStartRef.current = false;
+      serverAudioListeningRef.current = false;
+      isListeningRef.current = false;
       setIsListening(false);
       setBridgeAudioEnabled(false);
       setActiveConversationId(null);
@@ -589,6 +678,7 @@ export default function App() {
       return;
     }
     if (message.type === "error") {
+      if (!activeConversationIdRef.current) conversationStartPendingRef.current = false;
       setConnectionStatus(message.payload?.code || "error");
     }
   }
@@ -637,6 +727,7 @@ export default function App() {
     }
 
     if (decision.effect === "start_conversation") {
+      commitGlassState(decision.state);
       startConversation();
       return;
     }
@@ -702,34 +793,46 @@ export default function App() {
   }
 
   function startConversation() {
+    if (conversationStartPendingRef.current || activeConversationIdRef.current || isListeningRef.current) return;
+    conversationStartPendingRef.current = true;
     const currentSettings = settingsRef.current;
     const voiceInput = normalizeSupportedVoiceInput(currentSettings.voiceInput);
     const startSettings = voiceInput === currentSettings.voiceInput
       ? currentSettings
       : { ...currentSettings, voiceInput };
     const payload = conversationStartPayload(startSettings, activePrenoteRef.current);
+    const audioPlan = planConversationStart(voiceInput);
     activeAudioSourceRef.current = voiceInput;
     audioSourceMismatchCountRef.current = 0;
     resetAudioDiagnostics();
+    clientAudioErrorRef.current = null;
+    serverAudioListeningRef.current = false;
+    pendingBridgeAudioStartRef.current = true;
+    bridgeAudioEnabledRef.current = false;
+    clearFirstAudioChunkTimer();
+    isListeningRef.current = true;
+    setBridgeAudioEnabled(audioPlan.bridgeAudio.enabled, audioPlan.bridgeAudio.source);
     const started = sendWs("conversation_start", payload);
     if (!started) {
       pendingStartPayloadRef.current = payload;
       setConnectionStatus("connecting_backend");
     }
     pendingAudioStartRef.current = true;
-    isListeningRef.current = true;
     setIsListening(true);
     setElapsedSeconds(0);
     setCues([]);
     setTranscript([]);
-    setGlassState(startLiveGlasses(null));
-    setBridgeAudioEnabled(true, voiceInput);
+    commitGlassState(startLiveGlasses(null));
     setLiveTab("transcript");
     setScreen("live");
   }
 
   function endConversation() {
     sendAudioDiagnostics(true);
+    conversationStartPendingRef.current = false;
+    isListeningRef.current = false;
+    serverAudioListeningRef.current = false;
+    pendingBridgeAudioStartRef.current = false;
     setIsListening(false);
     setBridgeAudioEnabled(false);
     pendingStartPayloadRef.current = null;
@@ -738,7 +841,7 @@ export default function App() {
     if (!sent || !activeConversationIdRef.current) {
       setActiveConversationId(null);
       activeConversationIdRef.current = null;
-      setGlassState(INITIAL_GLASS_STATE);
+      commitGlassState(INITIAL_GLASS_STATE);
       setScreen("home");
     }
   }
@@ -755,11 +858,23 @@ export default function App() {
     if (plan.bridgeAudio.source) {
       activeAudioSourceRef.current = plan.bridgeAudio.source;
     }
-    setBridgeAudioEnabled(plan.bridgeAudio.enabled, plan.bridgeAudio.source || activeAudioSourceRef.current);
+    const audioSource = plan.bridgeAudio.source || activeAudioSourceRef.current;
+    if (plan.bridgeAudio.enabled) {
+      clientAudioErrorRef.current = null;
+      serverAudioListeningRef.current = false;
+      pendingBridgeAudioStartRef.current = true;
+      bridgeAudioEnabledRef.current = false;
+      clearFirstAudioChunkTimer();
+      setBridgeAudioEnabled(true, audioSource);
+    } else {
+      serverAudioListeningRef.current = false;
+      pendingBridgeAudioStartRef.current = false;
+      setBridgeAudioEnabled(false, audioSource);
+    }
 
     if (plan.wsType === "audio_start") {
       pendingAudioStartRef.current = false;
-      sendAudioStart(activeAudioSourceRef.current);
+      sendAudioStart(audioSource);
     } else if (plan.wsType === "audio_stop") {
       pendingAudioStartRef.current = false;
       sendAudioStop();
@@ -1148,6 +1263,19 @@ function renderTabs(active: ConversationTab, setActive: (tab: ConversationTab) =
   );
 }
 
+function renderCueBody(cue: AiCue) {
+  if (cue.category !== "code") return <p>{cueFullText(cue)}</p>;
+  const explanation = cueExplanationText(cue);
+  return (
+    <>
+      {explanation ? <p className="cue-code-explanation">{explanation}</p> : null}
+      <pre className="cue-code-block">
+        <code>{cueCodeText(cue)}</code>
+      </pre>
+    </>
+  );
+}
+
 function renderCuePanel(cues: AiCue[]) {
   return (
     <div className="summary-stack">
@@ -1159,7 +1287,7 @@ function renderCuePanel(cues: AiCue[]) {
               <span className="cue-icon">{cueIcon(cue.category)}</span>
               <div>
                 <h3>{cue.title}</h3>
-                <p>{cue.preview || cue.output}</p>
+                {renderCueBody(cue)}
               </div>
             </article>
           )) : <p>-</p>}
@@ -1261,16 +1389,7 @@ function renderCueDetailModal(cue: AiCue, onClose: () => void) {
             <X size={24} strokeWidth={1.8} />
           </button>
         </header>
-        {cue.category === "code" ? (
-          <>
-            {cue.explanation || cue.fullAnswer ? (
-              <p className="cue-code-explanation">{cue.explanation || cue.fullAnswer}</p>
-            ) : null}
-            <pre className="cue-code-block">
-              <code>{cue.code || cue.output}</code>
-            </pre>
-          </>
-        ) : <p>{cue.fullAnswer || cue.output}</p>}
+        {renderCueBody(cue)}
       </article>
     </div>
   );

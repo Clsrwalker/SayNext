@@ -820,6 +820,79 @@ test("concurrent identical personal-memory searches share one query embedding re
   }
 });
 
+test("vector-only personal-memory search ranks compatible OpenAI embeddings without intent boosts", async () => {
+  const userId = `test-vector-only-search-${Date.now()}`;
+  const createdIds: number[] = [];
+  const oldApiKey = process.env.OPENAI_API_KEY;
+  const oldFetch = globalThis.fetch;
+
+  process.env.OPENAI_API_KEY = "test-openai-key";
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    const inputs = Array.isArray(body.input) ? body.input : [body.input];
+    return new Response(JSON.stringify({
+      data: inputs.map((text: string, index: number) => ({
+        index,
+        embedding: String(text).toLowerCase().includes("database distraction")
+          ? [0, 1, 0]
+          : [1, 0, 0],
+      })),
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const relevant = await conversationLogger.createPersonalMemoryAsync({
+      userId,
+      title: "Live cue flow evidence",
+      category: "technical_projects",
+      sensitivity: "low",
+      source: "import",
+      sourceRef: "test:vector-only-api:relevant",
+      upsertBySource: true,
+      keywords: [],
+      content: "Xiang built a live speech-to-cue pipeline for smart glasses.",
+      usageRule: "Use for SayNext architecture questions.",
+    });
+    const distraction = await conversationLogger.createPersonalMemoryAsync({
+      userId,
+      title: "Database distraction",
+      category: "technical_projects",
+      sensitivity: "low",
+      source: "import",
+      sourceRef: "test:vector-only-api:distraction",
+      upsertBySource: true,
+      keywords: [],
+      content: "Database distraction about relational indexing.",
+      usageRule: "Use for database questions.",
+    });
+    if (relevant) createdIds.push(relevant.id);
+    if (distraction) createdIds.push(distraction.id);
+
+    const results = await conversationLogger.searchPersonalMemoriesVectorAsync(
+      userId,
+      `How does the unfamiliar live assistance pipeline work ${Date.now()}?`,
+      2,
+    );
+
+    expect(results.map((result) => result.sourceRef)).toEqual([
+      "test:vector-only-api:relevant",
+      "test:vector-only-api:distraction",
+    ]);
+    expect(results[0]?.vectorScore).toBeGreaterThan(0.99);
+    expect(results[0]?.keywordScore).toBe(0);
+  } finally {
+    for (const id of createdIds) {
+      conversationLogger.deletePersonalMemory(userId, id);
+    }
+    globalThis.fetch = oldFetch;
+    if (oldApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = oldApiKey;
+  }
+});
+
 test("general technical queries soft-penalize project memory instead of silently dropping it", () => {
   const userId = `test-soft-penalty-technical-${Date.now()}`;
   const createdIds: number[] = [];

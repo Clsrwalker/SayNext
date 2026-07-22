@@ -1,5 +1,16 @@
 import { describe, expect, test } from "vitest";
-import { planPauseToggle } from "./conversation-audio";
+import { planConversationStart, planPauseToggle } from "./conversation-audio";
+
+describe("planConversationStart", () => {
+  test("starts the selected SDK microphone immediately", () => {
+    expect(planConversationStart("glasses")).toEqual({
+      bridgeAudio: { enabled: true, source: "glasses" },
+    });
+    expect(planConversationStart("phone")).toEqual({
+      bridgeAudio: { enabled: true, source: "phone" },
+    });
+  });
+});
 
 describe("planPauseToggle", () => {
   test("pauses by stopping backend audio and bridge audio", () => {

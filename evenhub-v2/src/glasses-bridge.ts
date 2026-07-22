@@ -2,6 +2,7 @@ import {
   CreateStartUpPageContainer,
   ListItemContainerProperty,
   ListContainerProperty,
+  StartUpPageCreateResult,
   TextContainerProperty,
   TextContainerUpgrade,
   waitForEvenAppBridge,
@@ -31,15 +32,37 @@ export type GlassBridgeHandle = {
 };
 
 export const REBUILD_UNAVAILABLE_CODE = "rebuild_unavailable";
+export const REBUILD_PAGE_FAILED_CODE = "rebuild_page_failed";
+export const STARTUP_PAGE_CREATE_FAILED_CODE = "startup_page_create_failed";
 
-export function getRebuildPageContainer(bridge: unknown): (container: CreateStartUpPageContainer) => Promise<unknown> {
+export function getRebuildPageContainer(bridge: unknown): (container: CreateStartUpPageContainer) => Promise<boolean> {
   const rebuild = (bridge as {
-    rebuildPageContainer?: (container: CreateStartUpPageContainer) => Promise<unknown>;
+    rebuildPageContainer?: (container: CreateStartUpPageContainer) => Promise<boolean>;
   }).rebuildPageContainer;
   if (!rebuild) {
     throw new Error(REBUILD_UNAVAILABLE_CODE);
   }
   return rebuild;
+}
+
+export async function createStartupPage(
+  bridge: Pick<EvenAppBridge, "createStartUpPageContainer">,
+  container: CreateStartUpPageContainer,
+): Promise<void> {
+  const rawResult = await bridge.createStartUpPageContainer(container);
+  const result = StartUpPageCreateResult.normalize(rawResult);
+  if (result !== StartUpPageCreateResult.success) {
+    throw new Error(`${STARTUP_PAGE_CREATE_FAILED_CODE}:${StartUpPageCreateResult[result]}`);
+  }
+}
+
+export async function rebuildGlassPage(
+  bridge: Pick<EvenAppBridge, "rebuildPageContainer">,
+  container: CreateStartUpPageContainer,
+): Promise<void> {
+  const rebuild = getRebuildPageContainer(bridge);
+  const rebuilt = await rebuild.call(bridge, container);
+  if (!rebuilt) throw new Error(REBUILD_PAGE_FAILED_CODE);
 }
 
 function textContainer(spec: GlassTextContainerSpec): TextContainerProperty {
@@ -146,13 +169,12 @@ export async function connectGlassBridge(params: {
   async function render(page: GlassPageSpec): Promise<void> {
     const container = toStartupContainer(page);
     if (!started) {
-      await bridge.createStartUpPageContainer(container);
+      await createStartupPage(bridge, container);
       started = true;
       params.onStatus?.("G2 page ready");
       return;
     }
-    const rebuild = getRebuildPageContainer(bridge);
-    await rebuild.call(bridge, container);
+    await rebuildGlassPage(bridge, container);
   }
 
   async function updateTextContainer(spec: GlassTextContainerUpdateSpec): Promise<boolean> {

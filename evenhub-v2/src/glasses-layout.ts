@@ -1,4 +1,5 @@
 import { buildMenuItems, shouldShowAutoCue } from "./glasses-state";
+import { cueCodeText, cueExplanationText, cueFullText } from "./cue-display";
 import type { AiCue, GlassContentFlag, GlassRuntimeState, Prenote, TranscriptLine } from "./types";
 
 export type GlassTextContainerSpec = {
@@ -145,10 +146,15 @@ export function buildGlassTranscriptContent(lines: TranscriptLine[]): string {
   return content || "Listening...";
 }
 
-function cueContent(cue: AiCue | undefined, detail = false): string {
+function cueContent(cue: AiCue | undefined): string {
   if (!cue) return "";
-  if (cue.category === "code") return normalizeGlassCode(cue.code || cue.output);
-  return cleanText(detail ? cue.fullAnswer || cue.output : cue.preview || cue.output, detail ? 2400 : 360);
+  if (cue.category === "code") {
+    return [
+      cleanText(cueExplanationText(cue), 2400),
+      normalizeGlassCode(cueCodeText(cue)),
+    ].filter(Boolean).join("\n\n");
+  }
+  return cleanText(cueFullText(cue), 2400);
 }
 
 function cueBox(content: string, eventCapture = true): GlassTextContainerSpec {
@@ -223,19 +229,18 @@ export function buildGlassesPage(params: {
           eventCapture: false,
         },
         {
-          kind: "list",
+          kind: "text",
           id: START_ID,
           name: "start-conversation",
           x: 64,
           y: 96,
           width: 448,
           height: 76,
-          items: ["Start conversation"],
-          selectedIndex: 0,
-          borderWidth: 0,
+          content: "Start conversation",
+          borderWidth: 1,
           borderColor: 8,
           borderRadius: 6,
-          padding: 4,
+          padding: 8,
           eventCapture: true,
         },
         {
@@ -310,7 +315,7 @@ export function buildGlassesPage(params: {
       view: params.state.view,
       containers: [
         ...headerContainers(now),
-        cueBox(showAiCue ? cueContent(activeCue, true) || "No cue selected." : "", true),
+        cueBox(showAiCue ? cueContent(activeCue) || "No cue selected." : "", true),
         ...(showTranscript ? [transcriptBox(transcript, false)] : []),
       ],
     };

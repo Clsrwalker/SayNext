@@ -52,7 +52,7 @@ test("shouldDisplayAutoCue does not suppress a complete cue by confidence", () =
   })).toEqual({ ok: true });
 });
 
-test("normalizeAutoCueOutput keeps the full answer and derives a bounded preview", () => {
+test("normalizeAutoCueOutput keeps one complete answer for every display surface", () => {
   const cue = normalizeAutoCueOutput({
     category: "response",
     confidence: 0.9,
@@ -63,8 +63,7 @@ test("normalizeAutoCueOutput keeps the full answer and derives a bounded preview
   });
 
   expect(cue.fullAnswer.length).toBeGreaterThan(340);
-  expect(cue.preview.length).toBeLessThanOrEqual(340);
-  expect(cue.preview.endsWith("...")).toBe(false);
+  expect(cue.preview).toBe(cue.fullAnswer);
   expect(cue.output).toBe(cue.fullAnswer);
 });
 
@@ -130,8 +129,9 @@ test("auto cue prompt treats retrieved memory as grounding without inventing exp
   expect(prompt).toContain("Do not invent Xiang's projects, work history, or personal experience");
   expect(prompt).toContain("General technical knowledge is not evidence that Xiang used it");
   expect(prompt).toContain("Current question or request is authoritative");
-  expect(prompt).toContain('"preview"');
+  expect(prompt).not.toContain('"preview"');
   expect(prompt).toContain('"fullAnswer"');
+  expect(prompt).toContain("one complete answer used everywhere");
   expect(prompt).toContain("[personal-memory:36] JobLens uses Lambda and DynamoDB");
 });
 
@@ -182,7 +182,7 @@ test("auto cue prompt gives a role-grounded structure for interview introduction
   expect(prompt).toContain("at least two project names");
 });
 
-test("auto cue separates the fixed DeepSense seed from the per-turn context", () => {
+test("auto cue keeps selected prenote in the fixed session seed only", () => {
   const input = {
     triggerWindow: "Tell me about your SayNext project.",
     recentTranscript: "Interviewer: What have you built recently?",
@@ -190,19 +190,24 @@ test("auto cue separates the fixed DeepSense seed from the per-turn context", ()
     settings: defaultEvenHubV2Settings(),
     router: null,
   };
+  const selectedPrenote = "DeepSense interview prep: connect SayNext to the chatbot and RAG responsibilities.";
 
-  const seed = buildAutoCueSessionSeed();
+  const seed = buildAutoCueSessionSeed(selectedPrenote);
   const turn = buildAutoCueTurnPrompt(input);
   const stateless = buildAutoCuePrompt(input);
 
   expect(seed).toContain("DeepSense Full-Stack AI Developer Co-op");
   expect(seed).toContain("Representative answer examples");
   expect(seed).toContain("Return exactly one JSON object");
+  expect(seed).toContain("Selected prenote for this conversation");
+  expect(seed).toContain(selectedPrenote);
   expect(seed).not.toContain("Tell me about your SayNext project.");
   expect(turn).toContain("timing model is unavailable");
   expect(turn).toContain(input.contextSnapshot);
   expect(turn).not.toContain("Representative answer examples");
-  expect(stateless).toBe(`${seed}\n\n${turn}`);
+  expect(turn).not.toContain(selectedPrenote);
+  expect(stateless).not.toContain(selectedPrenote);
+  expect(stateless).toBe(`${buildAutoCueSessionSeed()}\n\n${turn}`);
 });
 
 test("OpenAI auto cue uses the conversation for canonical finals and stateless cached prompts for partials", async () => {
@@ -246,6 +251,8 @@ test("OpenAI auto cue uses the conversation for canonical finals and stateless c
   const session = await generator.startSession?.({
     localConversationId: "conv-local",
     userId: "xiang",
+    selectedPrenoteIds: ["pn-deepsense"],
+    selectedPrenoteText: "Prepared DeepSense interview context.",
   });
   const input = {
     triggerWindow: "Tell me about yourself.",
@@ -260,8 +267,10 @@ test("OpenAI auto cue uses the conversation for canonical finals and stateless c
 
   expect(conversationCalls[0].type).toBe("create");
   expect(String(conversationCalls[0].seed)).toContain("DeepSense Full-Stack AI Developer Co-op");
+  expect(String(conversationCalls[0].seed)).toContain("Prepared DeepSense interview context.");
   expect(jsonCalls[0].conversationId).toBe("conv_openai_1");
   expect(jsonCalls[0].prompt).toBe(buildAutoCueTurnPrompt(input));
+  expect(String(jsonCalls[0].prompt)).not.toContain("Prepared DeepSense interview context.");
   expect(jsonCalls[0].includeJsonInstruction).toBe(false);
   expect(jsonCalls[1].conversationId).toBeUndefined();
   expect(jsonCalls[1].prompt).toBe(buildAutoCuePrompt(input));

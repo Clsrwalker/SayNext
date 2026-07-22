@@ -199,7 +199,8 @@ export class EvenHubV2Runtime {
   private pendingSpeculativeTurn: LiveTranscriptTurn | null = null;
   private providerLifecycle: AutoCueProviderLifecycle | null = null;
   private liveTurn: LiveTranscriptTurn | null = null;
-  private preparedSpeculative: GeneratedCueDraft | null = null;
+  private completedSpeculativeRevisions = new Map<string, number>();
+  private publishedSpeculativeTurnIds = new Set<string>();
   private finalizedTurns = new Map<string, { revision: number; text: string; lineId: string }>();
   private canonicalTurns: Array<{ lineId: string; text: string; role: "unknown" | "xiang_readback" }> = [];
   private audioBytesReceived = 0;
@@ -399,7 +400,8 @@ export class EvenHubV2Runtime {
     this.lastDisplayedCueOutputHash = null;
     this.lastDisplayedCueOutput = "";
     this.liveTurn = null;
-    this.preparedSpeculative = null;
+    this.completedSpeculativeRevisions.clear();
+    this.publishedSpeculativeTurnIds.clear();
     this.finalizedTurns.clear();
     this.canonicalTurns = [];
     this.currentAutoJobInput = null;
@@ -557,12 +559,6 @@ export class EvenHubV2Runtime {
         text: normalized,
         updatedAt: Date.now(),
       };
-      if (
-        this.preparedSpeculative?.input.questionId === this.liveTurn.id
-        && !sameSpokenText(this.preparedSpeculative.input.triggerWindow, normalized)
-      ) {
-        this.discardPreparedSpeculative("partial_revised");
-      }
     } else {
       this.liveTurn.updatedAt = Date.now();
     }
@@ -633,23 +629,15 @@ export class EvenHubV2Runtime {
         role: readback ? "xiang_readback" : "unknown",
       });
 
+      this.completedSpeculativeRevisions.delete(finalTurn.id);
+      const alreadyPublishedSpeculative = this.publishedSpeculativeTurnIds.delete(finalTurn.id);
       if (readback) {
         this.writeSkippedAttempt("cue_readback", [{ turnId: finalTurn.id, revision: finalTurn.revision, line, previousTurns }]);
         return line;
       }
 
-      if (
-        this.preparedSpeculative?.input.questionId === finalTurn.id
-        && sameSpokenText(this.preparedSpeculative.input.triggerWindow, normalized)
-      ) {
-        const prepared = this.preparedSpeculative;
-        this.preparedSpeculative = null;
-        this.publishGeneratedDraft(prepared, [line.id]);
+      if (alreadyPublishedSpeculative) {
         return line;
-      }
-
-      if (this.preparedSpeculative?.input.questionId === finalTurn.id) {
-        this.discardPreparedSpeculative("final_revised");
       }
 
       const activeSpeculationMatches = Boolean(
@@ -741,16 +729,12 @@ export class EvenHubV2Runtime {
 
   private async startSpeculativeCue(turn: LiveTranscriptTurn): Promise<void> {
     if (!this.conversationId || this.state.conversationStatus !== "active") return;
+    if (this.publishedSpeculativeTurnIds.has(turn.id)) return;
     if (this.currentAutoJob) {
       this.pendingSpeculativeTurn = { ...turn };
       return;
     }
-    if (
-      this.preparedSpeculative?.input.questionId === turn.id
-      && this.preparedSpeculative.input.sourceRevision === turn.revision
-    ) return;
-
-    if (this.preparedSpeculative) this.discardPreparedSpeculative("superseded_partial");
+    if (this.completedSpeculativeRevisions.get(turn.id) === turn.revision) return;
     const triggerWindow = turn.text;
     await this.startAutoCueJob({
       attemptId: makeEvenHubV2Id("attempt"),
@@ -943,6 +927,9 @@ export class EvenHubV2Runtime {
       this.markDraftStale(draft, preemptedReason || "generator_aborted");
       return;
     }
+    if (input.speculative) {
+      this.completedSpeculativeRevisions.set(input.questionId, input.sourceRevision);
+    }
     if (!input.speculative) {
       this.publishGeneratedDraft(draft, input.sourceTranscriptLineIds);
       return;
@@ -964,32 +951,8 @@ export class EvenHubV2Runtime {
       && this.liveTurn.revision === input.sourceRevision
       && sameSpokenText(this.liveTurn.text, input.triggerWindow)
     ) {
-      this.preparedSpeculative = draft;
-      this.store.updateAutoCueAttempt(input.attemptId, {
-        status: "queued",
-        category: cue.category,
-        confidence: cue.confidence,
-        title: cue.title,
-        g2Title: cue.g2Title,
-        output: cue.output,
-        reason: cue.reason,
-        rawOutput: result.rawText,
-        model: result.model,
-        latencyMs: Date.now() - input.startedAt,
-        trace: {
-          speculative: true,
-          prepared: true,
-          memoryUsedIds: context.memoryUsedIds,
-          interviewAnswerCardIds: context.interviewAnswerCardIds,
-          answerPolicyCardIds: context.answerPolicyCardIds,
-          prenoteUsedIds: context.prenoteUsedIds,
-          contextLatencyMs,
-          router,
-          routerError,
-          generationLane: result.lane,
-          providerConversationId: providerSession?.providerConversationId || "",
-        },
-      });
+      const storedCue = this.publishGeneratedDraft(draft, []);
+      if (storedCue) this.publishedSpeculativeTurnIds.add(input.questionId);
       return;
     }
 
@@ -1110,13 +1073,6 @@ export class EvenHubV2Runtime {
     });
   }
 
-  private discardPreparedSpeculative(reason: string): void {
-    const prepared = this.preparedSpeculative;
-    if (!prepared) return;
-    this.preparedSpeculative = null;
-    this.markDraftStale(prepared, reason);
-  }
-
   private beginAutoCueProviderSession(localConversationId: string): void {
     if (!this.autoCueGenerator.startSession) {
       this.providerLifecycle = null;
@@ -1136,6 +1092,8 @@ export class EvenHubV2Runtime {
     lifecycle.sessionPromise = this.autoCueGenerator.startSession({
       localConversationId,
       userId: this.userId,
+      selectedPrenoteIds: [...this.selectedPrenoteIds],
+      selectedPrenoteText: this.selectedPrenoteText,
     }).then((session) => {
       lifecycle.session = session;
       if (session) {
@@ -1257,8 +1215,6 @@ export class EvenHubV2Runtime {
     this.clearCueFlushTimer();
     await this.stopAudio("conversation_ending");
     await new Promise((resolve) => setTimeout(resolve, this.finalFlushTimeoutMs));
-    this.discardPreparedSpeculative("conversation_ended");
-
     const endedAt = new Date().toISOString();
     const conversationId = this.conversationId;
     const providerLifecycle = this.providerLifecycle?.localConversationId === conversationId
@@ -1282,7 +1238,8 @@ export class EvenHubV2Runtime {
     this.providerLifecycle = null;
     this.candidateBuffer = [];
     this.liveTurn = null;
-    this.preparedSpeculative = null;
+    this.completedSpeculativeRevisions.clear();
+    this.publishedSpeculativeTurnIds.clear();
     this.finalizedTurns.clear();
     this.currentAutoJobInput = null;
     this.pendingSpeculativeTurn = null;

@@ -48,7 +48,12 @@ class FakeAutoCueGenerator implements AutoCueGenerator {
 
 class LifecycleAutoCueGenerator implements AutoCueGenerator {
   calls: AutoCueGeneratorInput[] = [];
-  started: Array<{ localConversationId: string; userId: string }> = [];
+  started: Array<{
+    localConversationId: string;
+    userId: string;
+    selectedPrenoteIds?: string[];
+    selectedPrenoteText?: string;
+  }> = [];
   committed: Array<{ session: AutoCueSession; question: string; result: AutoCueGenerationResult }> = [];
   ended: AutoCueSession[] = [];
   readonly session: AutoCueSession = {
@@ -57,7 +62,12 @@ class LifecycleAutoCueGenerator implements AutoCueGenerator {
     interviewGuideVersion: "guide-v1",
   };
 
-  async startSession(input: { localConversationId: string; userId: string }): Promise<AutoCueSession> {
+  async startSession(input: {
+    localConversationId: string;
+    userId: string;
+    selectedPrenoteIds?: string[];
+    selectedPrenoteText?: string;
+  }): Promise<AutoCueSession> {
     this.started.push(input);
     return this.session;
   }
@@ -209,7 +219,7 @@ test("EvenHubV2Runtime creates a cue from final transcript through the auto pipe
   expect(sent.some((message) => message.type === "transcript_final")).toBe(true);
   expect(sent.some((message) => message.type === "cue_created"
     && message.payload?.g2Title === "Batch norm"
-    && message.payload?.preview === generatedCue.data.preview
+    && message.payload?.preview === generatedCue.data.fullAnswer
     && message.payload?.fullAnswer === generatedCue.data.fullAnswer)).toBe(true);
   expect(store.listTranscriptLines(conversationId)).toHaveLength(1);
   expect(store.listCues(conversationId)).toHaveLength(1);
@@ -327,7 +337,12 @@ test("EvenHubV2Runtime creates one provider conversation and passes it to canoni
 
   const conversationId = runtime.activeConversationId;
   if (!conversationId) throw new Error("conversation id missing");
-  expect(generator.started).toEqual([{ localConversationId: conversationId, userId: "test-user" }]);
+  expect(generator.started).toEqual([{
+    localConversationId: conversationId,
+    userId: "test-user",
+    selectedPrenoteIds: ["pn-1"],
+    selectedPrenoteText: "Use batch norm notes if relevant.",
+  }]);
   expect(generator.calls).toHaveLength(1);
   expect(generator.calls[0].speculative).toBe(false);
   expect(generator.calls[0].session).toEqual(generator.session);
@@ -518,7 +533,7 @@ test("EvenHubV2Runtime does not let router no_cue block speculative generation",
   expect(router.calls).toHaveLength(1);
   expect(generator.calls).toHaveLength(1);
   expect(generator.calls[0].router?.decision).toBe("no_cue");
-  expect(sent.some((message) => message.type === "cue_created")).toBe(false);
+  expect(sent.some((message) => message.type === "cue_created")).toBe(true);
 });
 
 test("EvenHubV2Runtime fails open when the router is unavailable", async () => {
@@ -542,7 +557,7 @@ test("EvenHubV2Runtime fails open when the router is unavailable", async () => {
   expect(sent.some((message) => message.type === "cue_created")).toBe(true);
 });
 
-test("EvenHubV2Runtime prepares a stable partial but publishes only after the matching final", async () => {
+test("EvenHubV2Runtime publishes a stable partial immediately and does not duplicate it on matching final", async () => {
   const sent: EvenHubV2ServerMessage[] = [];
   const generator = new FakeAutoCueGenerator(validCue());
   const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
@@ -563,7 +578,7 @@ test("EvenHubV2Runtime prepares a stable partial but publishes only after the ma
   if (!conversationId) throw new Error("conversation id missing");
   expect(store.listTranscriptLines(conversationId)).toHaveLength(0);
   expect(generator.calls).toHaveLength(1);
-  expect(sent.some((message) => message.type === "cue_created")).toBe(false);
+  expect(sent.filter((message) => message.type === "cue_created")).toHaveLength(1);
 
   await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
     text: "Could you explain the deployment trade-off",
@@ -696,7 +711,7 @@ test("EvenHubV2Runtime lets a revised final preempt an in-flight speculative job
   ))).toBe(true);
 });
 
-test("EvenHubV2Runtime keeps partial revisions out of canonical transcript and publishes one final cue", async () => {
+test("EvenHubV2Runtime keeps partial revisions out of canonical transcript and publishes only one immediate cue", async () => {
   const sent: EvenHubV2ServerMessage[] = [];
   const generator = new FakeAutoCueGenerator(validCue());
   const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
@@ -722,7 +737,8 @@ test("EvenHubV2Runtime keeps partial revisions out of canonical transcript and p
   const conversationId = runtime.activeConversationId;
   if (!conversationId) throw new Error("conversation id missing");
   expect(store.listTranscriptLines(conversationId)).toHaveLength(0);
-  expect(sent.some((message) => message.type === "cue_created")).toBe(false);
+  expect(generator.calls).toHaveLength(1);
+  expect(sent.filter((message) => message.type === "cue_created")).toHaveLength(1);
 
   await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
     text: "Could you tell me a little bit about yourself",
@@ -736,18 +752,27 @@ test("EvenHubV2Runtime keeps partial revisions out of canonical transcript and p
   expect(sent.filter((message) => message.type === "cue_created")).toHaveLength(1);
 });
 
-test("EvenHubV2Runtime discards a speculative answer when the final changes the question", async () => {
+test("EvenHubV2Runtime waits for the final when an incomplete speculative turn returns none", async () => {
   const sent: EvenHubV2ServerMessage[] = [];
   let call = 0;
   const generator = new FakeAutoCueGenerator(async () => {
     call += 1;
-    return validCue({
-      title: call === 1 ? "Clarify" : "Background",
-      g2Title: call === 1 ? "Clarify" : "Background",
-      output: call === 1
-        ? "What part would you like me to explain?"
-        : "I am a MACS student focused on full-stack AI and cloud applications.",
-    });
+    return call === 1
+      ? validCue({
+          category: "none",
+          title: "",
+          g2Title: "",
+          preview: "",
+          fullAnswer: "",
+          output: "",
+          reason: "incomplete question",
+        })
+      : validCue({
+          category: "response",
+          title: "Background",
+          g2Title: "Background",
+          output: "I am a MACS student focused on full-stack AI and cloud applications.",
+        });
   });
   const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
     partialCommitMs: 5,
@@ -857,7 +882,7 @@ test("EvenHubV2Runtime does not save a pending partial as a canonical transcript
   expect(sent.some((message) => message.type === "conversation_saved")).toBe(true);
 });
 
-test("EvenHubV2Runtime marks a prepared speculative attempt stale when the conversation ends", async () => {
+test("EvenHubV2Runtime keeps an immediately published speculative cue when the conversation ends", async () => {
   const sent: EvenHubV2ServerMessage[] = [];
   const generator = new FakeAutoCueGenerator(validCue());
   const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
@@ -884,7 +909,7 @@ test("EvenHubV2Runtime marks a prepared speculative attempt stale when the conve
     WHERE conversation_id = ?
   `).all(conversationId) as Array<{ status: string; skipped_reason: string }>;
   expect(attempts).toHaveLength(1);
-  expect(attempts[0]).toEqual({ status: "stale", skipped_reason: "conversation_ended" });
+  expect(attempts[0]).toEqual({ status: "created", skipped_reason: "" });
 });
 
 test("EvenHubV2Runtime does not save very short partial_timeout fragments", async () => {

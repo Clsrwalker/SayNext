@@ -10,6 +10,15 @@ export type AudioTogglePlan = {
   offlineStatus: "pause_offline" | "resume_offline" | null;
 };
 
+export function planConversationStart(voiceInput: VoiceInput): Pick<AudioTogglePlan, "bridgeAudio"> {
+  return {
+    bridgeAudio: {
+      enabled: true,
+      source: voiceInput,
+    },
+  };
+}
+
 export function planPauseToggle(params: {
   isListening: boolean;
   wsOpen: boolean;

@@ -33,7 +33,7 @@ describe("buildGlassesPage", () => {
     expect(GLASS_TRANSCRIPT_LINE_CHARS).toBe(48);
   });
 
-  test("root idle shows an R1-selectable start conversation control", () => {
+  test("root idle shows one visible R1-selectable start button", () => {
     const page = buildGlassesPage({
       state: {
         view: "root_idle",
@@ -47,13 +47,14 @@ describe("buildGlassesPage", () => {
       transcript: [],
     });
 
-    const start = page.containers.find((container) => container.kind === "list" && container.name === "start-conversation");
-    expect(start?.kind).toBe("list");
-    if (start?.kind === "list") {
-      expect(start.items).toEqual(["Start conversation"]);
-      expect(start.selectedIndex).toBe(0);
+    const start = page.containers.find((container) => container.name === "start-conversation");
+    expect(start?.kind).toBe("text");
+    if (start?.kind === "text") {
+      expect(start.content).toBe("Start conversation");
+      expect(start.borderWidth).toBeGreaterThan(0);
       expect(start.eventCapture).toBe(true);
     }
+    expect(page.containers.filter((container) => container.eventCapture)).toHaveLength(1);
     expect(page.containers.some(
       (container) => container.kind === "text" && container.content.includes("from the phone"),
     )).toBe(false);
@@ -107,7 +108,7 @@ describe("buildGlassesPage", () => {
     }
   });
 
-  test("shows the short preview on main and the complete answer in cue detail", () => {
+  test("shows the same complete answer on main and in cue detail", () => {
     const cue = {
       ...TEST_CUES[0],
       preview: "A short answer preview.",
@@ -129,8 +130,9 @@ describe("buildGlassesPage", () => {
 
     const mainCue = main.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
     const detailCue = detail.containers.find((container) => container.kind === "text" && container.name === "ai-cue");
-    expect(mainCue?.kind === "text" ? mainCue.content : "").toBe("A short answer preview.");
-    expect(detailCue?.kind === "text" ? detailCue.content : "").toContain("implementation detail");
+    const completeAnswer = "A short answer preview. This second sentence contains the implementation detail needed to finish the answer.";
+    expect(mainCue?.kind === "text" ? mainCue.content : "").toBe(completeAnswer);
+    expect(detailCue?.kind === "text" ? detailCue.content : "").toBe(completeAnswer);
   });
 
   test("code cue keeps complete source, newlines, and indentation in the scrollable cue container", () => {
@@ -166,7 +168,8 @@ describe("buildGlassesPage", () => {
     expect(codeContainer?.kind).toBe("text");
     if (codeContainer?.kind === "text") {
       expect(codeContainer.eventCapture).toBe(true);
-      expect(codeContainer.content).toBe(code);
+      expect(codeContainer.content).toBe(`I use one pass through the array.\n\n${code}`);
+      expect(codeContainer.content).toContain("I use one pass through the array.");
       expect(codeContainer.content).toContain("\n  const value0");
       expect(codeContainer.content).toContain("\n\n  return nums.length;\n}");
       expect(codeContainer.content).not.toContain("...");
