@@ -6,6 +6,10 @@ export function glassPageStructureKey(page: GlassPageSpec): string {
   return JSON.stringify({
     view: page.view,
     containers: page.containers.map((container) => {
+      if (container.kind === "list") {
+        const { selectedIndex: _selectedIndex, ...renderedContainer } = container;
+        return renderedContainer;
+      }
       if (container.kind !== "text") return container;
       if (!TEXT_CONTENT_IGNORED_FOR_STRUCTURE.has(container.name)) return container;
       return {

@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEEPSENSE_INTERVIEW_GUIDE_ID = "deepsense-full-stack-ai-developer-2026";
-export const DEEPSENSE_INTERVIEW_GUIDE_VERSION = "2026-07-20-v1";
+export const DEEPSENSE_INTERVIEW_GUIDE_VERSION = "2026-07-23-live-v5";
 
 const GUIDE_PATH = join(dirname(fileURLToPath(import.meta.url)), "deepsense-interview-guide.md");
 
@@ -225,57 +225,28 @@ export function findDeepSenseInterviewCard(
   return best && best.score >= threshold ? best.card : null;
 }
 
-function exactCard(cards: InterviewAnswerCard[], question: string): InterviewAnswerCard | null {
-  const normalized = normalizeForMatch(question);
-  return cards.find((card) => normalizeForMatch(card.question) === normalized) || null;
-}
-
 export function buildDeepSenseInterviewSeed(
-  cards: InterviewAnswerCard[] = getDeepSenseInterviewCards(),
+  _cards: InterviewAnswerCard[] = getDeepSenseInterviewCards(),
 ): string {
-  const exemplarQuestions = [
-    "Tell me a little about yourself.",
-    "How would you design a chatbot that answers questions from our website?",
-    "Tell me about your SayNext or Hybrid Search Memory Assistant project.",
-    "Describe a difficult bug and how you found the root cause.",
-  ];
-  const examples = exemplarQuestions
-    .map((question) => exactCard(cards, question))
-    .filter((card): card is InterviewAnswerCard => Boolean(card?.exampleAnswer))
-    .map((card) => `Question: ${card.question}\nExample answer: ${card.exampleAnswer}`)
-    .join("\n\n");
-
-  return `Active interview: DeepSense Full-Stack AI Developer Co-op, Fall 2026.
-
-Role grounding:
-- The work covers public and internal chatbots, RAG, document matching and ranking, internal project tools, testing, monitoring, documentation, AWS, Python or JavaScript, REST APIs, and LLM integrations.
-- Professor Lu sent Xiang the role. Xiang was interested because the actual project resembles systems he already chose to build, not only because he needs a co-op.
-- Prefer CueFlow, SayNext, and AI Meeting Monitor for conversational AI. Prefer JobLens AI for document matching and another AWS example. ElderAlbum is a smaller serverless AWS example.
-- Do not claim production-scale users, senior experience, or hands-on mastery of LangChain, LlamaIndex, LangGraph, AutoGen, CrewAI, Pinecone, Chroma, or Weaviate unless an explicit personal fact confirms it.
-
-Answer modules:
+  return `Reusable interview answer rules:
 1. Personal/fit: current background -> recent work -> concrete connection to this role.
 2. Definition: plain explanation -> one example -> one limitation.
-3. System design: clarify users/data/permissions -> simplest end-to-end flow -> reliability and evaluation.
+3. System design and application: clarify the important constraint -> make a concrete decision -> show the request or data flow -> handle one important failure -> explain how to verify the result.
 4. Experience: actual problem -> Xiang's action -> result -> what changed afterward.
-5. RAG: ingest -> clean -> chunk -> index -> hybrid retrieve -> rerank -> grounded answer/citations -> evaluate.
-6. Reliability: validate structured output, abstain on weak evidence, log failures, test unanswerable cases, monitor real use.
-7. Agent safety: least privilege, allowlisted tools, validation, idempotency, confirmation for side effects, audit logs.
-8. Multi-service debugging: reproduce -> isolate boundary -> inspect contract/data shape -> fix -> regression test/observability.
-9. AWS: start with workload and trade-off, then name only services Xiang actually used in the selected project.
-10. Behavioral: use a real low-drama technical example; never invent a colleague, conflict, user, or production incident.
+5. Comparison: choose one option for the stated scenario -> explain the decisive trade-off -> say what evidence would change the choice.
+6. Debugging: reproduce -> inspect the failing boundary and evidence -> isolate the cause -> fix -> regression test.
+7. Behavioral: use a real low-drama technical example; never invent a colleague, conflict, user, or production incident.
 
-Style transfer rule:
-The examples below demonstrate content order, specificity, and natural spoken tone. Do not copy them when the current question is different. Vary wording so Xiang does not sound memorized.
-
-Representative answer examples:
-${examples}`.trim();
+Reference-answer rule:
+Reference answers are factual sources for matching questions, not scripts. Use facts from a reference answer only when the current question matches that answer's topic. When it matches, select only the facts, mechanisms, results, and limitations needed for the current question. Do not copy their opening, sentence order, transitions, or conclusion; answer the current ASR wording from scratch. Never add a project mechanism that is absent from all approved context. Never transfer a project detail, result, technology, or experience into an unrelated answer.
+`.trim();
 }
 
 export function formatInterviewAnswerCard(card: InterviewAnswerCard): string {
   return [
     `[interview-answer:${card.id}] Approved interview answer context | ${card.question} | ${card.section}`,
-    "This is not personal-memory evidence. It is approved answer direction and style; adapt it only to the current question.",
+    "This card contains approved answer direction and question-scoped facts. Use those facts only when the current question matches this card; never transfer them to another topic.",
+    "The current question controls answer depth. If it asks for application, implementation, an end-to-end flow, trade-offs, or evaluation, expand beyond a simpler reference answer and include a decision, execution path, failure response, and verification.",
     card.guidance ? `Answer guidance:\n${card.guidance}` : "",
     card.exampleAnswer ? `Natural example, adapt rather than copy:\n${card.exampleAnswer}` : "",
   ].filter(Boolean).join("\n");

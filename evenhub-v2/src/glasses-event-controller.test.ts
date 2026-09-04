@@ -37,6 +37,56 @@ describe("decideGlassEvent", () => {
     expect(decision.state.activeCueId).toBe(TEST_CUES[2].id);
   });
 
+  test("prefers a valid list index when the SDK name is stale after a new cue is prepended", () => {
+    const menuItems = [
+      { id: "cue-new", type: "cue" as const, cueId: "cue-new", label: "? New API answer" },
+      { id: "cue-code", type: "cue" as const, cueId: "cue-code", label: "<> TaskManager code" },
+      { id: "cue-old", type: "cue" as const, cueId: "cue-old", label: "? Previous answer" },
+    ];
+    const menuState = {
+      ...startLiveGlasses("cue-code"),
+      view: "menu" as const,
+      selectedIndex: 1,
+    };
+
+    const decision = decideGlassEvent({
+      state: menuState,
+      gesture: "click",
+      selection: {
+        index: 0,
+        name: "<> TaskManager code",
+      },
+      menuItems,
+    });
+
+    expect(decision.state.view).toBe("cue_detail");
+    expect(decision.state.activeCueId).toBe("cue-new");
+  });
+
+  test("uses a valid index even when the SDK name points at another cue", () => {
+    const menuItems = [
+      { id: "cue-code", type: "cue" as const, cueId: "cue-code", label: "<> TaskManager code" },
+      { id: "cue-answer", type: "cue" as const, cueId: "cue-answer", label: "? Explain TaskManager" },
+    ];
+    const menuState = {
+      ...startLiveGlasses("cue-code"),
+      view: "menu" as const,
+      selectedIndex: 0,
+    };
+
+    const decision = decideGlassEvent({
+      state: menuState,
+      gesture: "click",
+      selection: {
+        index: 1,
+        name: "<> TaskManager code",
+      },
+      menuItems,
+    });
+
+    expect(decision.state.activeCueId).toBe("cue-answer");
+  });
+
   test("suppresses the duplicate menu double click immediately after backing out of detail", () => {
     const menuState = { ...startLiveGlasses(TEST_CUES[0].id), view: "menu" as const, selectedIndex: 1 };
 

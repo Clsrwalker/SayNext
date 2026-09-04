@@ -29,13 +29,17 @@ export function shouldSuppressDuplicateMenuDoubleClick(params: {
 }
 
 export function resolveSelectedMenuIndex(menuItems: GlassMenuItem[], selection: GlassListSelection): number | null {
-  if (selection.name) {
-    const byName = menuItems.findIndex((item) => item.label === selection.name);
-    if (byName >= 0) return byName;
+  const byName = selection.name
+    ? menuItems.findIndex((item) => item.label === selection.name)
+    : -1;
+
+  if (selection.index !== null) {
+    const index = Math.trunc(selection.index);
+    if (index >= 0 && index < menuItems.length) {
+      return index;
+    }
   }
-  if (selection.index === null) return null;
-  const index = Math.trunc(selection.index);
-  if (index >= 0 && index < menuItems.length) return index;
+  if (byName >= 0) return byName;
   return null;
 }
 

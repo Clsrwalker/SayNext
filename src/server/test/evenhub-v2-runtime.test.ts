@@ -5,6 +5,7 @@ import type {
   AutoCueGeneratorInput,
   AutoCueSession,
 } from "../evenhub-v2/auto-cue-generator";
+import type { EvenHubSttCallbacks } from "../evenhub/stt";
 import type {
   CueOpportunityRouter,
   CueOpportunityRouterInput,
@@ -149,6 +150,18 @@ function validCue(overrides: Partial<AutoCueGenerationResult["data"]> = {}): Aut
   };
 }
 
+function noCue(reason = "incomplete question"): AutoCueGenerationResult {
+  return validCue({
+    category: "none",
+    title: "",
+    g2Title: "",
+    preview: "",
+    fullAnswer: "",
+    output: "",
+    reason,
+  });
+}
+
 const noMemoryContextAdapter: EvenHubV2ContextAdapter = {
   async build(input) {
     return {
@@ -196,6 +209,113 @@ async function start(runtime: EvenHubV2Runtime) {
     selectedPrenoteText: "Use batch norm notes if relevant.",
   }));
 }
+
+test("EvenHubV2Runtime ready state identifies the active conversation after reconnect", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const { runtime } = makeRuntime(new FakeAutoCueGenerator(noCue()), sent);
+
+  await start(runtime);
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+
+  const reconnectedMessages: EvenHubV2ServerMessage[] = [];
+  await runtime.detachClient();
+  runtime.attachClient((message) => reconnectedMessages.push(message));
+  runtime.handleOpen();
+
+  expect(reconnectedMessages).toContainEqual(expect.objectContaining({
+    type: "ready",
+    payload: expect.objectContaining({
+      conversationId,
+      conversationStatus: "active",
+      audioStatus: "stopped",
+    }),
+  }));
+});
+
+test("EvenHubV2Runtime ignores detach from a websocket that no longer owns the client", async () => {
+  const initialMessages: EvenHubV2ServerMessage[] = [];
+  const { runtime } = makeRuntime(new FakeAutoCueGenerator(noCue()), initialMessages);
+  const oldConnectionMessages: EvenHubV2ServerMessage[] = [];
+  const newConnectionMessages: EvenHubV2ServerMessage[] = [];
+
+  runtime.attachClient((message) => oldConnectionMessages.push(message), "connection-old");
+  runtime.attachClient((message) => newConnectionMessages.push(message), "connection-new");
+  expect(await runtime.detachClient("connection-old")).toBe(false);
+  runtime.handleOpen();
+
+  expect(oldConnectionMessages).toHaveLength(0);
+  expect(newConnectionMessages.some((message) => message.type === "ready")).toBe(true);
+});
+
+test("EvenHubV2Runtime treats reconnect audio_start as idempotent", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  let sttStartCount = 0;
+  const { runtime } = makeRuntime(
+    new FakeAutoCueGenerator(noCue()),
+    sent,
+    new EvenHubV2Store(":memory:"),
+    {
+      sttAdapterFactory: () => ({
+        start: async () => {
+          sttStartCount += 1;
+        },
+        pushAudio: () => undefined,
+        stop: async () => undefined,
+        close: () => undefined,
+      }),
+    },
+  );
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_start", {
+    audioSource: "glasses",
+  }));
+  runtime.attachClient((message) => sent.push(message), "connection-new");
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_start", {
+    audioSource: "glasses",
+  }));
+
+  expect(sttStartCount).toBe(1);
+  expect(runtime.snapshot.audioStatus).toBe("listening");
+});
+
+test("EvenHubV2Runtime passes the selected conversation language to STT", async () => {
+  const cases = [
+    ["english", "en"],
+    ["chinese", "zh"],
+    ["auto", null],
+  ] as const;
+
+  for (const [language, languageCode] of cases) {
+    const sent: EvenHubV2ServerMessage[] = [];
+    const starts: Array<{ languageCode?: string | null } | undefined> = [];
+    const { runtime } = makeRuntime(
+      new FakeAutoCueGenerator(noCue()),
+      sent,
+      new EvenHubV2Store(":memory:"),
+      {
+        sttAdapterFactory: () => ({
+          start: async (options?: { languageCode?: string | null }) => {
+            starts.push(options);
+          },
+          pushAudio: () => undefined,
+          stop: async () => undefined,
+          close: () => undefined,
+        }),
+      },
+    );
+
+    await runtime.handleClientMessage(createEvenHubV2ClientMessage("conversation_start", {
+      settings: { language },
+    }));
+    await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_start", {
+      audioSource: "glasses",
+    }));
+
+    expect(starts).toEqual([{ languageCode }]);
+  }
+});
 
 test("EvenHubV2Runtime creates a cue from final transcript through the auto pipeline", async () => {
   const sent: EvenHubV2ServerMessage[] = [];
@@ -318,7 +438,8 @@ test("EvenHubV2Runtime publishes and stores a structured code cue without flatte
     language: "typescript",
     code,
     output: code,
-    explanation: "I keep previously seen values in a map, so each complement lookup is constant time on average.",
+    fullAnswer: code,
+    explanation: "",
   });
   expect(store.listCues(conversationId)[0]).toMatchObject({ code, language: "typescript" });
 });
@@ -534,6 +655,310 @@ test("EvenHubV2Runtime does not let router no_cue block speculative generation",
   expect(generator.calls).toHaveLength(1);
   expect(generator.calls[0].router?.decision).toBe("no_cue");
   expect(sent.some((message) => message.type === "cue_created")).toBe(true);
+});
+
+test("EvenHubV2Runtime starts speculation from an AssemblyAI utterance without waiting for the partial watchdog", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(noCue());
+  let emitTranscript!: EvenHubSttCallbacks["onTranscript"];
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 60_000,
+    sttAdapterFactory: (callbacks) => {
+      emitTranscript = callbacks.onTranscript;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: () => undefined,
+        forceEndpoint: () => true,
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  await emitTranscript({
+    text: "Could you explain your most relevant project?",
+    utterance: "Could you explain your most relevant project?",
+    turnOrder: 4,
+    isFinal: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(generator.calls).toHaveLength(1);
+  expect(generator.calls[0].speculative).toBe(true);
+  expect(generator.calls[0].triggerWindow).toBe("Could you explain your most relevant project?");
+});
+
+test("EvenHubV2Runtime bounds speculative requests per provider turn and forces an endpoint when exhausted", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(noCue());
+  let emitTranscript!: EvenHubSttCallbacks["onTranscript"];
+  let forceEndpointCalls = 0;
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 60_000,
+    speculativeSoftBudget: 3,
+    speculativeHardBudget: 5,
+    sttAdapterFactory: (callbacks) => {
+      emitTranscript = callbacks.onTranscript;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: () => undefined,
+        forceEndpoint: () => {
+          forceEndpointCalls += 1;
+          return true;
+        },
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  for (let revision = 1; revision <= 6; revision += 1) {
+    const text = `Could you explain project detail ${revision}?`;
+    await emitTranscript({
+      text,
+      utterance: text,
+      turnOrder: 9,
+      isFinal: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  expect(generator.calls).toHaveLength(5);
+  expect(generator.calls.every((call) => call.speculative)).toBe(true);
+  expect(forceEndpointCalls).toBe(1);
+});
+
+test("EvenHubV2Runtime grants one utterance-only recovery attempt when a forced endpoint never finalizes", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(noCue());
+  let emitTranscript!: EvenHubSttCallbacks["onTranscript"];
+  let forceEndpointCalls = 0;
+  const { runtime, store } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 60_000,
+    speculativeSoftBudget: 3,
+    speculativeHardBudget: 5,
+    speculativeEndpointGraceMs: 5,
+    sttAdapterFactory: (callbacks) => {
+      emitTranscript = callbacks.onTranscript;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: () => undefined,
+        forceEndpoint: () => {
+          forceEndpointCalls += 1;
+          return true;
+        },
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  const conversationId = runtime.activeConversationId;
+  if (!conversationId) throw new Error("conversation id missing");
+  for (let revision = 1; revision <= 5; revision += 1) {
+    const text = `Explain the architecture detail ${revision}.`;
+    await emitTranscript({ text, utterance: text, turnOrder: 14, isFinal: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  expect(generator.calls).toHaveLength(5);
+  expect(forceEndpointCalls).toBe(1);
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const recoveryText = "Also explain how the retrieval path stays fast.";
+  await emitTranscript({
+    text: recoveryText,
+    utterance: recoveryText,
+    turnOrder: 14,
+    isFinal: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(generator.calls).toHaveLength(6);
+  expect(forceEndpointCalls).toBe(2);
+  expect(store.listTranscriptLines(conversationId)).toHaveLength(0);
+  const recoveryAttempt = store.getDb().query(
+    "SELECT trace_json FROM evenhub_v2_auto_cue_attempts WHERE conversation_id = ? AND input_window = ?",
+  ).get(conversationId, recoveryText) as { trace_json: string } | null;
+  expect(recoveryAttempt).not.toBeNull();
+  expect(JSON.parse(recoveryAttempt?.trace_json || "{}")).toMatchObject({
+    speculative: true,
+    speculativeTrigger: "utterance",
+    speculativeAttemptOrdinal: 6,
+    providerTurnOrder: 14,
+    speculativeRecoveryCount: 1,
+  });
+});
+
+test("EvenHubV2Runtime limits watchdog-only revisions to the soft speculative budget", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(noCue());
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 5,
+    partialCommitMinChars: 4,
+    partialCommitMinWords: 2,
+    speculativeSoftBudget: 3,
+    speculativeHardBudget: 5,
+  });
+
+  await start(runtime);
+  for (let revision = 1; revision <= 5; revision += 1) {
+    await runtime.handleClientMessage(createEvenHubV2ClientMessage("debug_transcript", {
+      text: `Could you explain the backend revision ${revision}`,
+      isFinal: false,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  expect(generator.calls).toHaveLength(3);
+});
+
+test("EvenHubV2Runtime resets the speculative budget when AssemblyAI advances turn_order", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const generator = new FakeAutoCueGenerator(noCue());
+  let emitTranscript!: EvenHubSttCallbacks["onTranscript"];
+  let forceEndpointCalls = 0;
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 60_000,
+    speculativeSoftBudget: 3,
+    speculativeHardBudget: 5,
+    speculativeEndpointGraceMs: 60_000,
+    sttAdapterFactory: (callbacks) => {
+      emitTranscript = callbacks.onTranscript;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: () => undefined,
+        forceEndpoint: () => {
+          forceEndpointCalls += 1;
+          return true;
+        },
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  for (let revision = 1; revision <= 5; revision += 1) {
+    const text = `First provider turn revision ${revision}.`;
+    await emitTranscript({ text, utterance: text, turnOrder: 30, isFinal: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  const nextTurn = "Now tell me about a different project.";
+  await emitTranscript({ text: nextTurn, utterance: nextTurn, turnOrder: 31, isFinal: false });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(generator.calls).toHaveLength(6);
+  expect(generator.calls.at(-1)?.triggerWindow).toBe(nextTurn);
+  expect(forceEndpointCalls).toBe(1);
+});
+
+test("EvenHubV2Runtime rearms a revised partial instead of immediately chaining a pending speculative request", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const calls: AutoCueGeneratorInput[] = [];
+  let resolveFirst!: (result: AutoCueGenerationResult) => void;
+  let emitTranscript!: EvenHubSttCallbacks["onTranscript"];
+  const generator: AutoCueGenerator = {
+    generate(input) {
+      calls.push(input);
+      if (calls.length === 1) {
+        return new Promise<AutoCueGenerationResult>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve(noCue());
+    },
+  };
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 20,
+    sttAdapterFactory: (callbacks) => {
+      emitTranscript = callbacks.onTranscript;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: () => undefined,
+        forceEndpoint: () => true,
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  await emitTranscript({
+    text: "Can you walk me through your",
+    utterance: "Can you walk me through your",
+    turnOrder: 12,
+    isFinal: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(calls).toHaveLength(1);
+
+  await emitTranscript({
+    text: "Can you walk me through your architecture?",
+    utterance: "Can you walk me through your architecture?",
+    turnOrder: 12,
+    isFinal: false,
+  });
+  resolveFirst(noCue());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(calls).toHaveLength(1);
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(calls).toHaveLength(2);
+  expect(calls[1].triggerWindow).toBe("Can you walk me through your architecture?");
+});
+
+test("EvenHubV2Runtime does not speculate while Xiang is reading the active cue", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const answer = "I built SayNext as a real-time assistant that turns live transcripts into useful response cues.";
+  const generator = new FakeAutoCueGenerator(validCue({
+    category: "response",
+    title: "SayNext",
+    g2Title: "SayNext",
+    fullAnswer: answer,
+    output: answer,
+  }));
+  let emitTranscript!: EvenHubSttCallbacks["onTranscript"];
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    partialCommitMs: 5,
+    sttAdapterFactory: (callbacks) => {
+      emitTranscript = callbacks.onTranscript;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: () => undefined,
+        forceEndpoint: () => true,
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  await emitTranscript({
+    text: "Tell me about SayNext.",
+    turnOrder: 20,
+    isFinal: true,
+  });
+  await runtime.flushCueBufferNow();
+  expect(generator.calls).toHaveLength(1);
+
+  await emitTranscript({
+    text: answer,
+    utterance: answer,
+    turnOrder: 21,
+    isFinal: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  expect(generator.calls).toHaveLength(1);
 });
 
 test("EvenHubV2Runtime fails open when the router is unavailable", async () => {
@@ -1115,6 +1540,93 @@ test("EvenHubV2Runtime queues audio chunks while STT is starting", async () => {
 
   resolveStart();
   await audioStart;
+});
+
+test("EvenHubV2Runtime keeps forwarding audio while AssemblyAI reconnects", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  const pushed: Uint8Array[] = [];
+  let callbacks!: EvenHubSttCallbacks;
+  const generator = new FakeAutoCueGenerator(validCue());
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    sttAdapterFactory: (value) => {
+      callbacks = value;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: (chunk) => pushed.push(chunk),
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_start", {
+    audioSource: "glasses",
+  }));
+  callbacks.onConnectionState?.({
+    provider: "assemblyai",
+    status: "reconnecting",
+    detail: "AssemblyAI connection interrupted.",
+    attempt: 1,
+    retryInMs: 250,
+    code: 1006,
+  });
+
+  expect(runtime.snapshot.audioStatus).toBe("reconnecting");
+  const statusCountBeforeBufferedAudio = sent.filter(
+    (message) => message.type === "audio_status",
+  ).length;
+  runtime.handleAudioChunk(new Uint8Array([7, 8, 9]));
+  runtime.handleAudioChunk(new Uint8Array([10, 11, 12]));
+  expect(pushed).toContainEqual(new Uint8Array([7, 8, 9]));
+  expect(pushed).toContainEqual(new Uint8Array([10, 11, 12]));
+  expect(sent.filter((message) => message.type === "audio_status")).toHaveLength(
+    statusCountBeforeBufferedAudio,
+  );
+
+  callbacks.onConnectionState?.({
+    provider: "assemblyai",
+    status: "connected",
+    detail: "AssemblyAI STT connected.",
+  });
+  expect(runtime.snapshot.audioStatus).toBe("listening");
+});
+
+test("EvenHubV2Runtime ignores a late STT reconnect after audio was stopped", async () => {
+  const sent: EvenHubV2ServerMessage[] = [];
+  let callbacks!: EvenHubSttCallbacks;
+  const generator = new FakeAutoCueGenerator(validCue());
+  const { runtime } = makeRuntime(generator, sent, new EvenHubV2Store(":memory:"), {
+    sttAdapterFactory: (value) => {
+      callbacks = value;
+      return {
+        provider: "assemblyai",
+        start: async () => undefined,
+        pushAudio: () => undefined,
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    },
+  });
+
+  await start(runtime);
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_start", {}));
+  callbacks.onConnectionState?.({
+    provider: "assemblyai",
+    status: "reconnecting",
+    detail: "AssemblyAI connection interrupted.",
+    attempt: 1,
+    retryInMs: 250,
+  });
+  await runtime.handleClientMessage(createEvenHubV2ClientMessage("audio_stop", {}));
+  callbacks.onConnectionState?.({
+    provider: "assemblyai",
+    status: "connected",
+    detail: "Late AssemblyAI connection.",
+  });
+
+  expect(runtime.snapshot.audioStatus).toBe("stopped");
 });
 
 test("EvenHubV2Runtime includes selected audio source in audio status", async () => {

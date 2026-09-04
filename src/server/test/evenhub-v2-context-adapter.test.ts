@@ -708,7 +708,8 @@ test("EvenHub v2 adds one matching interview answer card and caps dynamic cards 
   expect(snapshot.memoryUsedIds).toEqual(["personal-memory:32"]);
   expect(snapshot.contextSnapshot).not.toContain("Project SayNext");
   expect(snapshot.contextSnapshot).toContain("Approved interview answer context");
-  expect(snapshot.contextSnapshot).toContain("This is not personal-memory evidence");
+  expect(snapshot.contextSnapshot).toContain("approved answer direction and question-scoped facts");
+  expect(snapshot.contextSnapshot).toContain("never transfer them to another topic");
   expect(snapshot.contextSnapshot).toContain("Current question or request, this is the authoritative topic");
   expect(snapshot.contextSnapshot).toContain("The current question decides what to answer");
   expect(snapshot.contextSnapshot).toContain("approved interview context overrides retrieved memory");

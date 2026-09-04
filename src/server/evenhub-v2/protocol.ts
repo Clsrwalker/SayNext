@@ -7,6 +7,29 @@ export type AutoCueJobStatus = "queued" | "running" | "created" | "skipped" | "f
 export type AutoCueCategory = "response" | "concept" | "suggestion" | "person" | "code" | "none";
 export type EvenHubV2AudioSource = "glasses" | "phone";
 export type EvenHubV2ObservedAudioSource = EvenHubV2AudioSource | "unknown";
+export type EvenHubV2GlassDiagnosticPayload = {
+  phase?: "gesture" | "render";
+  operation?: string;
+  result?: string;
+  view?: string;
+  targetView?: string;
+  gesture?: string;
+  selectionIndex?: number;
+  selectionName?: string;
+  selectedCueId?: string;
+  activeCueId?: string;
+  renderSeq?: number;
+  diagnosticSeq?: number;
+  durationMs?: number;
+  textContainerCount?: number;
+  listItemCount?: number;
+  totalTextBytes?: number;
+  maxTextBytes?: number;
+  maxListItemBytes?: number;
+  containerName?: string;
+  contentBytes?: number;
+  error?: string;
+};
 
 export type EvenHubV2Settings = {
   language: "english" | "chinese" | "auto";
@@ -51,6 +74,7 @@ export type EvenHubV2ClientMessage =
       sourceCounts?: Partial<Record<EvenHubV2ObservedAudioSource, number>>;
       mismatchCount?: number;
     }>
+  | EvenHubV2Envelope<"glass_diagnostic", EvenHubV2GlassDiagnosticPayload>
   | EvenHubV2Envelope<"audio_stop", Record<string, never>>
   | EvenHubV2Envelope<"conversation_end", Record<string, never>>
   | EvenHubV2Envelope<"ack", { messageId: string }>
@@ -74,6 +98,7 @@ export type EvenHubV2CuePayload = {
 
 export type EvenHubV2ServerMessage =
   | EvenHubV2Envelope<"ready", {
+      conversationId: string | null;
       conversationStatus: ConversationStatus;
       audioStatus: AudioStatus;
       settings: EvenHubV2Settings;
@@ -197,6 +222,12 @@ function normalizeNonNegativeCount(value: unknown): number | undefined {
   return Math.trunc(value);
 }
 
+function normalizeBoundedString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/[\r\n\t]+/g, " ").trim();
+  return normalized ? normalized.slice(0, maxLength) : undefined;
+}
+
 function normalizeAudioSourceCounts(value: unknown): Partial<Record<EvenHubV2ObservedAudioSource, number>> | undefined {
   if (!isRecord(value)) return undefined;
   const next: Partial<Record<EvenHubV2ObservedAudioSource, number>> = {};
@@ -292,6 +323,42 @@ export function parseEvenHubV2ClientMessage(raw: string): ParseEvenHubV2Result {
           byteCount: normalizeNonNegativeCount(payload.byteCount),
           sourceCounts: normalizeAudioSourceCounts(payload.sourceCounts),
           mismatchCount: normalizeNonNegativeCount(payload.mismatchCount),
+        },
+      },
+    };
+  }
+
+  if (parsed.type === "glass_diagnostic") {
+    const phase = payload.phase === "gesture" || payload.phase === "render"
+      ? payload.phase
+      : undefined;
+    return {
+      ok: true,
+      message: {
+        ...base,
+        type: "glass_diagnostic",
+        payload: {
+          phase,
+          operation: normalizeBoundedString(payload.operation, 80),
+          result: normalizeBoundedString(payload.result, 80),
+          view: normalizeBoundedString(payload.view, 80),
+          targetView: normalizeBoundedString(payload.targetView, 80),
+          gesture: normalizeBoundedString(payload.gesture, 80),
+          selectionIndex: normalizeNonNegativeCount(payload.selectionIndex),
+          selectionName: normalizeBoundedString(payload.selectionName, 160),
+          selectedCueId: normalizeBoundedString(payload.selectedCueId, 160),
+          activeCueId: normalizeBoundedString(payload.activeCueId, 160),
+          renderSeq: normalizeNonNegativeCount(payload.renderSeq),
+          diagnosticSeq: normalizeNonNegativeCount(payload.diagnosticSeq),
+          durationMs: normalizeNonNegativeCount(payload.durationMs),
+          textContainerCount: normalizeNonNegativeCount(payload.textContainerCount),
+          listItemCount: normalizeNonNegativeCount(payload.listItemCount),
+          totalTextBytes: normalizeNonNegativeCount(payload.totalTextBytes),
+          maxTextBytes: normalizeNonNegativeCount(payload.maxTextBytes),
+          maxListItemBytes: normalizeNonNegativeCount(payload.maxListItemBytes),
+          containerName: normalizeBoundedString(payload.containerName, 160),
+          contentBytes: normalizeNonNegativeCount(payload.contentBytes),
+          error: normalizeBoundedString(payload.error, 240),
         },
       },
     };

@@ -81,7 +81,7 @@ function getOrCreateRuntime(ws: EvenHubV2WebSocket): EvenHubV2Runtime {
       clearTimeout(cached.cleanupTimer);
       cached.cleanupTimer = null;
     }
-    cached.runtime.attachClient((message) => sendJson(ws, message));
+    cached.runtime.attachClient((message) => sendJson(ws, message), ws.data.connId);
     return cached.runtime;
   }
 
@@ -90,6 +90,7 @@ function getOrCreateRuntime(ws: EvenHubV2WebSocket): EvenHubV2Runtime {
     clientSessionId: ws.data.clientSessionId,
     send: (message) => sendJson(ws, message),
   });
+  runtime.attachClient((message) => sendJson(ws, message), ws.data.connId);
   runtimeCache.set(key, { runtime, cleanupTimer: null });
   return runtime;
 }
@@ -181,7 +182,8 @@ export const evenHubV2WebSocket = {
   },
 
   close(ws: EvenHubV2WebSocket) {
-    void ws.data.runtime?.detachClient();
-    scheduleRuntimeCleanup(ws.data);
+    if (ws.data.runtime?.detachClient(ws.data.connId)) {
+      scheduleRuntimeCleanup(ws.data);
+    }
   },
 };

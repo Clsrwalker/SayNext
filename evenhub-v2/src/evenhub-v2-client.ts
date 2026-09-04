@@ -3,6 +3,13 @@ import type { AiCue, ConversationRecord, ConversationSettings, ConversationSumma
 
 const PROTOCOL_VERSION = "evenhub-v2.1";
 const DEFAULT_BACKEND_ORIGIN = "https://saynext.167.172.153.109.sslip.io";
+const CLIENT_SESSION_STORAGE_KEY = "saynext.evenhub-v2.client-session-id";
+let inMemoryClientSessionId: string | null = null;
+
+type SessionStorageLike = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+};
 
 type Envelope<TType extends string, TPayload = unknown> = {
   protocolVersion: typeof PROTOCOL_VERSION;
@@ -17,7 +24,12 @@ type Envelope<TType extends string, TPayload = unknown> = {
 };
 
 export type EvenHubV2ServerMessage =
-  | Envelope<"ready", { settings: ServerSettings }>
+  | Envelope<"ready", {
+      conversationId?: string | null;
+      conversationStatus?: "idle" | "active" | "ending" | "ended";
+      audioStatus?: "stopped" | "starting" | "listening" | "reconnecting" | "failed";
+      settings: ServerSettings;
+    }>
   | Envelope<"conversation_started", { conversationId: string }>
   | Envelope<"audio_status", { audioStatus: string; detail?: string; audioBytesReceived?: number; audioSource?: "glasses" | "phone" }>
   | Envelope<"transcript_partial", { text: string; offsetMs?: number }>
@@ -106,6 +118,30 @@ let clientSeq = 0;
 
 function makeId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function getOrCreateClientSessionId(storage?: SessionStorageLike | null): string {
+  if (storage === undefined) {
+    if (!inMemoryClientSessionId) inMemoryClientSessionId = makeId("evenhub_v2_client");
+    return inMemoryClientSessionId;
+  }
+
+  let target = storage;
+
+  try {
+    const current = target?.getItem(CLIENT_SESSION_STORAGE_KEY)?.trim();
+    if (current) return current;
+  } catch {
+    target = null;
+  }
+
+  const created = makeId("evenhub_v2_client");
+  try {
+    target?.setItem(CLIENT_SESSION_STORAGE_KEY, created);
+  } catch {
+    // A stable in-memory id still covers reconnects during this app lifetime.
+  }
+  return created;
 }
 
 function durationToServer(duration: CueDuration): ServerSettings["cueDurationMs"] {
@@ -203,10 +239,15 @@ export function createClientMessage<TType extends string>(
   };
 }
 
-export function wsUrl(): string {
-  const origin = backendOrigin();
+export function resolveWebSocketUrl(origin: string, sessionId?: string): string {
   const wsOrigin = origin.startsWith("https:") ? origin.replace(/^https:/, "wss:") : origin.replace(/^http:/, "ws:");
-  return `${wsOrigin}/api/evenhub/v2/ws`;
+  const url = new URL("/api/evenhub/v2/ws", wsOrigin);
+  if (sessionId) url.searchParams.set("sessionId", sessionId);
+  return url.toString();
+}
+
+export function wsUrl(sessionId?: string): string {
+  return resolveWebSocketUrl(backendOrigin(), sessionId);
 }
 
 export async function loadBootstrap(): Promise<{
@@ -315,17 +356,17 @@ export function recordFromConversationDetail(data: ConversationDetailResponse): 
     })),
     cueHistory: data.cues.map((cue): AiCue => {
       const output = cue.category === "code" ? cue.code || cue.output : cue.fullAnswer || cue.output;
+      const displayText = cue.category === "code" ? output : cue.fullAnswer || cue.output || cue.preview;
       return {
         id: cue.id,
         category: cue.category,
         title: cue.title,
         g2Title: cue.g2Title,
-        preview: cue.preview || cue.explanation || output,
-        fullAnswer: cue.fullAnswer || cue.explanation || output,
+        preview: cue.category === "code" ? output : cue.preview || displayText,
+        fullAnswer: displayText,
         output,
         language: cue.language,
         code: cue.code,
-        explanation: cue.explanation,
         createdAt: cue.createdAt,
         source: "auto",
       };
@@ -370,11 +411,51 @@ export async function savePrenoteDraft(note: Prenote): Promise<Prenote> {
   return data.prenote;
 }
 
-export function conversationStartPayload(settings: ConversationSettings, prenote: Prenote | null) {
+async function prenoteMutation(
+  id: string,
+  method: "PATCH" | "DELETE",
+  body?: Record<string, unknown>,
+): Promise<Prenote | null> {
+  const response = await fetch(apiUrl(`/api/evenhub/v2/prenotes/${encodeURIComponent(id)}`), {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!response.ok) throw new Error(`prenote ${method.toLowerCase()} failed: ${response.status}`);
+  if (method === "DELETE") return null;
+  const data = await response.json() as { prenote?: Prenote };
+  if (!data.prenote) throw new Error("prenote update failed: missing prenote");
+  return data.prenote;
+}
+
+export async function updatePrenote(note: Prenote): Promise<Prenote> {
+  const updated = await prenoteMutation(note.id, "PATCH", {
+    title: note.title,
+    text: note.text,
+    selected: note.selected,
+  });
+  if (!updated) throw new Error("prenote update failed: missing prenote");
+  return updated;
+}
+
+export async function setPrenoteSelected(id: string, selected: boolean): Promise<Prenote> {
+  const updated = await prenoteMutation(id, "PATCH", { selected });
+  if (!updated) throw new Error("prenote selection failed: missing prenote");
+  return updated;
+}
+
+export async function deletePrenote(id: string): Promise<void> {
+  await prenoteMutation(id, "DELETE");
+}
+
+export function conversationStartPayload(settings: ConversationSettings, prenotes: Prenote[]) {
+  const selected = prenotes.filter((prenote) => prenote.selected);
   return {
     settings: serverSettings(settings),
-    selectedPrenoteIds: prenote ? [prenote.id] : [],
-    selectedPrenoteText: prenote?.text || "",
+    selectedPrenoteIds: selected.map((prenote) => prenote.id),
+    selectedPrenoteText: selected
+      .map((prenote) => `# ${prenote.title}\n${prenote.text}`)
+      .join("\n\n---\n\n"),
   };
 }
 
@@ -388,12 +469,11 @@ export function cueFromServer(message: Extract<EvenHubV2ServerMessage, { type: "
     category: payload?.category || "concept",
     title: payload?.title || payload?.g2Title || "Cue",
     g2Title: payload?.g2Title,
-    preview: payload?.preview || payload?.explanation || output,
-    fullAnswer: payload?.fullAnswer || payload?.explanation || output,
+    preview: payload?.category === "code" ? output : payload?.preview || payload?.fullAnswer || payload?.output || "",
+    fullAnswer: payload?.category === "code" ? output : payload?.fullAnswer || payload?.output || payload?.preview || "",
     output,
     language: payload?.language,
     code: payload?.code,
-    explanation: payload?.explanation,
     createdAt: payload?.createdAt || new Date().toISOString(),
     source: "auto",
   };

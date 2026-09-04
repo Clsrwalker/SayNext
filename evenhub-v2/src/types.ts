@@ -18,7 +18,6 @@ export type AiCue = {
   output: string;
   language?: string;
   code?: string;
-  explanation?: string;
   createdAt: string;
   source: "manual" | "auto";
 };

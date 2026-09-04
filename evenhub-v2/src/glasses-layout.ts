@@ -1,5 +1,5 @@
 import { buildMenuItems, shouldShowAutoCue } from "./glasses-state";
-import { cueCodeText, cueExplanationText, cueFullText } from "./cue-display";
+import { cueCodeText, cueFullText } from "./cue-display";
 import type { AiCue, GlassContentFlag, GlassRuntimeState, Prenote, TranscriptLine } from "./types";
 
 export type GlassTextContainerSpec = {
@@ -16,6 +16,7 @@ export type GlassTextContainerSpec = {
   borderRadius?: number;
   padding?: number;
   eventCapture?: boolean;
+  deferContentUntilUpgrade?: boolean;
 };
 
 export type GlassListContainerSpec = {
@@ -149,19 +150,21 @@ export function buildGlassTranscriptContent(lines: TranscriptLine[]): string {
 function cueContent(cue: AiCue | undefined): string {
   if (!cue) return "";
   if (cue.category === "code") {
-    return [
-      cleanText(cueExplanationText(cue), 2400),
-      normalizeGlassCode(cueCodeText(cue)),
-    ].filter(Boolean).join("\n\n");
+    return normalizeGlassCode(cueCodeText(cue));
   }
   return cleanText(cueFullText(cue), 2400);
 }
 
-function cueBox(content: string, eventCapture = true): GlassTextContainerSpec {
+function cueBox(
+  content: string,
+  eventCapture = true,
+  deferContentUntilUpgrade = false,
+  identity: { id: number; name: string } = { id: CUE_ID, name: "ai-cue" },
+): GlassTextContainerSpec {
   return {
     kind: "text",
-    id: CUE_ID,
-    name: "ai-cue",
+    id: identity.id,
+    name: identity.name,
     x: 12,
     y: 34,
     width: 552,
@@ -172,7 +175,15 @@ function cueBox(content: string, eventCapture = true): GlassTextContainerSpec {
     borderRadius: 0,
     padding: 8,
     eventCapture,
+    deferContentUntilUpgrade,
   };
+}
+
+function codeDetailContainerName(cueId: string): string {
+  const suffix = cueId
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
+    .slice(-20);
+  return `code-detail-${suffix || "unknown"}`;
 }
 
 function transcriptBox(
@@ -311,11 +322,22 @@ export function buildGlassesPage(params: {
   }
 
   if (params.state.view === "cue_detail") {
+    const isCodeDetail = showAiCue && activeCue?.category === "code";
     return {
       view: params.state.view,
       containers: [
         ...headerContainers(now),
-        cueBox(showAiCue ? cueContent(activeCue) || "No cue selected." : "", true),
+        cueBox(
+          showAiCue ? cueContent(activeCue) || "No cue selected." : "",
+          true,
+          isCodeDetail,
+          isCodeDetail
+            ? {
+                id: DETAIL_ID,
+                name: codeDetailContainerName(activeCue.id),
+              }
+            : undefined,
+        ),
         ...(showTranscript ? [transcriptBox(transcript, false)] : []),
       ],
     };

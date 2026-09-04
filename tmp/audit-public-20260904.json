@@ -1,0 +1,53 @@
+﻿{
+    "auditDate":  "2026-09-04",
+    "origin":  "https://saynext.167.172.153.109.sslip.io",
+    "authentication":  "No cookie, no authorization header, no relay token",
+    "requestOrigin":  "https://audit-untrusted.example",
+    "health":  {
+                   "status":  200,
+                   "contentType":  "application/json",
+                   "fields":  [
+                                  "status",
+                                  "app",
+                                  "runtimeMode",
+                                  "llmProvider",
+                                  "sessionMemoryProvider",
+                                  "sessionMemoryBatchEnabled",
+                                  "timestamp"
+                              ],
+                   "providerValuesRecorded":  false,
+                   "note":  "Provider field names were inspected; values were not recorded in the original safe output."
+               },
+    "bootstrap":  {
+                      "status":  200,
+                      "contentType":  "application/json",
+                      "corsOrigin":  "*",
+                      "fields":  [
+                                     "userId",
+                                     "settings",
+                                     "settingsSource",
+                                     "settingsUpdatedAt",
+                                     "prenotes",
+                                     "conversations"
+                                 ],
+                      "conversationCount":  20,
+                      "prenoteCount":  0,
+                      "containsPrenoteText":  false,
+                      "containsUsedPrenoteText":  true,
+                      "conversationStatusCounts":  {
+                                                       "ended":  20
+                                                   },
+                      "zeroOrNullDurationCount":  0,
+                      "summaryStatusCounts":  {
+                                                  "ready":  17,
+                                                  "failed":  3
+                                              }
+                  },
+    "websocketHttpProbe":  {
+                               "method":  "GET",
+                               "upgradeRequested":  false,
+                               "status":  400,
+                               "websocketEstablished":  false
+                           },
+    "privacy":  "No private conversation content, identifiers, preparation text, tokens, or credentials recorded."
+}

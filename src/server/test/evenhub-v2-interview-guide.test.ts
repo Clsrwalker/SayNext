@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   buildDeepSenseInterviewSeed,
   findDeepSenseInterviewCard,
+  formatInterviewAnswerCard,
   loadDeepSenseInterviewGuide,
   parseDeepSenseInterviewGuide,
 } from "../evenhub-v2/interview-guide";
@@ -87,16 +88,39 @@ test("DeepSense guide maps noisy debugging and company-fit questions to their ow
   expect(companyFit?.question).toBe("Why do you want to work with DeepSense?");
 });
 
-test("DeepSense session seed keeps role grounding and representative examples without embedding all cards", () => {
+test("per-turn interview cards cannot reduce depth explicitly requested by the current question", () => {
+  const cards = parseDeepSenseInterviewGuide(loadDeepSenseInterviewGuide());
+  const card = cards.find((candidate) => (
+    candidate.question === "How would you design a chatbot that answers questions from our website?"
+  ));
+
+  expect(card).toBeDefined();
+  const formatted = formatInterviewAnswerCard(card!);
+  expect(formatted).toContain("The current question controls answer depth");
+  expect(formatted).toContain("expand beyond a simpler reference answer");
+  expect(formatted).toContain("decision, execution path, failure response, and verification");
+});
+
+test("fixed interview seed contains reusable rules but no DeepSense facts or answer examples", () => {
   const cards = parseDeepSenseInterviewGuide(loadDeepSenseInterviewGuide());
   const seed = buildDeepSenseInterviewSeed(cards);
 
-  expect(seed).toContain("DeepSense Full-Stack AI Developer Co-op");
-  expect(seed).toContain("Professor Lu");
-  expect(seed).toContain("CueFlow");
-  expect(seed).toContain("SayNext");
-  expect(seed).toContain("Representative answer examples");
-  expect(seed).toContain("Tell me a little about yourself");
-  expect(seed.length).toBeLessThan(16_000);
-  expect(seed.length).toBeGreaterThan(2_000);
+  expect(seed).toContain("Reusable interview answer rules:");
+  expect(seed).toContain("System design and application");
+  expect(seed).toContain("make a concrete decision");
+  expect(seed).toContain("how to verify");
+  expect(seed).toContain("Use facts from a reference answer only when the current question matches that answer's topic");
+  expect(seed).toContain("Reference answers are factual sources for matching questions, not scripts");
+  expect(seed).toContain("Do not copy their opening, sentence order, transitions, or conclusion");
+  expect(seed).toContain("answer the current ASR wording from scratch");
+  expect(seed).not.toContain("DeepSense");
+  expect(seed).not.toContain("Professor Lu");
+  expect(seed).not.toContain("CueFlow");
+  expect(seed).not.toContain("SayNext");
+  expect(seed).not.toContain("Hybrid Search Memory Assistant");
+  expect(seed).not.toContain("Representative answer examples");
+  expect(seed).not.toContain("Question:");
+  expect(seed).not.toContain("Example answer:");
+  expect(seed.length).toBeLessThan(4_000);
+  expect(seed.length).toBeGreaterThan(500);
 });

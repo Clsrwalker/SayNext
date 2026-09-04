@@ -29,6 +29,40 @@ const LONG_TRANSCRIPT: TranscriptLine[] = [
 ];
 
 describe("buildGlassesPage", () => {
+  test("isolates each code detail upgrade from the main cue and other code cues", () => {
+    const firstCode = {
+      ...TEST_CUES[0],
+      id: "cue-code-first",
+      category: "code" as const,
+      output: "def first():\n  return 1",
+      code: "def first():\n  return 1",
+    };
+    const secondCode = {
+      ...firstCode,
+      id: "cue-code-second",
+      output: "def second():\n  return 2",
+      code: "def second():\n  return 2",
+    };
+    const detailContainer = (cue: typeof firstCode) => {
+      const page = buildGlassesPage({
+        state: { ...startLiveGlasses(cue.id), view: "cue_detail" },
+        cues: [cue],
+        prenote: null,
+        transcript: TEST_TRANSCRIPT,
+      });
+      return page.containers.find(
+        (container) => container.kind === "text" && container.deferContentUntilUpgrade,
+      );
+    };
+
+    const first = detailContainer(firstCode);
+    const second = detailContainer(secondCode);
+
+    expect(first?.kind).toBe("text");
+    expect(first?.name).not.toBe("ai-cue");
+    expect(first?.name).not.toBe(second?.name);
+  });
+
   test("uses a wider subtitle line budget", () => {
     expect(GLASS_TRANSCRIPT_LINE_CHARS).toBe(48);
   });
@@ -135,7 +169,7 @@ describe("buildGlassesPage", () => {
     expect(detailCue?.kind === "text" ? detailCue.content : "").toBe(completeAnswer);
   });
 
-  test("code cue keeps complete source, newlines, and indentation in the scrollable cue container", () => {
+  test("code cue keeps only complete source, newlines, and indentation in the scrollable cue container", () => {
     const middle = Array.from(
       { length: 20 },
       (_, index) => `  const value${index} = nums[${index % 3}];`,
@@ -151,7 +185,6 @@ describe("buildGlassesPage", () => {
       output: code,
       language: "typescript",
       code,
-      explanation: "I use one pass through the array.",
       createdAt: "2026-07-21T10:00:00.000Z",
       source: "auto" as const,
     };
@@ -168,8 +201,8 @@ describe("buildGlassesPage", () => {
     expect(codeContainer?.kind).toBe("text");
     if (codeContainer?.kind === "text") {
       expect(codeContainer.eventCapture).toBe(true);
-      expect(codeContainer.content).toBe(`I use one pass through the array.\n\n${code}`);
-      expect(codeContainer.content).toContain("I use one pass through the array.");
+      expect(codeContainer.content).toBe(code);
+      expect(codeContainer.content).not.toContain("I use one pass through the array.");
       expect(codeContainer.content).toContain("\n  const value0");
       expect(codeContainer.content).toContain("\n\n  return nums.length;\n}");
       expect(codeContainer.content).not.toContain("...");

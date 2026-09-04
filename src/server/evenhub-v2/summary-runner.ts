@@ -32,7 +32,7 @@ function transcriptText(lines: EvenHubV2TranscriptLineRecord[]): string {
 
 function cueHistoryText(cues: EvenHubV2CueRecord[]): string {
   return cues
-    .map((cue) => `[${cue.category}] ${cue.title}: ${cue.category === "code" ? cue.explanation || "Code solution shown." : cue.output}`)
+    .map((cue) => `[${cue.category}] ${cue.title}: ${cue.category === "code" ? "Code solution shown." : cue.output}`)
     .join("\n");
 }
 

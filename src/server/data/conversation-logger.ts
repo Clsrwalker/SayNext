@@ -435,6 +435,12 @@ export interface UpdatePrenoteMemoryInput {
   runtimeContext?: string;
 }
 
+export interface UpdateManualPrenoteInput {
+  title?: string;
+  text?: string;
+  selected?: boolean;
+}
+
 export interface CreatePrenoteFileInput {
   prenoteId: number;
   fileName: string;
@@ -7105,6 +7111,59 @@ class ConversationLogger {
         id,
         userId,
       );
+
+    return this.getPrenote(id);
+  }
+
+  updateManualPrenote(userId: string, id: number, input: UpdateManualPrenoteInput): PrenoteRecord | null {
+    if (!this.isEnabled()) return null;
+
+    const existing = this.getPrenote(id);
+    if (!existing || existing.userId !== userId) return null;
+
+    const hasTextUpdate = typeof input.text === "string";
+    const hasTitleUpdate = typeof input.title === "string";
+    const hasSelectionUpdate = typeof input.selected === "boolean";
+    if (!hasTextUpdate && !hasTitleUpdate && !hasSelectionUpdate) return existing;
+
+    const db = this.getDb();
+    const update = db.transaction(() => {
+      if (hasTextUpdate) {
+        const text = input.text!.trim();
+        const title = hasTitleUpdate && input.title!.trim() ? input.title!.trim() : existing.title;
+        db.query(`
+          UPDATE prenotes
+          SET
+            title = ?,
+            source_text = ?,
+            extracted_text = '',
+            processed_json = '{}',
+            runtime_context = ?,
+            status = 'ready',
+            model = 'manual',
+            content_hash = '',
+            error = '',
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ?
+        `).run(title, text, text, id, userId);
+        this.deletePrenoteChunks(id);
+      } else if (hasTitleUpdate) {
+        db.query(`
+          UPDATE prenotes
+          SET title = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ?
+        `).run(input.title!.trim(), id, userId);
+      }
+
+      if (hasSelectionUpdate) {
+        db.query(`
+          UPDATE prenotes
+          SET is_active = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ?
+        `).run(input.selected ? 1 : 0, id, userId);
+      }
+    });
+    update();
 
     return this.getPrenote(id);
   }

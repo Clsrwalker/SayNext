@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { cueCodeText, cueExplanationText, cueFullText } from "./cue-display";
+import { cueCodeText, cueFullText } from "./cue-display";
 import type { AiCue } from "./types";
 
 function makeCue(overrides: Partial<AiCue> = {}): AiCue {
@@ -21,20 +21,16 @@ describe("cue display content", () => {
     expect(cueFullText(makeCue())).toBe("This is the complete answer with the useful detail.");
   });
 
-  test("combines the method explanation and complete code", () => {
+  test("keeps code detail code-only even when a legacy explanation exists", () => {
     const cue = makeCue({
       category: "code",
-      explanation: "I use a map so each lookup is constant time on average.",
       fullAnswer: "I use a map so each lookup is constant time on average.",
       code: "function twoSum(nums: number[]) {\r\n  return nums;\r\n}",
       output: "function twoSum(nums: number[]) {\r\n  return nums;\r\n}",
     });
 
-    expect(cueExplanationText(cue)).toContain("I use a map");
     expect(cueCodeText(cue)).toBe("function twoSum(nums: number[]) {\n  return nums;\n}");
-    expect(cueFullText(cue)).toBe(
-      "I use a map so each lookup is constant time on average.\n\nfunction twoSum(nums: number[]) {\n  return nums;\n}",
-    );
+    expect(cueFullText(cue)).toBe("function twoSum(nums: number[]) {\n  return nums;\n}");
   });
 
   test("uses legacy preview only when no complete answer exists", () => {

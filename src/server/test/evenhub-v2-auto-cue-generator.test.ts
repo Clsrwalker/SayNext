@@ -3,6 +3,7 @@ import {
   buildAutoCuePrompt,
   buildAutoCueSessionSeed,
   buildAutoCueTurnPrompt,
+  AUTO_CUE_PROMPT_CACHE_KEY,
   normalizeAutoCueOutput,
   OpenAiAutoCueGenerator,
   shouldDisplayAutoCue,
@@ -92,7 +93,9 @@ test("normalizeAutoCueOutput preserves complete structured code without flatteni
   expect(cue.code.length).toBeGreaterThan(2400);
   expect(cue.code).not.toContain("...");
   expect(cue.output).toBe(cue.code);
-  expect(cue.fullAnswer).toBe("I use a small function and return the collected values.");
+  expect(cue.fullAnswer).toBe(cue.code);
+  expect(cue.preview).toBe(cue.code);
+  expect(cue.explanation).toBe("");
 });
 
 test("auto cue prompt defines a complete readable code response contract", () => {
@@ -115,6 +118,10 @@ test("auto cue prompt defines a complete readable code response contract", () =>
   expect(prompt).toContain("nums, i, seen, need, or curr");
   expect(prompt).toContain("put each parameter on its own line");
   expect(prompt).toContain("Do not add demo calls, console output, or sample data");
+  expect(prompt).toContain("explanation must always be empty");
+  expect(prompt).not.toContain("specific spoken walkthrough");
+  expect(prompt).not.toContain("separate linked entries");
+  expect(prompt).not.toContain("Explain this specific code");
 });
 
 test("auto cue prompt treats retrieved memory as grounding without inventing experience", () => {
@@ -131,7 +138,9 @@ test("auto cue prompt treats retrieved memory as grounding without inventing exp
   expect(prompt).toContain("Current question or request is authoritative");
   expect(prompt).not.toContain('"preview"');
   expect(prompt).toContain('"fullAnswer"');
-  expect(prompt).toContain("one complete answer used everywhere");
+  expect(prompt).toContain("single answer shown everywhere");
+  expect(prompt).toContain("Complete means the current question is answered");
+  expect(prompt).not.toContain("one complete answer used everywhere");
   expect(prompt).toContain("[personal-memory:36] JobLens uses Lambda and DynamoDB");
 });
 
@@ -146,14 +155,98 @@ test("auto cue prompt asks for a natural spoken answer instead of a memory summa
 
   expect(prompt).toContain("Sound like Xiang answering live, not reading a prepared script");
   expect(prompt).toContain("Do not summarize every retrieved fact");
-  expect(prompt).toContain("simple, casual, modest English");
-  expect(prompt).toContain("Avoid corporate openings such as");
+  expect(prompt).toContain("plain, casual, modest English");
+  expect(prompt).toContain("Avoid polished corporate phrasing such as");
   expect(prompt).toContain("require an explicit retrieved personal memory fact");
   expect(prompt).toContain("separate what Xiang actually built");
   expect(prompt).toContain("Do not infer that transcript chunking");
   expect(prompt).toContain("connect one or two real Xiang projects");
   expect(prompt).toContain("State limitations directly");
   expect(prompt).not.toContain("about 30-55 words");
+});
+
+test("auto cue prompt keeps spoken rhythm while requiring applied depth for practical questions", () => {
+  const prompt = buildAutoCuePrompt({
+    triggerWindow: "How would you design the retrieval flow?",
+    recentTranscript: "Interviewer: Keep the explanation practical.",
+    contextSnapshot: "No personal memory is needed.",
+    settings: defaultEvenHubV2Settings(),
+    router: null,
+  });
+
+  expect(prompt).toContain("For interview, personal, project, or behavioral questions, write in first person");
+  expect(prompt).toContain("Never refer to Xiang by name or in the third person inside fullAnswer");
+  expect(prompt).toContain("For general technical questions, first person is fine for Xiang's proposed approach or decision");
+  expect(prompt).toContain("Natural spoken English should come from rhythm and word choice, not broken grammar");
+  expect(prompt).toContain("Do not automatically begin with a filler phrase");
+  expect(prompt).toContain("not the most comprehensive answer that could be written about the topic");
+  expect(prompt).toContain("For simple or focused questions, use progressive disclosure");
+  expect(prompt).toContain("Do not apply that one-or-two-detail limit");
+  expect(prompt).toContain("prefer vertical depth over a flat survey");
+  expect(prompt).toContain("make a concrete decision or working assumption");
+  expect(prompt).toContain("show how the request, data, or control moves through the solution");
+  expect(prompt).toContain("one important failure case or trade-off");
+  expect(prompt).toContain("how to test or measure whether it works");
+  expect(prompt).toContain("only definitions, product summaries, component names, or a list of metrics");
+  expect(prompt).toContain("explain what decision or failure that metric reveals");
+  expect(prompt).toContain("choose one for the stated scenario");
+  expect(prompt).toContain("Prefer concrete actions over abstract capability language");
+  expect(prompt).toContain("Keep one main idea per sentence when practical");
+  expect(prompt).toContain("natural shorthand such as 'that part'");
+  expect(prompt).toContain("Do not force every answer into the same structure");
+  expect(prompt).toContain("Do not automatically end with a lesson");
+  expect(prompt).toContain("Leave reasonable follow-up details for the interviewer to ask");
+  expect(prompt).toContain("Definition or focused technical question: 40-90 words");
+  expect(prompt).toContain("A detail can be true and useful but still be unnecessary for this turn");
+  expect(prompt).toContain("choose fewer ideas before writing");
+  expect(prompt).not.toContain("Do not remove useful detail just to stay short");
+  expect(prompt).toContain("one main point that answers the question");
+  expect(prompt).toContain("Most retrieved facts should remain unspoken");
+  expect(prompt).toContain("easy to follow on the glasses");
+  expect(prompt).not.toContain("direct answer -> reason or mechanism -> one concrete detail or result -> stop");
+  expect(prompt).not.toContain("Use the shortest answer that fully answers the question");
+  expect(prompt).toContain("fullAnswer contains only the words Xiang can say");
+  expect(prompt).toContain("matching approved interview answer card for question-scoped facts");
+  expect(prompt).toContain("Use facts from a reference answer only when the current question matches that answer's topic");
+  expect(prompt).toContain("Reference answers are factual sources for matching questions, not scripts");
+  expect(prompt).toContain("Do not copy their opening, sentence order, transitions, or conclusion");
+  expect(prompt).toContain("answer the current ASR wording from scratch");
+  expect(prompt).toContain("Before returning, do one spoken pass");
+  expect(prompt).toContain("longer than about 22 spoken words");
+  expect(prompt).toContain("remove a closing lesson or role-fit summary");
+  expect(prompt).not.toContain("demonstrate speaking style and content order");
+  expect(prompt).not.toContain("Preserve its approved facts, mechanism order");
+  expect(prompt).not.toContain("fixed examples for Xiang's facts");
+
+  expect(prompt).toContain("Return exactly one JSON object");
+  expect(prompt).toContain('"category": "response|concept|suggestion|person|code|none"');
+  expect(prompt).toContain("General technical knowledge is not evidence that Xiang used it");
+  expect(prompt).toContain("For a code cue, language names the programming language");
+});
+
+test("fixed auto cue seed contains rules only, without DeepSense facts or few-shot answers", () => {
+  const seed = buildAutoCueSessionSeed();
+
+  expect(seed).toContain("Reusable interview answer rules:");
+  expect(seed).not.toContain("DeepSense");
+  expect(seed).not.toContain("Professor Lu");
+  expect(seed).not.toContain("Dalhousie");
+  expect(seed).not.toContain("Acadia");
+  expect(seed).not.toContain("CueFlow");
+  expect(seed).not.toContain("JobLens");
+  expect(seed).not.toContain("ElderAlbum");
+  expect(seed).not.toContain("AI Meeting Monitor");
+  expect(seed).not.toContain("SayNext Context Router");
+  expect(seed).not.toContain("Fall 2026");
+  expect(seed).not.toContain("Representative answer examples");
+  expect(seed).not.toContain("Spoken tone examples");
+  expect(seed).not.toContain("Question:");
+  expect(seed).not.toContain("Example answer:");
+});
+
+test("auto cue prompt cache key stays within the OpenAI limit", () => {
+  expect(AUTO_CUE_PROMPT_CACHE_KEY.length).toBeLessThanOrEqual(64);
+  expect(AUTO_CUE_PROMPT_CACHE_KEY).toContain("v7");
 });
 
 test("auto cue prompt gives a role-grounded structure for interview introductions", () => {
@@ -196,8 +289,9 @@ test("auto cue keeps selected prenote in the fixed session seed only", () => {
   const turn = buildAutoCueTurnPrompt(input);
   const stateless = buildAutoCuePrompt(input);
 
-  expect(seed).toContain("DeepSense Full-Stack AI Developer Co-op");
-  expect(seed).toContain("Representative answer examples");
+  expect(seed).not.toContain("DeepSense Full-Stack AI Developer Co-op");
+  expect(seed).not.toContain("Representative answer examples");
+  expect(seed).toContain("Reusable interview answer rules:");
   expect(seed).toContain("Return exactly one JSON object");
   expect(seed).toContain("Selected prenote for this conversation");
   expect(seed).toContain(selectedPrenote);
@@ -266,7 +360,9 @@ test("OpenAI auto cue uses the conversation for canonical finals and stateless c
   await generator.generate({ ...input, session, speculative: true });
 
   expect(conversationCalls[0].type).toBe("create");
-  expect(String(conversationCalls[0].seed)).toContain("DeepSense Full-Stack AI Developer Co-op");
+  expect(String(conversationCalls[0].seed)).toContain("Reusable interview answer rules:");
+  expect(String(conversationCalls[0].seed)).not.toContain("DeepSense Full-Stack AI Developer Co-op");
+  expect(String(conversationCalls[0].seed)).not.toContain("Professor Lu");
   expect(String(conversationCalls[0].seed)).toContain("Prepared DeepSense interview context.");
   expect(jsonCalls[0].conversationId).toBe("conv_openai_1");
   expect(jsonCalls[0].prompt).toBe(buildAutoCueTurnPrompt(input));
@@ -329,12 +425,11 @@ test("OpenAI auto cue falls back to stateless generation when a conversation req
   expect(result.lane).toBe("stateless_fallback");
 });
 
-test("OpenAI auto cue uses Luna low without temperature and falls back to GPT-5.4 mini", async () => {
+test("OpenAI auto cue uses Luna low without priority processing and keeps fallback standard", async () => {
   const jsonCalls: Array<Record<string, unknown>> = [];
   const generator = new OpenAiAutoCueGenerator({
     model: "gpt-5.6-luna",
     fallbackModel: "gpt-5.4-mini",
-    reasoningEffort: "low",
     conversationClient: {
       async createSession() { return { id: "conv_openai_1" }; },
       async commitCanonicalTurn() {},
@@ -380,9 +475,11 @@ test("OpenAI auto cue uses Luna low without temperature and falls back to GPT-5.
   expect(jsonCalls).toHaveLength(2);
   expect(jsonCalls[0].model).toBe("gpt-5.6-luna");
   expect(jsonCalls[0].reasoningEffort).toBe("low");
+  expect(jsonCalls[0].serviceTier).toBeUndefined();
   expect(jsonCalls[0].temperature).toBeNull();
   expect(jsonCalls[0].conversationId).toBe("conv_openai_1");
   expect(jsonCalls[1].model).toBe("gpt-5.4-mini");
+  expect(jsonCalls[1].serviceTier).toBeUndefined();
   expect(jsonCalls[1].conversationId).toBeUndefined();
   expect(jsonCalls[1].prompt).toContain("You are SayNext's automatic cue writer");
   expect(result.model).toBe("gpt-5.4-mini");

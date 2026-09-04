@@ -32,10 +32,12 @@ import { createPersonalMemory, deletePersonalMemory, listPersonalMemories, searc
 import { replaySayNextApi } from "../api/debug-saynext-replay";
 import {
   createEvenHubV2Prenote,
+  deleteEvenHubV2Prenote,
   deleteEvenHubV2Conversation,
   getEvenHubV2Bootstrap,
   getEvenHubV2Conversation,
   listEvenHubV2Conversations,
+  updateEvenHubV2Prenote,
   updateEvenHubV2Settings,
 } from "../api/evenhub-v2";
 import {
@@ -127,6 +129,8 @@ api.post("/debug/saynext-replay", replaySayNextApi);
 api.get("/evenhub/v2/bootstrap", getEvenHubV2Bootstrap);
 api.patch("/evenhub/v2/settings", updateEvenHubV2Settings);
 api.post("/evenhub/v2/prenotes", createEvenHubV2Prenote);
+api.patch("/evenhub/v2/prenotes/:id", updateEvenHubV2Prenote);
+api.delete("/evenhub/v2/prenotes/:id", deleteEvenHubV2Prenote);
 api.get("/evenhub/v2/conversations", listEvenHubV2Conversations);
 api.get("/evenhub/v2/conversations/:id", getEvenHubV2Conversation);
 api.delete("/evenhub/v2/conversations/:id", deleteEvenHubV2Conversation);

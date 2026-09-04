@@ -12,7 +12,6 @@ import {
   Settings2,
   Square,
   Trash2,
-  Upload,
   UserRound,
   X,
 } from "lucide-react";
@@ -22,17 +21,27 @@ import {
   createClientMessage,
   cueFromServer,
   deleteConversationRecord,
+  deletePrenote,
+  getOrCreateClientSessionId,
   loadBootstrap,
   loadConversationDetail,
   partialTranscriptFromServer,
   savePrenoteDraft,
   saveServerSettings,
+  setPrenoteSelected,
   transcriptFromServer,
+  updatePrenote,
   wsUrl,
   type EvenHubV2ServerMessage,
 } from "./evenhub-v2-client";
+import {
+  planReadyRecovery,
+  restartAudioControlOnce,
+  shouldRearmForegroundAudio,
+  shouldRestartStalledForegroundAudio,
+} from "./connection-recovery";
 import { planConversationStart, planPauseToggle } from "./conversation-audio";
-import { cueCodeText, cueExplanationText, cueFullText } from "./cue-display";
+import { cueCodeText, cueFullText } from "./cue-display";
 import { CUE_CATEGORY_ORDER, groupCuesByCategory } from "./cue-groups";
 import { normalizeGlassGesture, readGlassListSelection, type GlassListSelection } from "./events";
 import {
@@ -40,7 +49,7 @@ import {
   decideGlassEvent,
   shouldSuppressDuplicateMenuDoubleClick,
 } from "./glasses-event-controller";
-import { connectGlassBridge, type GlassBridgeHandle } from "./glasses-bridge";
+import { connectGlassBridge, type GlassBridgeDiagnostic, type GlassBridgeHandle } from "./glasses-bridge";
 import { updateGlassContentSetting } from "./glass-content-settings";
 import { buildGlassesPage } from "./glasses-layout";
 import { createGlassRenderer, type GlassRendererHandle } from "./glasses-renderer";
@@ -59,7 +68,6 @@ import type {
   GlassGesture,
   GlassRuntimeState,
   Prenote,
-  PrenoteFile,
   TranscriptLine,
   VoiceInput,
 } from "./types";
@@ -77,11 +85,11 @@ const DEFAULT_SETTINGS: ConversationSettings = {
 
 type Screen = "home" | "settings" | "noteEditor" | "live" | "history" | "conversationSettings";
 
-const MAX_FILES = 5;
-const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const AUDIO_DIAGNOSTICS_INTERVAL_MS = 5000;
 const AUDIO_FIRST_CHUNK_TIMEOUT_MS = 3000;
+const FOREGROUND_AUDIO_RECOVERY_GRACE_MS = 1000;
 const SETTINGS_SYNC_DEBOUNCE_MS = 500;
+const MAX_PENDING_GLASS_DIAGNOSTICS = 100;
 
 type AudioDiagnosticsState = {
   chunkCount: number;
@@ -113,11 +121,6 @@ function cueIcon(category: CueCategory) {
   return <UserRound size={22} strokeWidth={1.7} />;
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
 function selectedPrenote(prenotes: Prenote[]): Prenote | null {
   const selected = prenotes.filter((note) => note.selected);
   if (!selected.length) return null;
@@ -144,6 +147,7 @@ function loadInitialConversationSettings(): {
 
 export default function App() {
   const initialSettings = useMemo(() => loadInitialConversationSettings(), []);
+  const clientSessionId = useMemo(() => getOrCreateClientSessionId(), []);
   const [screen, setScreen] = useState<Screen>("home");
   const [settings, setSettings] = useState<ConversationSettings>(initialSettings.settings);
   const [settingsReady, setSettingsReady] = useState(false);
@@ -155,6 +159,8 @@ export default function App() {
   const [historyTab, setHistoryTab] = useState<ConversationTab>("summary");
   const [activeRecordId, setActiveRecordId] = useState<string>("");
   const [noteDraft, setNoteDraft] = useState<Prenote | null>(null);
+  const [noteEditorMode, setNoteEditorMode] = useState<"create" | "edit" | null>(null);
+  const [prenoteMutationId, setPrenoteMutationId] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(24);
   const [glassState, setGlassState] = useState<GlassRuntimeState>(() => INITIAL_GLASS_STATE);
@@ -165,8 +171,11 @@ export default function App() {
   const bridgeRef = useRef<GlassBridgeHandle | null>(null);
   const glassRendererRef = useRef<GlassRendererHandle | null>(null);
   const connectingBridgeRef = useRef(false);
+  const bridgeConnectionGenerationRef = useRef(0);
   const pendingGlassRenderRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const wsEverOpenedRef = useRef(false);
+  const recoverOnReadyRef = useRef(false);
   const activeConversationIdRef = useRef<string | null>(null);
   const isListeningRef = useRef(false);
   const conversationStartPendingRef = useRef(false);
@@ -178,6 +187,8 @@ export default function App() {
   const bridgeAudioEnableInFlightRef = useRef(false);
   const bridgeAudioCommandRef = useRef(0);
   const firstAudioChunkTimerRef = useRef<number | null>(null);
+  const foregroundAudioRecoveryTimerRef = useRef<number | null>(null);
+  const lastBridgeAudioChunkAtRef = useRef(0);
   const clientAudioErrorRef = useRef<string | null>(null);
   const activeAudioSourceRef = useRef<VoiceInput>("glasses");
   const audioSourceMismatchCountRef = useRef(0);
@@ -186,6 +197,10 @@ export default function App() {
   const skipNextRecordClickRef = useRef(false);
   const pendingDetailBackViewRef = useRef<"cue_detail" | "prenote_detail" | null>(null);
   const suppressMenuDoubleClickUntilRef = useRef(0);
+  const renderedMenuItemsRef = useRef<ReturnType<typeof buildMenuItems>>([]);
+  const glassRenderGenerationRef = useRef(0);
+  const glassDiagnosticSeqRef = useRef(0);
+  const pendingGlassDiagnosticsRef = useRef<Array<Record<string, unknown>>>([]);
   const hasLocalSettingsRef = useRef(initialSettings.hasLocalSettings);
   const settingsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -193,9 +208,11 @@ export default function App() {
   const activeRecord = records.find((record) => record.id === activeRecordId) || records[0] || null;
   const effectiveVoiceInput = normalizeSupportedVoiceInput(settings.voiceInput);
   const glassStateRef = useRef(glassState);
+  const renderedGlassStateRef = useRef(glassState);
   const cuesRef = useRef(cues);
   const transcriptRef = useRef(transcript);
   const activePrenoteRef = useRef(activePrenote);
+  const prenotesRef = useRef(prenotes);
   const settingsRef = useRef(settings);
   const glassPage = useMemo(() => buildGlassesPage({
     state: glassState,
@@ -212,10 +229,11 @@ export default function App() {
     cuesRef.current = cues;
     transcriptRef.current = transcript;
     activePrenoteRef.current = activePrenote;
+    prenotesRef.current = prenotes;
     settingsRef.current = settings;
     activeConversationIdRef.current = activeConversationId;
     isListeningRef.current = isListening;
-  }, [activeConversationId, activePrenote, cues, glassPage, glassState, isListening, settings, transcript]);
+  }, [activeConversationId, activePrenote, cues, glassPage, glassState, isListening, prenotes, settings, transcript]);
 
   useEffect(() => {
     const normalized = normalizeSupportedVoiceInput(settings.voiceInput);
@@ -280,19 +298,29 @@ export default function App() {
     function connect() {
       if (disposed) return;
       setConnectionStatus("connecting");
-      const ws = new WebSocket(wsUrl());
+      const isReconnect = wsEverOpenedRef.current;
+      const ws = new WebSocket(wsUrl(clientSessionId));
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
         if (disposed) return;
+        recoverOnReadyRef.current = isReconnect;
+        wsEverOpenedRef.current = true;
         setConnectionStatus("connected");
         ws.send(JSON.stringify(createClientMessage("hello", { settings: {} })));
+        flushGlassDiagnostics(ws);
         if (pendingStartPayloadRef.current) {
           const payload = pendingStartPayloadRef.current;
           pendingStartPayloadRef.current = null;
           ws.send(JSON.stringify(createClientMessage("conversation_start", payload, activeConversationIdRef.current)));
         }
-        if (pendingAudioStartRef.current && activeConversationIdRef.current && isListeningRef.current && !pendingStartPayloadRef.current) {
+        if (
+          !isReconnect
+          && pendingAudioStartRef.current
+          && activeConversationIdRef.current
+          && isListeningRef.current
+          && !pendingStartPayloadRef.current
+        ) {
           pendingAudioStartRef.current = false;
           ws.send(JSON.stringify(createClientMessage("audio_start", audioStartPayload(activeAudioSourceRef.current), activeConversationIdRef.current)));
         }
@@ -309,7 +337,11 @@ export default function App() {
       ws.onclose = () => {
         if (wsRef.current === ws) wsRef.current = null;
         if (disposed) return;
-        setConnectionStatus("offline");
+        setConnectionStatus(
+          activeConversationIdRef.current && isListeningRef.current
+            ? "reconnecting"
+            : "offline",
+        );
         reconnectTimer = setTimeout(connect, 2000);
       };
     }
@@ -346,9 +378,21 @@ export default function App() {
   }, [activeRecord?.summary.status, activeRecordId, screen]);
 
   useEffect(() => {
+    const renderGeneration = ++glassRenderGenerationRef.current;
+    const requestedGlassState = glassState;
+    const requestedMenuItems = glassPage.view === "menu"
+      ? buildMenuItems({ prenote: activePrenote, cues })
+      : [];
     if (bridgeRef.current && glassRendererRef.current) {
       pendingGlassRenderRef.current = false;
-      void glassRendererRef.current.render(glassPage).catch(handleGlassRenderError);
+      void glassRendererRef.current.render(glassPage)
+        .then(() => {
+          clearRecoveredGlassRenderError();
+          if (renderGeneration !== glassRenderGenerationRef.current) return;
+          commitRenderedGlassState(requestedGlassState);
+          if (glassPage.view === "menu") renderedMenuItemsRef.current = requestedMenuItems;
+        })
+        .catch(handleGlassRenderError);
       return;
     }
     if (connectingBridgeRef.current) {
@@ -356,14 +400,20 @@ export default function App() {
       return;
     }
     connectingBridgeRef.current = true;
+    const connectionGeneration = ++bridgeConnectionGenerationRef.current;
     const initialPage = glassPage;
+    const initialGlassState = glassState;
     void connectGlassBridge({
       initialPage: glassPage,
       onEvent: (event) => {
         const gesture = normalizeGlassGesture(event);
         if (gesture) handleGlassGesture(gesture, readGlassListSelection(event));
       },
+      onDiagnostic: (diagnostic) => {
+        recordGlassBridgeDiagnostic(diagnostic);
+      },
       onAudio: (audio) => {
+        lastBridgeAudioChunkAtRef.current = Date.now();
         const ws = wsRef.current;
         if (
           ws?.readyState === WebSocket.OPEN
@@ -376,37 +426,90 @@ export default function App() {
       },
       })
       .then(async (bridge) => {
+        if (connectionGeneration !== bridgeConnectionGenerationRef.current) {
+          bridge.dispose();
+          return;
+        }
         bridgeRef.current = bridge;
         const latestPage = glassPageRef.current;
+        const latestGlassState = glassStateRef.current;
         let renderedPage = initialPage;
+        let renderedGlassState = initialGlassState;
         if (pendingGlassRenderRef.current || latestPage !== initialPage) {
           try {
             await bridge.render(latestPage);
             renderedPage = latestPage;
+            renderedGlassState = latestGlassState;
           } catch (error) {
             handleGlassRenderError(error);
           }
         }
+        if (connectionGeneration !== bridgeConnectionGenerationRef.current) {
+          if (bridgeRef.current === bridge) bridgeRef.current = null;
+          bridge.dispose();
+          return;
+        }
         pendingGlassRenderRef.current = false;
+        commitRenderedGlassState(renderedGlassState);
         glassRendererRef.current = createGlassRenderer(bridge, renderedPage);
+        if (renderedPage.view === "menu") {
+          renderedMenuItemsRef.current = buildMenuItems({
+            prenote: activePrenoteRef.current,
+            cues: cuesRef.current,
+          });
+        }
         if (renderedPage !== latestPage) {
-          void glassRendererRef.current.render(latestPage).catch(handleGlassRenderError);
+          const latestRenderGeneration = ++glassRenderGenerationRef.current;
+          const latestMenuItems = latestPage.view === "menu"
+            ? buildMenuItems({
+                prenote: activePrenoteRef.current,
+                cues: cuesRef.current,
+              })
+            : [];
+          void glassRendererRef.current.render(latestPage)
+            .then(() => {
+              clearRecoveredGlassRenderError();
+              if (latestRenderGeneration !== glassRenderGenerationRef.current) return;
+              commitRenderedGlassState(latestGlassState);
+              if (latestPage.view === "menu") renderedMenuItemsRef.current = latestMenuItems;
+            })
+            .catch(handleGlassRenderError);
         }
         if (isListeningRef.current) {
           setBridgeAudioEnabled(true, activeAudioSourceRef.current);
         }
       })
-      .catch(handleGlassRenderError)
+      .catch((error) => {
+        if (connectionGeneration === bridgeConnectionGenerationRef.current) {
+          handleGlassRenderError(error);
+        }
+      })
       .finally(() => {
-        connectingBridgeRef.current = false;
+        if (connectionGeneration === bridgeConnectionGenerationRef.current) {
+          connectingBridgeRef.current = false;
+        }
       });
   }, [glassPage]);
 
   useEffect(() => () => {
+    bridgeConnectionGenerationRef.current += 1;
+    connectingBridgeRef.current = false;
+    pendingGlassRenderRef.current = false;
     glassRendererRef.current?.dispose();
+    glassRendererRef.current = null;
+    const bridge = bridgeRef.current;
+    bridgeRef.current = null;
+    if (bridgeAudioEnabledRef.current) {
+      void bridge?.setAudioEnabled(false, activeAudioSourceRef.current).catch(() => undefined);
+    }
+    bridge?.dispose();
     if (firstAudioChunkTimerRef.current) {
       window.clearTimeout(firstAudioChunkTimerRef.current);
       firstAudioChunkTimerRef.current = null;
+    }
+    if (foregroundAudioRecoveryTimerRef.current) {
+      window.clearTimeout(foregroundAudioRecoveryTimerRef.current);
+      foregroundAudioRecoveryTimerRef.current = null;
     }
   }, []);
 
@@ -421,9 +524,25 @@ export default function App() {
     setGlassState(nextState);
   }
 
+  function commitRenderedGlassState(nextState: GlassRuntimeState) {
+    renderedGlassStateRef.current = nextState;
+    pendingDetailBackViewRef.current = nextState.view === "cue_detail" || nextState.view === "prenote_detail"
+      ? nextState.view
+      : null;
+  }
+
   function handleGlassRenderError(error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     setConnectionStatus(message.includes("rebuild_unavailable") ? "glass_render_unsupported" : "glass_render_error");
+  }
+
+  function clearRecoveredGlassRenderError() {
+    setConnectionStatus((current) => {
+      if (current !== "glass_render_error") return current;
+      if (clientAudioErrorRef.current) return clientAudioErrorRef.current;
+      if (isListeningRef.current) return "listening";
+      return wsRef.current?.readyState === WebSocket.OPEN ? "ready" : "offline";
+    });
   }
 
   function sendWs(type: string, payload: unknown = {}) {
@@ -434,6 +553,47 @@ export default function App() {
     }
     ws.send(JSON.stringify(createClientMessage(type, payload, activeConversationIdRef.current)));
     return true;
+  }
+
+  function flushGlassDiagnostics(ws: WebSocket) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const pending = pendingGlassDiagnosticsRef.current.splice(0);
+    for (const payload of pending) {
+      ws.send(JSON.stringify(createClientMessage(
+        "glass_diagnostic",
+        payload,
+        activeConversationIdRef.current,
+      )));
+    }
+  }
+
+  function sendGlassDiagnostic(payload: Record<string, unknown>) {
+    const diagnostic = {
+      ...payload,
+      diagnosticSeq: ++glassDiagnosticSeqRef.current,
+    };
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(createClientMessage(
+        "glass_diagnostic",
+        diagnostic,
+        activeConversationIdRef.current,
+      )));
+      return;
+    }
+    pendingGlassDiagnosticsRef.current.push(diagnostic);
+    if (pendingGlassDiagnosticsRef.current.length > MAX_PENDING_GLASS_DIAGNOSTICS) {
+      pendingGlassDiagnosticsRef.current.shift();
+    }
+  }
+
+  function recordGlassBridgeDiagnostic(diagnostic: GlassBridgeDiagnostic) {
+    sendGlassDiagnostic({
+      phase: "render",
+      ...diagnostic,
+      view: diagnostic.view || glassStateRef.current.view,
+      activeCueId: glassStateRef.current.activeCueId || undefined,
+    });
   }
 
   function isWsOpen() {
@@ -470,7 +630,7 @@ export default function App() {
     const diagnostics = audioDiagnosticsRef.current;
     diagnostics.chunkCount += 1;
     diagnostics.byteCount += byteCount;
-    if (diagnostics.chunkCount === 1) {
+    if (firstAudioChunkTimerRef.current) {
       clearFirstAudioChunkTimer();
       clientAudioErrorRef.current = null;
     }
@@ -510,11 +670,20 @@ export default function App() {
     firstAudioChunkTimerRef.current = null;
   }
 
-  function armFirstAudioChunkTimer(source: VoiceInput) {
+  function clearForegroundAudioRecoveryTimer() {
+    if (!foregroundAudioRecoveryTimerRef.current) return;
+    window.clearTimeout(foregroundAudioRecoveryTimerRef.current);
+    foregroundAudioRecoveryTimerRef.current = null;
+  }
+
+  function armFirstAudioChunkTimer(source: VoiceInput, chunkBaseline: number) {
     clearFirstAudioChunkTimer();
     firstAudioChunkTimerRef.current = window.setTimeout(() => {
       firstAudioChunkTimerRef.current = null;
-      if (!isListeningRef.current || audioDiagnosticsRef.current.chunkCount > 0) return;
+      if (
+        !isListeningRef.current
+        || audioDiagnosticsRef.current.chunkCount > chunkBaseline
+      ) return;
       const status = micNoAudioStatus(source);
       clientAudioErrorRef.current = status;
       setConnectionStatus(status);
@@ -529,6 +698,7 @@ export default function App() {
       bridgeAudioEnableInFlightRef.current = false;
       clientAudioErrorRef.current = null;
       clearFirstAudioChunkTimer();
+      clearForegroundAudioRecoveryTimer();
       bridgeAudioCommandRef.current += 1;
       if (bridge) void bridge.setAudioEnabled(false, source).catch(() => undefined);
       return;
@@ -542,6 +712,7 @@ export default function App() {
 
     pendingBridgeAudioStartRef.current = false;
     const command = ++bridgeAudioCommandRef.current;
+    const chunkBaseline = audioDiagnosticsRef.current.chunkCount;
     bridgeAudioEnableInFlightRef.current = true;
     void bridge.setAudioEnabled(true, source).then((ok) => {
       if (command !== bridgeAudioCommandRef.current) return;
@@ -555,7 +726,7 @@ export default function App() {
       }
       bridgeAudioEnabledRef.current = true;
       clientAudioErrorRef.current = null;
-      armFirstAudioChunkTimer(source);
+      armFirstAudioChunkTimer(source, chunkBaseline);
     }).catch(() => {
       if (command !== bridgeAudioCommandRef.current) return;
       bridgeAudioEnableInFlightRef.current = false;
@@ -566,9 +737,117 @@ export default function App() {
     });
   }
 
+  function restartBridgeAudio(source = activeAudioSourceRef.current) {
+    const bridge = bridgeRef.current;
+    if (!isListeningRef.current || bridgeAudioEnableInFlightRef.current) return;
+    if (!bridge) {
+      pendingBridgeAudioStartRef.current = true;
+      return;
+    }
+
+    const command = ++bridgeAudioCommandRef.current;
+    const chunkBaseline = audioDiagnosticsRef.current.chunkCount;
+    bridgeAudioEnableInFlightRef.current = true;
+    pendingBridgeAudioStartRef.current = false;
+    clearFirstAudioChunkTimer();
+    void restartAudioControlOnce(async (enabled) => {
+      const ok = await bridge.setAudioEnabled(enabled, enabled ? source : undefined);
+      if (!enabled && ok) bridgeAudioEnabledRef.current = false;
+      return ok;
+    }).then((ok) => {
+      if (command !== bridgeAudioCommandRef.current) return;
+      bridgeAudioEnableInFlightRef.current = false;
+      if (!isListeningRef.current) return;
+      if (!ok) {
+        const status = micFailedStatus(source);
+        clientAudioErrorRef.current = status;
+        setConnectionStatus(status);
+        return;
+      }
+      bridgeAudioEnabledRef.current = true;
+      clientAudioErrorRef.current = null;
+      armFirstAudioChunkTimer(source, chunkBaseline);
+    }).catch(() => {
+      if (command !== bridgeAudioCommandRef.current) return;
+      bridgeAudioEnableInFlightRef.current = false;
+      if (!isListeningRef.current) return;
+      const status = micErrorStatus(source);
+      clientAudioErrorRef.current = status;
+      setConnectionStatus(status);
+    });
+  }
+
+  function scheduleBridgeAudioRecovery(source = activeAudioSourceRef.current) {
+    clearForegroundAudioRecoveryTimer();
+    const recoveryStartedAt = Date.now();
+    foregroundAudioRecoveryTimerRef.current = window.setTimeout(() => {
+      foregroundAudioRecoveryTimerRef.current = null;
+      if (!shouldRestartStalledForegroundAudio({
+        conversationId: activeConversationIdRef.current,
+        isListening: isListeningRef.current,
+        recoveryStartedAt,
+        lastAudioChunkAt: lastBridgeAudioChunkAtRef.current,
+      })) return;
+      restartBridgeAudio(source);
+    }, FOREGROUND_AUDIO_RECOVERY_GRACE_MS);
+  }
+
+  function recoverActiveAudio(source = activeAudioSourceRef.current) {
+    if (!shouldRearmForegroundAudio({
+      conversationId: activeConversationIdRef.current,
+      isListening: isListeningRef.current,
+    })) {
+      return false;
+    }
+    serverAudioListeningRef.current = false;
+    const sent = sendAudioStart(source);
+    pendingAudioStartRef.current = !sent;
+    scheduleBridgeAudioRecovery(source);
+    return sent;
+  }
+
   function handleServerMessage(message: EvenHubV2ServerMessage) {
     if (message.type === "ready") {
-      setConnectionStatus("ready");
+      const isReconnect = recoverOnReadyRef.current;
+      recoverOnReadyRef.current = false;
+      const recovery = planReadyRecovery({
+        isReconnect,
+        localConversationId: activeConversationIdRef.current,
+        localListening: isListeningRef.current,
+        serverConversationId: message.payload?.conversationId ?? message.conversationId ?? null,
+        serverConversationStatus: message.payload?.conversationStatus,
+        serverAudioStatus: message.payload?.audioStatus,
+      });
+
+      if (recovery.nextConversationId !== activeConversationIdRef.current) {
+        activeConversationIdRef.current = recovery.nextConversationId;
+        setActiveConversationId(recovery.nextConversationId);
+      }
+
+      if (recovery.sessionLost) {
+        conversationStartPendingRef.current = false;
+        pendingAudioStartRef.current = false;
+        pendingBridgeAudioStartRef.current = false;
+        isListeningRef.current = false;
+        setIsListening(false);
+        setBridgeAudioEnabled(false);
+        commitGlassState(INITIAL_GLASS_STATE);
+        setScreen("home");
+        setConnectionStatus("reconnect_session_lost");
+        return;
+      }
+
+      if (recovery.shouldSendAudioStart) {
+        setConnectionStatus("reconnecting_audio");
+        pendingAudioStartRef.current = !sendAudioStart(activeAudioSourceRef.current);
+        scheduleBridgeAudioRecovery(activeAudioSourceRef.current);
+      }
+      if (recovery.shouldRearmAudio) {
+        restartBridgeAudio(activeAudioSourceRef.current);
+      }
+      if (!recovery.shouldSendAudioStart && !recovery.shouldRearmAudio) {
+        setConnectionStatus("ready");
+      }
       return;
     }
     if (message.type === "conversation_started") {
@@ -663,6 +942,7 @@ export default function App() {
       setBridgeAudioEnabled(false);
       setActiveConversationId(null);
       activeConversationIdRef.current = null;
+      commitGlassState(INITIAL_GLASS_STATE);
       if (id) {
         void loadConversationDetail(id)
           .then((record) => {
@@ -684,14 +964,32 @@ export default function App() {
   }
 
   function handleGlassGesture(gesture: GlassGesture, selection: GlassListSelection = { index: null, name: null }) {
+    if (gesture === "foreground_enter" && shouldRearmForegroundAudio({
+      conversationId: activeConversationIdRef.current,
+      isListening: isListeningRef.current,
+    })) {
+      recoverActiveAudio(activeAudioSourceRef.current);
+    }
+
     const nowMs = Date.now();
-    let currentState = glassStateRef.current;
+    let currentState = renderedGlassStateRef.current;
     if (shouldSuppressDuplicateMenuDoubleClick({
       state: currentState,
       gesture,
       nowMs,
       suppressUntilMs: suppressMenuDoubleClickUntilRef.current,
     })) {
+      sendGlassDiagnostic({
+        phase: "gesture",
+        operation: "r1_event",
+        result: "suppressed_duplicate",
+        view: currentState.view,
+        targetView: currentState.view,
+        gesture,
+        selectionIndex: selection.index ?? undefined,
+        selectionName: selection.name ?? undefined,
+        activeCueId: currentState.activeCueId || undefined,
+      });
       return;
     }
     if (gesture === "double_click" && pendingDetailBackViewRef.current && currentState.view === "menu") {
@@ -700,16 +998,33 @@ export default function App() {
         view: pendingDetailBackViewRef.current,
       };
     }
-    const menuItems = buildMenuItems({ prenote: activePrenoteRef.current, cues: cuesRef.current });
+    const liveMenuItems = buildMenuItems({ prenote: activePrenoteRef.current, cues: cuesRef.current });
+    const menuItems = currentState.view === "menu" && renderedMenuItemsRef.current.length
+      ? renderedMenuItemsRef.current
+      : liveMenuItems;
     const decision = decideGlassEvent({
       state: currentState,
       gesture,
       selection,
       menuItems,
     });
+    const selectedMenuItem = menuItems[decision.state.selectedIndex];
+    sendGlassDiagnostic({
+      phase: "gesture",
+      operation: "r1_event",
+      result: decision.shouldRender ? "render_requested" : "state_only",
+      view: currentState.view,
+      targetView: decision.state.view,
+      gesture,
+      selectionIndex: selection.index ?? undefined,
+      selectionName: selection.name ?? undefined,
+      selectedCueId: decision.state.activeCueId || selectedMenuItem?.cueId || undefined,
+      activeCueId: currentState.activeCueId || undefined,
+    });
 
     if (!decision.shouldRender) {
-      glassStateRef.current = decision.state;
+      commitGlassState(decision.state);
+      commitRenderedGlassState(decision.state);
       return;
     }
 
@@ -717,9 +1032,7 @@ export default function App() {
       && (currentState.view === "cue_detail" || currentState.view === "prenote_detail")
       && decision.state.view === "menu";
 
-    if (decision.state.view === "cue_detail" || decision.state.view === "prenote_detail") {
-      pendingDetailBackViewRef.current = decision.state.view;
-    } else if (gesture === "double_click" || decision.state.view === "main" || decision.state.view === "root_idle") {
+    if (gesture === "double_click" || decision.state.view === "main" || decision.state.view === "root_idle") {
       pendingDetailBackViewRef.current = null;
     }
     if (isDetailBack) {
@@ -728,6 +1041,13 @@ export default function App() {
 
     if (decision.effect === "start_conversation") {
       commitGlassState(decision.state);
+      if (shouldRearmForegroundAudio({
+        conversationId: activeConversationIdRef.current,
+        isListening: isListeningRef.current,
+      })) {
+        recoverActiveAudio(activeAudioSourceRef.current);
+        return;
+      }
       startConversation();
       return;
     }
@@ -739,57 +1059,93 @@ export default function App() {
   }
 
   function togglePrenote(id: string) {
-    setPrenotes((current) => current.map((note) => note.id === id ? { ...note, selected: !note.selected } : note));
+    if (prenoteMutationId) return;
+    const currentNote = prenotesRef.current.find((note) => note.id === id);
+    if (!currentNote) return;
+
+    const selected = !currentNote.selected;
+    setPrenoteMutationId(id);
+    setPrenotes((current) => current.map((note) => note.id === id ? { ...note, selected } : note));
+    void setPrenoteSelected(id, selected)
+      .then((savedNote) => {
+        setPrenotes((current) => current.map((note) => note.id === id ? savedNote : note));
+      })
+      .catch(() => {
+        setPrenotes((current) => current.map((note) => note.id === id ? { ...note, selected: currentNote.selected } : note));
+        setConnectionStatus("prenote_selection_failed");
+      })
+      .finally(() => setPrenoteMutationId(null));
   }
 
   function openNewNote() {
     setNoteDraft({
       id: `pn-${Date.now()}`,
-      title: "新笔记",
+      title: "",
       text: "",
       selected: true,
       files: [],
     });
+    setNoteEditorMode("create");
     setScreen("noteEditor");
   }
 
+  function openEditNote(note: Prenote) {
+    if (prenoteMutationId) return;
+    setNoteDraft({ ...note, files: [...note.files] });
+    setNoteEditorMode("edit");
+    setScreen("noteEditor");
+  }
+
+  function closeNoteEditor() {
+    if (prenoteMutationId) return;
+    setNoteDraft(null);
+    setNoteEditorMode(null);
+    setScreen("home");
+  }
+
   function saveNoteDraft() {
-    if (!noteDraft) return;
+    if (!noteDraft || !noteDraft.text.trim() || prenoteMutationId) return;
     const firstLine = noteDraft.text.split(/\r?\n/).find((line) => line.trim())?.trim();
     const nextNote = {
       ...noteDraft,
-      title: firstLine ? firstLine.replace(/^#+\s*/, "").slice(0, 48) : noteDraft.title,
+      title: noteDraft.title.trim()
+        || (firstLine ? firstLine.replace(/^#+\s*/, "").slice(0, 80) : "新笔记"),
+      text: noteDraft.text.trim(),
     };
-    void savePrenoteDraft(nextNote)
+    setPrenoteMutationId(nextNote.id);
+    const save = noteEditorMode === "edit" ? updatePrenote(nextNote) : savePrenoteDraft(nextNote);
+    void save
       .then((savedNote) => {
         setPrenotes((current) => [savedNote, ...current.filter((note) => note.id !== nextNote.id && note.id !== savedNote.id)]);
         setNoteDraft(null);
+        setNoteEditorMode(null);
         setScreen("home");
       })
       .catch(() => {
         setConnectionStatus("prenote_save_failed");
-      });
+      })
+      .finally(() => setPrenoteMutationId(null));
   }
 
-  function addFiles(files: FileList | null) {
-    if (!noteDraft || !files?.length) return;
-    const existing = noteDraft.files;
-    const next: PrenoteFile[] = [];
-    for (const file of Array.from(files)) {
-      if (existing.length + next.length >= MAX_FILES) break;
-      if (file.size > MAX_FILE_SIZE) continue;
-      next.push({
-        id: `file-${Date.now()}-${next.length}`,
-        name: file.name,
-        sizeBytes: file.size,
-        status: "ready",
-      });
+  function removeNoteDraft() {
+    if (!noteDraft || prenoteMutationId) return;
+    if (noteEditorMode !== "edit") {
+      closeNoteEditor();
+      return;
     }
-    setNoteDraft({
-      ...noteDraft,
-      files: [...existing, ...next],
-      text: noteDraft.text || "Uploaded files will be converted into editable prepared-note text in the backend phase.",
-    });
+    if (!window.confirm(`确定删除“${noteDraft.title}”吗？此操作无法撤销。`)) return;
+
+    const id = noteDraft.id;
+    setPrenoteMutationId(id);
+    void deletePrenote(id)
+      .then(() => {
+        setPrenotes((current) => current.filter((note) => note.id !== id));
+        setNoteDraft(null);
+        setNoteEditorMode(null);
+        setScreen("home");
+      })
+      .catch(() => setConnectionStatus("prenote_delete_failed"))
+      .finally(() => setPrenoteMutationId(null));
   }
 
   function startConversation() {
@@ -800,11 +1156,12 @@ export default function App() {
     const startSettings = voiceInput === currentSettings.voiceInput
       ? currentSettings
       : { ...currentSettings, voiceInput };
-    const payload = conversationStartPayload(startSettings, activePrenoteRef.current);
+    const payload = conversationStartPayload(startSettings, prenotesRef.current);
     const audioPlan = planConversationStart(voiceInput);
     activeAudioSourceRef.current = voiceInput;
     audioSourceMismatchCountRef.current = 0;
     resetAudioDiagnostics();
+    lastBridgeAudioChunkAtRef.current = 0;
     clientAudioErrorRef.current = null;
     serverAudioListeningRef.current = false;
     pendingBridgeAudioStartRef.current = true;
@@ -1020,15 +1377,23 @@ export default function App() {
   }
 
   if (screen === "noteEditor" && noteDraft) {
+    const noteMutationPending = prenoteMutationId === noteDraft.id;
     return (
       <main className="phone-shell modal-page">
         <header className="modal-header">
-          <h1>新笔记</h1>
-          <button className="icon-button" aria-label="Cancel" onClick={() => setScreen("home")}>
+          <h1>{noteEditorMode === "edit" ? "编辑笔记" : "新笔记"}</h1>
+          <button className="icon-button" aria-label="Cancel" disabled={noteMutationPending} onClick={closeNoteEditor}>
             <X size={37} strokeWidth={1.35} />
           </button>
         </header>
         <section className="note-editor">
+          <input
+            className="note-title-input"
+            maxLength={80}
+            value={noteDraft.title}
+            placeholder="笔记标题（可选）"
+            onChange={(event) => setNoteDraft({ ...noteDraft, title: event.target.value })}
+          />
           <textarea
             maxLength={5000}
             value={noteDraft.text}
@@ -1037,35 +1402,16 @@ export default function App() {
           />
           <span className="char-count">{noteDraft.text.length}/5000</span>
         </section>
-        <section className="file-section">
-          <label className="file-add">
-            <Plus size={32} strokeWidth={1.6} />
-            <input
-              type="file"
-              multiple
-              accept=".txt,.md,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.heic"
-              onChange={(event) => addFiles(event.target.files)}
-            />
-          </label>
-          <p>最多添加 5 个文件。每个最大 5 MB。</p>
-          {noteDraft.files.map((file) => (
-            <div className="file-pill" key={file.id}>
-              <Upload size={17} />
-              <span>{file.name}</span>
-              <small>{formatFileSize(file.sizeBytes)}</small>
-            </div>
-          ))}
-        </section>
         <section className="note-info">
           <Square size={23} strokeWidth={1.5} />
-          <p>对话会使用准备笔记理解上下文，帮助生成实时 AI 提示。</p>
+          <p>当前版本支持文字笔记。保存后可选择是否在对话中使用，帮助生成实时 AI 提示。</p>
         </section>
         <footer className="bottom-actions">
-          <button className="soft-danger" onClick={() => setNoteDraft(null)}>
-            删除
+          <button className={noteEditorMode === "edit" ? "soft-danger" : ""} disabled={noteMutationPending} onClick={removeNoteDraft}>
+            {noteEditorMode === "edit" ? "删除" : "取消"}
           </button>
-          <button className="muted-action" disabled={!noteDraft.text.trim() && !noteDraft.files.length} onClick={saveNoteDraft}>
-            保存
+          <button className="muted-action" disabled={!noteDraft.text.trim() || noteMutationPending} onClick={saveNoteDraft}>
+            {noteMutationPending ? "保存中…" : "保存"}
           </button>
         </footer>
       </main>
@@ -1231,11 +1577,20 @@ export default function App() {
             <Plus size={45} strokeWidth={1.45} />
           </button>
           {prenotes.map((note) => (
-            <button className="prenote-card" key={note.id} onClick={() => togglePrenote(note.id)}>
-              <span className={note.selected ? "note-checkbox checked" : "note-checkbox"}>{note.selected && <Check size={18} />}</span>
-              <h3>{note.title}</h3>
-              <p>{note.text.split(/\r?\n/).slice(0, 2).join(" ")}</p>
-            </button>
+            <article className={prenoteMutationId === note.id ? "prenote-card busy" : "prenote-card"} key={note.id}>
+              <button
+                className="prenote-select-button"
+                aria-label={note.selected ? `取消选择 ${note.title}` : `选择 ${note.title}`}
+                disabled={Boolean(prenoteMutationId)}
+                onClick={() => togglePrenote(note.id)}
+              >
+                <span className={note.selected ? "note-checkbox checked" : "note-checkbox"}>{note.selected && <Check size={18} />}</span>
+              </button>
+              <button className="prenote-edit-button" disabled={Boolean(prenoteMutationId)} onClick={() => openEditNote(note)}>
+                <h3>{note.title}</h3>
+                <p>{note.text.split(/\r?\n/).slice(0, 2).join(" ")}</p>
+              </button>
+            </article>
           ))}
         </div>
         <button className="start-button" onClick={startConversation}>
@@ -1265,14 +1620,10 @@ function renderTabs(active: ConversationTab, setActive: (tab: ConversationTab) =
 
 function renderCueBody(cue: AiCue) {
   if (cue.category !== "code") return <p>{cueFullText(cue)}</p>;
-  const explanation = cueExplanationText(cue);
   return (
-    <>
-      {explanation ? <p className="cue-code-explanation">{explanation}</p> : null}
-      <pre className="cue-code-block">
-        <code>{cueCodeText(cue)}</code>
-      </pre>
-    </>
+    <pre className="cue-code-block">
+      <code>{cueCodeText(cue)}</code>
+    </pre>
   );
 }
 

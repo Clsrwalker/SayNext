@@ -33,6 +33,12 @@ export interface ConversationSummaryGenerator {
   generate(input: ConversationSummaryGeneratorInput): Promise<ConversationSummaryGenerationResult>;
 }
 
+export function resolveEvenHubV2SummaryModel(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return env.EVENHUB_V2_SUMMARY_MODEL?.trim() || "gpt-5.4-nano";
+}
+
 function cleanOneLine(value: unknown, max: number): string {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -120,7 +126,7 @@ export function buildEvenHubV2SummaryPrompt(input: ConversationSummaryGeneratorI
 }
 
 export class OpenAiConversationSummaryGenerator implements ConversationSummaryGenerator {
-  constructor(private readonly model = process.env.EVENHUB_V2_SUMMARY_MODEL || "gpt-5.5") {}
+  constructor(private readonly model = resolveEvenHubV2SummaryModel()) {}
 
   async generate(input: ConversationSummaryGeneratorInput): Promise<ConversationSummaryGenerationResult> {
     const result = await generateOpenAiJson<ConversationSummaryOutput>({

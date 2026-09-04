@@ -102,3 +102,40 @@ test("parseEvenHubV2ClientMessage accepts audio diagnostics", () => {
     },
   });
 });
+
+test("parseEvenHubV2ClientMessage accepts bounded glass diagnostics without rendered content", () => {
+  const diagnostic = createEvenHubV2ClientMessage("glass_diagnostic", {
+    phase: "render",
+    operation: "page_rebuild",
+    result: "false",
+    view: "cue_detail",
+    selectedCueId: "cue-1",
+    renderSeq: 12,
+    durationMs: 43,
+    textContainerCount: 3,
+    listItemCount: 0,
+    totalTextBytes: 1240,
+    maxTextBytes: 1104,
+    error: "x".repeat(400),
+  });
+
+  const parsed = parseEvenHubV2ClientMessage(JSON.stringify(diagnostic));
+  expect(parsed).toMatchObject({
+    ok: true,
+    message: {
+      type: "glass_diagnostic",
+      payload: {
+        phase: "render",
+        operation: "page_rebuild",
+        result: "false",
+        view: "cue_detail",
+        selectedCueId: "cue-1",
+        renderSeq: 12,
+        maxTextBytes: 1104,
+      },
+    },
+  });
+  if (!parsed.ok || parsed.message.type !== "glass_diagnostic") throw new Error("glass diagnostic was not parsed");
+  expect(parsed.message.payload?.error).toHaveLength(240);
+  expect("content" in (parsed.message.payload || {})).toBe(false);
+});

@@ -1,5 +1,62 @@
 import { describe, expect, test } from "vitest";
-import { cueFromServer, partialTranscriptFromServer, recordFromConversationDetail, resolveBackendOrigin, transcriptFromServer } from "./evenhub-v2-client";
+import {
+  conversationStartPayload,
+  cueFromServer,
+  getOrCreateClientSessionId,
+  partialTranscriptFromServer,
+  recordFromConversationDetail,
+  resolveBackendOrigin,
+  resolveWebSocketUrl,
+  transcriptFromServer,
+} from "./evenhub-v2-client";
+
+describe("conversation start prenotes", () => {
+  test("sends real ids and combined text for every selected prenote", () => {
+    const payload = conversationStartPayload({
+      voiceInput: "glasses",
+      language: "english",
+      glassContent: { aiCue: true, transcript: true },
+      autoPopup: true,
+      cueDuration: "forever",
+    }, [
+      { id: "108", title: "Project", text: "Project facts", selected: true, files: [] },
+      { id: "109", title: "Role", text: "Role facts", selected: true, files: [] },
+      { id: "110", title: "Unused", text: "Do not send", selected: false, files: [] },
+    ]);
+
+    expect(payload.selectedPrenoteIds).toEqual(["108", "109"]);
+    expect(payload.selectedPrenoteText).toBe("# Project\nProject facts\n\n---\n\n# Role\nRole facts");
+  });
+});
+
+describe("stable websocket session", () => {
+  test("keeps one session id for websocket reconnects in the current app lifetime", () => {
+    expect(getOrCreateClientSessionId()).toBe(getOrCreateClientSessionId());
+  });
+
+  test("reuses the same client session id across reconnects", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem(key: string) {
+        return values.get(key) ?? null;
+      },
+      setItem(key: string, value: string) {
+        values.set(key, value);
+      },
+    };
+
+    const first = getOrCreateClientSessionId(storage);
+    const second = getOrCreateClientSessionId(storage);
+
+    expect(first).toBeTruthy();
+    expect(second).toBe(first);
+  });
+
+  test("includes the stable session id in the websocket URL", () => {
+    expect(resolveWebSocketUrl("https://api.example.com", "session / one"))
+      .toBe("wss://api.example.com/api/evenhub/v2/ws?sessionId=session+%2F+one");
+  });
+});
 
 describe("resolveBackendOrigin", () => {
   test("uses env override when provided", () => {
@@ -135,7 +192,7 @@ describe("conversation detail mapping", () => {
     expect(record.title).toBe("Generated Summary Title");
   });
 
-  test("preserves structured code cue fields from saved conversation detail", () => {
+  test("restores one complete code entry and ignores legacy explanation text", () => {
     const code = "function add(a: number, b: number) {\n  return a + b;\n}";
     const record = recordFromConversationDetail({
       conversation: {
@@ -161,18 +218,22 @@ describe("conversation detail mapping", () => {
       }],
     });
 
+    expect(record.cueHistory).toHaveLength(1);
     expect(record.cueHistory[0]).toMatchObject({
+      id: "cue-code",
       category: "code",
       language: "typescript",
       code,
-      explanation: "This function returns the sum of two numbers.",
       output: code,
+      preview: code,
+      fullAnswer: code,
     });
+    expect(record.cueHistory[0]).not.toHaveProperty("explanation");
   });
 });
 
 describe("server cue mapping", () => {
-  test("preserves structured code from a live cue_created message", () => {
+  test("preserves one structured code cue and ignores legacy explanation text", () => {
     const code = "const result = values.map((value) => value * 2);";
     const cue = cueFromServer({
       protocolVersion: "evenhub-v2.1",
@@ -198,6 +259,8 @@ describe("server cue mapping", () => {
 
     expect(cue.code).toBe(code);
     expect(cue.output).toBe(code);
-    expect(cue.explanation).toContain("multiply it by two");
+    expect(cue.preview).toBe(code);
+    expect(cue.fullAnswer).toBe(code);
+    expect(cue).not.toHaveProperty("explanation");
   });
 });

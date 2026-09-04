@@ -48,10 +48,12 @@ test("OpenAI JSON client sends reasoning effort and can omit temperature for GPT
     model: "gpt-5.6-luna",
     prompt: "Dynamic cue input",
     reasoningEffort: "low",
+    serviceTier: "priority",
     temperature: null,
   });
 
   expect(requestBody.reasoning).toEqual({ effort: "low" });
+  expect(requestBody.service_tier).toBe("priority");
   expect("temperature" in requestBody).toBe(false);
 });
 

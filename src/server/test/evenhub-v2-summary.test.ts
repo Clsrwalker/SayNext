@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   buildEvenHubV2SummaryPrompt,
   normalizeConversationSummaryOutput,
+  resolveEvenHubV2SummaryModel,
   type ConversationSummaryGenerator,
   type ConversationSummaryGeneratorInput,
   type ConversationSummaryGenerationResult,
@@ -55,6 +56,17 @@ class FakeSummaryGenerator implements ConversationSummaryGenerator {
   }
 }
 
+class FailingSummaryGenerator implements ConversationSummaryGenerator {
+  calls: ConversationSummaryGeneratorInput[] = [];
+
+  constructor(private readonly error: Error) {}
+
+  async generate(input: ConversationSummaryGeneratorInput): Promise<ConversationSummaryGenerationResult> {
+    this.calls.push(input);
+    throw this.error;
+  }
+}
+
 function validSummary(): ConversationSummaryGenerationResult {
   return {
     model: "fake-summary-model",
@@ -86,6 +98,11 @@ function validSummary(): ConversationSummaryGenerationResult {
     },
   };
 }
+
+test("EvenHub v2 summaries default to the inexpensive nano model and allow an explicit override", () => {
+  expect(resolveEvenHubV2SummaryModel({})).toBe("gpt-5.4-nano");
+  expect(resolveEvenHubV2SummaryModel({ EVENHUB_V2_SUMMARY_MODEL: "gpt-5.6-luna" })).toBe("gpt-5.6-luna");
+});
 
 test("EvenHubV2Store queues summaries idempotently and claims queued work atomically", () => {
   const store = new EvenHubV2Store(":memory:");
@@ -183,6 +200,51 @@ test("EvenHubV2SummaryRunner sends full transcript to the generator and stores n
   expect(summary?.inputTranscriptChars).toBe(lines.join("\n").length);
   expect(summary?.inputTruncated).toBe(false);
   expect(store.getConversation("conv-summary")?.title).toBe("Batch Normalization Discussion");
+});
+
+test("EvenHubV2SummaryRunner records a model failure without leaving partial summary data", async () => {
+  const store = new EvenHubV2Store(":memory:");
+  createConversation(store, "failed-summary-conv");
+  addTranscript(store, "failed-summary-conv", [
+    "The interview covered a detailed project architecture and the integration trade-offs.",
+    "The speaker then asked how failures were handled across the API and background worker.",
+  ]);
+  store.endConversation({
+    conversationId: "failed-summary-conv",
+    endedAt: "2026-06-12T10:05:00.000Z",
+    durationMs: 300000,
+  });
+  store.queueSummary({
+    id: "summary-failed",
+    conversationId: "failed-summary-conv",
+    userId: "test-user",
+    queuedAt: "2026-06-12T10:05:00.000Z",
+  });
+  const generator = new FailingSummaryGenerator(new Error("summary_provider_timeout"));
+  const runner = new EvenHubV2SummaryRunner({
+    store,
+    generator,
+    minTranscriptChars: 80,
+  });
+
+  await runner.runSummaryJob("failed-summary-conv");
+
+  const summary = store.getSummary("failed-summary-conv");
+  expect(generator.calls).toHaveLength(1);
+  expect(summary).toMatchObject({
+    status: "failed",
+    attemptCount: 1,
+    title: "",
+    overview: "",
+    keyPointsJson: "[]",
+    actionItemsJson: "[]",
+    rawOutput: "",
+    error: "summary_provider_timeout",
+    inputLineCount: 2,
+    inputTruncated: false,
+  });
+  expect(summary?.completedAt).not.toBe("");
+  expect(store.getConversation("failed-summary-conv")?.title).toBe("New Conversation");
 });
 
 test("EvenHubV2SummaryRunner does not overwrite a non-default conversation title", async () => {

@@ -132,8 +132,14 @@ test("ensureSummaryForEndedConversation lazily queues ended conversations withou
     clientSessionId: "client-1",
     title: "New Conversation",
     startedAt: "2026-06-19T03:00:00.000Z",
-    settings: {},
-    usedPrenote: {},
+    settings: {
+      language: "english",
+      cueDurationMs: 10000,
+      autoPopup: true,
+      showAiCue: true,
+      showTranscript: true,
+    },
+    usedPrenote: { ids: [], text: "" },
   });
   store.endConversation({
     conversationId: "ended-conv",
@@ -150,7 +156,12 @@ test("ensureSummaryForEndedConversation lazily queues ended conversations withou
     summaryRunner: {
       queueSummary(input) {
         events.push("queue");
-        store.queueSummary({ id: "summary-ended", ...input });
+        store.queueSummary({
+          id: "summary-ended",
+          conversationId: input.conversationId,
+          userId: input.userId,
+          queuedAt: input.queuedAt || "2026-06-19T03:06:00.000Z",
+        });
       },
       enqueue(conversationId) {
         events.push(`enqueue:${conversationId}`);
@@ -170,8 +181,14 @@ test("ensureSummaryForEndedConversation does not queue active conversations", ()
     clientSessionId: "client-1",
     title: "New Conversation",
     startedAt: "2026-06-19T03:00:00.000Z",
-    settings: {},
-    usedPrenote: {},
+    settings: {
+      language: "english",
+      cueDurationMs: 10000,
+      autoPopup: true,
+      showAiCue: true,
+      showTranscript: true,
+    },
+    usedPrenote: { ids: [], text: "" },
   });
   const detail = store.getConversationDetail("active-conv");
   if (!detail) throw new Error("detail missing");

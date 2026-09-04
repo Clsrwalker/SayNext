@@ -7,6 +7,8 @@ import { conversationLogger, type PrenoteRecord } from "../data/conversation-log
 type ConversationDetail = NonNullable<ReturnType<EvenHubV2Store["getConversationDetail"]>>;
 type SummaryQueueRunner = Pick<typeof evenHubV2SummaryRunner, "queueSummary" | "enqueue">;
 type SettingsSource = "saved" | "default";
+const MAX_PRENOTE_TEXT_LENGTH = 5000;
+const MAX_PRENOTE_TITLE_LENGTH = 80;
 
 function getUserId(c: Context): string {
   if (process.env.EVENHUB_V2_ALLOW_QUERY_USER_ID === "true") {
@@ -88,7 +90,12 @@ function inferPrenoteTitle(text: string, fallback = "新笔记"): string {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .find(Boolean);
-  return (firstLine || fallback).replace(/^#+\s*/, "").slice(0, 48) || fallback;
+  return (firstLine || fallback).replace(/^#+\s*/, "").slice(0, MAX_PRENOTE_TITLE_LENGTH) || fallback;
+}
+
+function parsePrenoteId(c: Context): number | null {
+  const id = Number(c.req.param("id"));
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 async function readJsonBody(c: Context): Promise<Record<string, any> | null> {
@@ -169,15 +176,22 @@ export const updateEvenHubV2Settings = async (c: Context) => {
 export const createEvenHubV2Prenote = async (c: Context) => {
   const userId = getUserId(c);
   const body = await readJsonBody(c);
-  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+  if (!body || !isRecord(body)) return c.json({ error: "Invalid JSON body" }, 400);
 
-  const text = String(body.text || "").trim();
+  if (typeof body.text !== "string") return c.json({ error: "Prenote text is required" }, 400);
+  const text = body.text.trim();
   if (!text) return c.json({ error: "Prenote text is required" }, 400);
+  if (text.length > MAX_PRENOTE_TEXT_LENGTH) {
+    return c.json({ error: `Prenote text must be ${MAX_PRENOTE_TEXT_LENGTH} characters or fewer` }, 400);
+  }
+  if (body.selected !== undefined && typeof body.selected !== "boolean") {
+    return c.json({ error: "selected must be a boolean" }, 400);
+  }
 
-  const title = String(body.title || "").trim() || inferPrenoteTitle(text);
+  const title = (typeof body.title === "string" ? body.title.trim() : "") || inferPrenoteTitle(text);
   const prenote = conversationLogger.createPrenote({
     userId,
-    title: title.slice(0, 80),
+    title: title.slice(0, MAX_PRENOTE_TITLE_LENGTH),
     description: "EvenHub v2 prepared note",
     sourceText: text,
   });
@@ -198,6 +212,56 @@ export const createEvenHubV2Prenote = async (c: Context) => {
   }
 
   return c.json({ prenote: serializeEvenHubV2Prenote(conversationLogger.getPrenote(updated.id) ?? updated) }, 201);
+};
+
+export const updateEvenHubV2Prenote = async (c: Context) => {
+  const userId = getUserId(c);
+  const id = parsePrenoteId(c);
+  if (id === null) return c.json({ error: "Invalid prenote id" }, 400);
+
+  const body = await readJsonBody(c);
+  if (!body || !isRecord(body)) return c.json({ error: "Invalid JSON body" }, 400);
+
+  const hasTitle = Object.prototype.hasOwnProperty.call(body, "title");
+  const hasText = Object.prototype.hasOwnProperty.call(body, "text");
+  const hasSelected = Object.prototype.hasOwnProperty.call(body, "selected");
+  if (!hasTitle && !hasText && !hasSelected) {
+    return c.json({ error: "Provide title, text, or selected" }, 400);
+  }
+  if (hasTitle && typeof body.title !== "string") return c.json({ error: "title must be a string" }, 400);
+  if (hasText && typeof body.text !== "string") return c.json({ error: "text must be a string" }, 400);
+  if (hasSelected && typeof body.selected !== "boolean") return c.json({ error: "selected must be a boolean" }, 400);
+
+  const text = hasText ? body.text.trim() : undefined;
+  if (hasText && !text) return c.json({ error: "Prenote text is required" }, 400);
+  if (text && text.length > MAX_PRENOTE_TEXT_LENGTH) {
+    return c.json({ error: `Prenote text must be ${MAX_PRENOTE_TEXT_LENGTH} characters or fewer` }, 400);
+  }
+
+  const requestedTitle = hasTitle ? body.title.trim() : undefined;
+  const title = hasTitle
+    ? (requestedTitle || (text ? inferPrenoteTitle(text) : ""))
+    : undefined;
+  if (hasTitle && !title) return c.json({ error: "Prenote title is required" }, 400);
+
+  const prenote = conversationLogger.updateManualPrenote(userId, id, {
+    title: title?.slice(0, MAX_PRENOTE_TITLE_LENGTH),
+    text,
+    selected: hasSelected ? body.selected : undefined,
+  });
+  if (!prenote) return c.json({ error: "Prenote not found" }, 404);
+  return c.json({ prenote: serializeEvenHubV2Prenote(prenote) });
+};
+
+export const deleteEvenHubV2Prenote = (c: Context) => {
+  const userId = getUserId(c);
+  const id = parsePrenoteId(c);
+  if (id === null) return c.json({ error: "Invalid prenote id" }, 400);
+
+  if (!conversationLogger.deletePrenote(userId, id)) {
+    return c.json({ error: "Prenote not found" }, 404);
+  }
+  return c.json({ deleted: true, id: String(id) });
 };
 
 export const listEvenHubV2Conversations = (c: Context) => {

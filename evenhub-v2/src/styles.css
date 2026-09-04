@@ -296,9 +296,32 @@ pre {
 .prenote-card {
   position: relative;
   flex-basis: 292px;
-  padding: 16px 16px;
+  overflow: hidden;
   text-align: left;
   transition: transform 150ms ease, background 150ms ease;
+}
+
+.prenote-card.busy {
+  opacity: 0.62;
+}
+
+.prenote-edit-button {
+  width: 100%;
+  height: 100%;
+  padding: 16px 52px 16px 16px;
+  text-align: left;
+}
+
+.prenote-select-button {
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
 }
 
 .prenote-card h3 {
@@ -322,9 +345,6 @@ pre {
 }
 
 .note-checkbox {
-  position: absolute;
-  right: 18px;
-  top: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -381,6 +401,23 @@ pre {
 
 .note-editor {
   position: relative;
+}
+
+.note-title-input {
+  width: 100%;
+  height: 58px;
+  margin-bottom: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: #e3e3e2;
+  padding: 0 20px;
+  color: #222;
+  font-size: 17px;
+  outline: none;
+}
+
+.note-title-input::placeholder {
+  color: #8e8e8e;
 }
 
 .note-editor textarea {
@@ -836,10 +873,6 @@ pre {
   font-size: 18px;
   line-height: 1.42;
   white-space: pre-wrap;
-}
-
-.cue-code-explanation {
-  margin: 0 0 14px;
 }
 
 .cue-code-block {
