@@ -70,8 +70,15 @@ export function shouldRestartStalledForegroundAudio(input: {
 
 export async function restartAudioControlOnce(
   setEnabled: (enabled: boolean) => Promise<boolean>,
+  isCurrent: () => boolean = () => true,
 ): Promise<boolean> {
+  if (!isCurrent()) return false;
   const stopped = await setEnabled(false);
-  if (!stopped) return false;
-  return setEnabled(true);
+  if (!stopped || !isCurrent()) return false;
+  const enabled = await setEnabled(true);
+  if (!isCurrent()) {
+    await setEnabled(false);
+    return false;
+  }
+  return enabled;
 }

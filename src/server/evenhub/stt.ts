@@ -75,11 +75,18 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function makeDeepgramUrl(): string {
+export function makeDeepgramUrl(options?: EvenHubSttStartOptions): string {
   const sampleRate = envNumber("EVENHUB_STT_SAMPLE_RATE", 16000);
   const endpointing = envNumber("EVENHUB_STT_ENDPOINTING_MS", 300);
   const model = process.env.DEEPGRAM_MODEL || process.env.EVENHUB_STT_MODEL || "nova-3";
-  const language = process.env.EVENHUB_STT_LANGUAGE || "en";
+  const hasSessionLanguage = options && Object.prototype.hasOwnProperty.call(options, "languageCode");
+  const requestedLanguage = hasSessionLanguage
+    ? (options?.languageCode || "multi").trim()
+    : (process.env.EVENHUB_STT_LANGUAGE || "en").trim();
+  // Nova-3 supports zh explicitly. Its streaming multilingual mode is `multi`,
+  // not omitted language/detect_language, and does not currently include Chinese.
+  // https://developers.deepgram.com/docs/models-languages-overview
+  const language = requestedLanguage === "auto" || !requestedLanguage ? "multi" : requestedLanguage;
   const params = new URLSearchParams({
     model,
     language,
@@ -154,95 +161,253 @@ export class DeepgramEvenHubSttAdapter implements EvenHubSttAdapter {
   readonly provider = "deepgram" as const;
   private ws: WebSocket | null = null;
   private queue: Uint8Array[] = [];
+  private queuedAudioBytes = 0;
+  private droppedAudioBytes = 0;
+  private droppedAudioChunks = 0;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private opening: Promise<void> | null = null;
+  private cancelOpening: ((error: Error) => void) | null = null;
+  private desiredRunning = false;
+  private socketGeneration = 0;
+  private reconnectAttempt = 0;
+  private sessionOptions: EvenHubSttStartOptions | undefined;
 
   constructor(
     private readonly apiKey: string,
     private readonly callbacks: EvenHubSttCallbacks,
   ) {}
 
-  async start(): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) return;
+  async start(options?: EvenHubSttStartOptions): Promise<void> {
+    if (!this.desiredRunning) {
+      // A resume can overtake the previous stop's finalization wait.
+      this.retireSocket(new DOMException("STT start replaced the old socket", "AbortError"));
+      this.sessionOptions = options ? { ...options } : undefined;
+      this.reconnectAttempt = 0;
+      this.droppedAudioBytes = 0;
+      this.droppedAudioChunks = 0;
+    }
+    this.desiredRunning = true;
     if (this.opening) return this.opening;
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+    this.clearReconnectTimer();
+    return this.openSocket();
+  }
 
-    this.opening = new Promise((resolve, reject) => {
-      const WebSocketCtor = globalThis.WebSocket as unknown as new (url: string, options?: unknown) => WebSocket;
-      const ws = new WebSocketCtor(makeDeepgramUrl(), {
-        headers: {
-          Authorization: `Token ${this.apiKey}`,
-        },
-      });
-      this.ws = ws;
-      ws.binaryType = "arraybuffer";
-
-      ws.onopen = () => {
-        this.callbacks.onStatus?.("Deepgram STT connected.");
-        this.flushQueue();
-        this.keepAliveTimer = setInterval(() => {
-          if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ type: "KeepAlive" }));
-          }
-        }, 10000);
-        resolve();
-      };
-
-      ws.onmessage = (event) => {
-        this.handleMessage(event.data);
-      };
-
-      ws.onerror = () => {
-        const error = new Error("Deepgram STT websocket error.");
-        this.callbacks.onError?.(error);
-        reject(error);
-      };
-
-      ws.onclose = () => {
-        this.clearKeepAlive();
-        this.ws = null;
-        this.opening = null;
-        this.callbacks.onStatus?.("Deepgram STT closed.");
-      };
+  private openSocket(): Promise<void> {
+    if (!this.desiredRunning) return Promise.resolve();
+    const generation = ++this.socketGeneration;
+    let resolveOpening!: () => void;
+    let rejectOpening!: (error: Error) => void;
+    let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+    const opening = new Promise<void>((resolve, reject) => {
+      resolveOpening = resolve;
+      rejectOpening = reject;
     });
+    this.opening = opening;
+    const settle = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (handshakeTimer) clearTimeout(handshakeTimer);
+      if (this.opening === opening) {
+        this.opening = null;
+        this.cancelOpening = null;
+      }
+      if (error) rejectOpening(error);
+      else resolveOpening();
+    };
+    this.cancelOpening = settle;
+    if (!this.reconnectAttempt) {
+      this.emitConnectionState({ status: "connecting", detail: "Connecting to Deepgram STT." });
+    }
+    // Install ownership before constructing the transport so synchronous failures
+    // cannot leave a rejected promise permanently occupying `opening`.
+    try {
+      const WebSocketCtor = globalThis.WebSocket as unknown as new (url: string, options?: unknown) => WebSocket;
+      const socket = new WebSocketCtor(makeDeepgramUrl(this.sessionOptions), {
+        headers: { Authorization: `Token ${this.apiKey}` },
+      });
+      this.ws = socket;
+      socket.binaryType = "arraybuffer";
+      handshakeTimer = setTimeout(() => {
+        this.handleSocketFailure(socket, generation, 1006, "Deepgram STT handshake timed out.");
+      }, envNumber("DEEPGRAM_STT_CONNECT_TIMEOUT_MS", 10000));
 
-    return this.opening;
+      socket.onopen = () => {
+        if (!this.isCurrentSocket(socket, generation)) return;
+        if (!this.desiredRunning) {
+          this.retireSocket(new DOMException("STT stopped", "AbortError"));
+          return;
+        }
+        this.emitConnectionState({ status: "connected", detail: "Deepgram STT connected." });
+        this.flushQueue(socket, generation);
+        if (!this.isCurrentSocket(socket, generation)) return;
+        this.reconnectAttempt = 0;
+        // Deepgram recommends 3-5 seconds; 10 seconds races its idle timeout.
+        this.keepAliveTimer = setInterval(() => {
+          if (!this.desiredRunning || !this.isCurrentSocket(socket, generation)) return;
+          try {
+            socket.send(JSON.stringify({ type: "KeepAlive" }));
+          } catch {
+            this.handleSocketFailure(socket, generation, 1006, "Deepgram STT keepalive send failed.");
+          }
+        }, 4000);
+        settle();
+      };
+      socket.onmessage = (event) => {
+        if (this.isCurrentSocket(socket, generation)) this.handleMessage(event.data);
+      };
+      socket.onerror = () => this.handleSocketFailure(socket, generation, 1006, "Deepgram STT websocket error.");
+      socket.onclose = (event) => this.handleSocketFailure(
+        socket, generation, event?.code || 1006, event?.reason || "Deepgram STT closed.",
+      );
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.retireSocket(failure);
+      this.scheduleReconnect(1006, failure.message);
+    }
+    return opening;
   }
 
   pushAudio(chunk: Uint8Array): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(chunk);
-      return;
+    if (!this.desiredRunning || !chunk.byteLength) return;
+    const socket = this.ws;
+    const generation = this.socketGeneration;
+    if (socket?.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(chunk);
+        return;
+      } catch {
+        this.enqueueAudio(chunk);
+        this.handleSocketFailure(socket, generation, 1006, "Deepgram STT audio send failed.");
+        return;
+      }
     }
-    this.queue.push(chunk);
+    this.enqueueAudio(chunk);
   }
 
   async stop(): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "Finalize" }));
-      await delay(envNumber("EVENHUB_STT_FINALIZE_WAIT_MS", 900));
-      this.ws.close();
-    }
-    this.queue = [];
+    this.desiredRunning = false;
+    this.clearReconnectTimer();
     this.clearKeepAlive();
+    this.clearQueue();
+    const socket = this.ws;
+    const generation = this.socketGeneration;
+    if (socket?.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(JSON.stringify({ type: "Finalize" }));
+        // Keep this socket's last final transcript eligible until finalization ends.
+        await delay(envNumber("EVENHUB_STT_FINALIZE_WAIT_MS", 900));
+      } catch {
+        // Finalization is best effort; cleanup and stopping must still complete.
+      }
+    }
+    if (generation !== this.socketGeneration) return;
+    this.retireSocket(new DOMException("STT stopped", "AbortError"));
+    this.emitConnectionState({ status: "stopped", detail: "Deepgram STT stopped." });
   }
 
   close(): void {
-    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
-      this.ws.close();
-    }
-    this.queue = [];
-    this.clearKeepAlive();
+    this.desiredRunning = false;
+    this.clearReconnectTimer();
+    this.clearQueue();
+    this.retireSocket(new DOMException("STT closed", "AbortError"));
+    this.emitConnectionState({ status: "stopped", detail: "Deepgram STT stopped." });
   }
 
-  private flushQueue(): void {
-    const queued = this.queue;
-    this.queue = [];
-    for (const chunk of queued) {
-      if (this.ws?.readyState !== WebSocket.OPEN) {
-        this.queue.unshift(chunk);
+  private handleSocketFailure(socket: WebSocket, generation: number, code: number, reason: string): void {
+    if (!this.isCurrentSocket(socket, generation)) return;
+    const error = new Error(`Deepgram STT closed (${code}): ${reason}`);
+    this.retireSocket(error);
+    if (!this.desiredRunning) return;
+    if (code === 1002 || code === 1003 || code === 1008) {
+      this.fail(error, code, reason);
+    } else {
+      this.scheduleReconnect(code, reason);
+    }
+  }
+
+  private scheduleReconnect(code: number, reason: string): void {
+    if (!this.desiredRunning || this.reconnectTimer) return;
+    this.reconnectAttempt += 1;
+    if (this.reconnectAttempt > envNumber("DEEPGRAM_STT_RECONNECT_ATTEMPTS", 8)) {
+      this.fail(new Error(`Deepgram STT reconnect limit reached: ${reason}`), code, reason);
+      return;
+    }
+    const retryInMs = Math.min(
+      envNumber("DEEPGRAM_STT_RECONNECT_MAX_MS", 4000),
+      envNumber("DEEPGRAM_STT_RECONNECT_BASE_MS", 250) * (2 ** (this.reconnectAttempt - 1)),
+    );
+    this.emitConnectionState({
+      status: "reconnecting", detail: `Deepgram STT reconnecting after close code ${code}.`,
+      attempt: this.reconnectAttempt, retryInMs, code, reason,
+    });
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.desiredRunning) void this.openSocket().catch(() => {
+        // The failure handler has already scheduled recovery or reported failure.
+      });
+    }, retryInMs);
+  }
+
+  private fail(error: Error, code: number, reason: string): void {
+    this.desiredRunning = false;
+    this.clearReconnectTimer();
+    this.clearQueue();
+    this.emitConnectionState({ status: "failed", detail: error.message, code, reason });
+    this.callbacks.onError?.(error);
+  }
+
+  private retireSocket(error: Error): void {
+    this.clearKeepAlive();
+    this.cancelOpening?.(error);
+    const socket = this.ws;
+    this.ws = null;
+    if (!socket) return;
+    socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
+    try {
+      if (socket.readyState !== WebSocket.CLOSED) socket.close();
+    } catch {
+      // Ownership is already revoked; delayed transport events cannot mutate us.
+    }
+  }
+
+  private enqueueAudio(chunk: Uint8Array): void {
+    const sampleRate = envNumber("EVENHUB_STT_SAMPLE_RATE", 16000);
+    const bufferMs = envNumber("DEEPGRAM_STT_RECONNECT_BUFFER_MS", 500);
+    const maxBytes = Math.max(2, Math.floor(sampleRate * bufferMs / 1000) * 2);
+    let queuedChunk = chunk.slice();
+    if (queuedChunk.byteLength > maxBytes) {
+      this.droppedAudioBytes += queuedChunk.byteLength - maxBytes;
+      this.droppedAudioChunks += 1;
+      queuedChunk = queuedChunk.slice(-maxBytes);
+    }
+    while (this.queue.length && this.queuedAudioBytes + queuedChunk.byteLength > maxBytes) {
+      const dropped = this.queue.shift()!;
+      this.queuedAudioBytes -= dropped.byteLength;
+      this.droppedAudioBytes += dropped.byteLength;
+      this.droppedAudioChunks += 1;
+    }
+    this.queue.push(queuedChunk);
+    this.queuedAudioBytes += queuedChunk.byteLength;
+  }
+
+  private flushQueue(socket: WebSocket, generation: number): void {
+    while (this.queue.length && this.isCurrentSocket(socket, generation)) {
+      if (socket.readyState !== WebSocket.OPEN) {
+        this.handleSocketFailure(socket, generation, 1006, "Deepgram STT closed while replaying audio.");
         return;
       }
-      this.ws.send(chunk);
+      const chunk = this.queue[0];
+      try {
+        socket.send(chunk);
+      } catch {
+        this.handleSocketFailure(socket, generation, 1006, "Deepgram STT audio replay failed.");
+        return;
+      }
+      this.queue.shift();
+      this.queuedAudioBytes -= chunk.byteLength;
     }
   }
 
@@ -263,11 +428,32 @@ export class DeepgramEvenHubSttAdapter implements EvenHubSttAdapter {
     });
   }
 
+  private isCurrentSocket(socket: WebSocket, generation: number): boolean {
+    return this.ws === socket && this.socketGeneration === generation;
+  }
+
+  private emitConnectionState(event: Omit<EvenHubSttConnectionEvent, "provider">): void {
+    const connectionEvent = {
+      ...event, provider: this.provider, queuedAudioBytes: this.queuedAudioBytes,
+      droppedAudioBytes: this.droppedAudioBytes, droppedAudioChunks: this.droppedAudioChunks,
+    };
+    if (this.callbacks.onConnectionState) this.callbacks.onConnectionState(connectionEvent);
+    else this.callbacks.onStatus?.(event.detail);
+  }
+
+  private clearQueue(): void {
+    this.queue = [];
+    this.queuedAudioBytes = 0;
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
   private clearKeepAlive(): void {
-    if (this.keepAliveTimer) {
-      clearInterval(this.keepAliveTimer);
-      this.keepAliveTimer = null;
-    }
+    if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
+    this.keepAliveTimer = null;
   }
 }
 

@@ -3,6 +3,8 @@ import { defaultEvenHubV2Settings, normalizeEvenHubV2Settings, type EvenHubV2Set
 import { evenHubV2SummaryRunner } from "../evenhub-v2/summary-runner";
 import { evenHubV2Store, parseStoredJson, type EvenHubV2Store, type EvenHubV2SummaryRecord } from "../evenhub-v2/store";
 import { conversationLogger, type PrenoteRecord } from "../data/conversation-logger";
+import { getEvenHubV2Principal } from "../evenhub-v2/auth";
+import { getEvenHubV2RuntimeSnapshot } from "../evenhub-v2/ws";
 
 type ConversationDetail = NonNullable<ReturnType<EvenHubV2Store["getConversationDetail"]>>;
 type SummaryQueueRunner = Pick<typeof evenHubV2SummaryRunner, "queueSummary" | "enqueue">;
@@ -11,11 +13,7 @@ const MAX_PRENOTE_TEXT_LENGTH = 5000;
 const MAX_PRENOTE_TITLE_LENGTH = 80;
 
 function getUserId(c: Context): string {
-  if (process.env.EVENHUB_V2_ALLOW_QUERY_USER_ID === "true") {
-    const queryUserId = c.req.query("userId")?.trim();
-    if (queryUserId) return queryUserId;
-  }
-  return process.env.EVENHUB_DEFAULT_USER_ID || process.env.EVENHUB_V2_DEFAULT_USER_ID || "evenhub-v2-user";
+  return getEvenHubV2Principal(c).ownerId;
 }
 
 export function serializeSummary(summary: EvenHubV2SummaryRecord | null) {
@@ -232,13 +230,13 @@ export const updateEvenHubV2Prenote = async (c: Context) => {
   if (hasText && typeof body.text !== "string") return c.json({ error: "text must be a string" }, 400);
   if (hasSelected && typeof body.selected !== "boolean") return c.json({ error: "selected must be a boolean" }, 400);
 
-  const text = hasText ? body.text.trim() : undefined;
+  const text = typeof body.text === "string" ? body.text.trim() : undefined;
   if (hasText && !text) return c.json({ error: "Prenote text is required" }, 400);
   if (text && text.length > MAX_PRENOTE_TEXT_LENGTH) {
     return c.json({ error: `Prenote text must be ${MAX_PRENOTE_TEXT_LENGTH} characters or fewer` }, 400);
   }
 
-  const requestedTitle = hasTitle ? body.title.trim() : undefined;
+  const requestedTitle = typeof body.title === "string" ? body.title.trim() : undefined;
   const title = hasTitle
     ? (requestedTitle || (text ? inferPrenoteTitle(text) : ""))
     : undefined;
@@ -247,7 +245,7 @@ export const updateEvenHubV2Prenote = async (c: Context) => {
   const prenote = conversationLogger.updateManualPrenote(userId, id, {
     title: title?.slice(0, MAX_PRENOTE_TITLE_LENGTH),
     text,
-    selected: hasSelected ? body.selected : undefined,
+    selected: typeof body.selected === "boolean" ? body.selected : undefined,
   });
   if (!prenote) return c.json({ error: "Prenote not found" }, 404);
   return c.json({ prenote: serializeEvenHubV2Prenote(prenote) });
@@ -282,6 +280,7 @@ export const getEvenHubV2Conversation = (c: Context) => {
   const summary = ensureSummaryForEndedConversation(detail);
   return c.json({
     conversation: serializeConversation(detail.conversation),
+    runtimeSnapshot: getEvenHubV2RuntimeSnapshot(userId, id),
     summary: serializeSummary(summary),
     transcript: detail.transcript.map((line) => ({
       id: line.id,
@@ -310,9 +309,24 @@ export const getEvenHubV2Conversation = (c: Context) => {
 export const deleteEvenHubV2Conversation = (c: Context) => {
   const userId = getUserId(c);
   const id = c.req.param("id");
+  const detail = evenHubV2Store.getConversationDetail(id);
+  if (!detail || detail.conversation.userId !== userId) return c.json({ error: "Conversation not found" }, 404);
+  if (detail.conversation.status === "active" || detail.conversation.status === "ending") {
+    return c.json({ code: "conversation_active", error: "End the conversation before deleting it." }, 409);
+  }
   const deleted = evenHubV2Store.deleteConversation(userId, id);
   if (!deleted) {
     return c.json({ error: "Conversation not found" }, 404);
   }
   return c.json({ deleted: true, id });
+};
+
+export const retryEvenHubV2Summary = (c: Context) => {
+  const userId = getUserId(c);
+  const id = c.req.param("id");
+  const result = evenHubV2SummaryRunner.retry(id, userId);
+  if (result === "not_found") return c.json({ error: "Conversation not found" }, 404);
+  if (result === "active") return c.json({ code: "conversation_active", error: "End the conversation before generating a summary." }, 409);
+  if (result === "not_failed") return c.json({ code: "summary_not_failed", error: "This summary does not require a retry." }, 409);
+  return c.json({ status: result, summary: serializeSummary(evenHubV2Store.getSummary(id)) }, result === "queued" ? 202 : 200);
 };

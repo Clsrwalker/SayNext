@@ -39,10 +39,10 @@ export function normalizeConversationSettings(
 }
 
 export function loadStoredConversationSettings(fallback: ConversationSettings): ConversationSettings | null {
-  if (typeof window === "undefined" || !window.localStorage) return null;
-  const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
-  if (!raw) return null;
   try {
+    if (typeof window === "undefined") return null;
+    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return null;
     return normalizeConversationSettings(JSON.parse(raw), fallback);
   } catch {
     return null;
@@ -50,8 +50,8 @@ export function loadStoredConversationSettings(fallback: ConversationSettings): 
 }
 
 export function saveConversationSettings(settings: ConversationSettings): boolean {
-  if (typeof window === "undefined" || !window.localStorage) return false;
   try {
+    if (typeof window === "undefined") return false;
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
     return true;
   } catch {

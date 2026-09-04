@@ -58,12 +58,14 @@ export interface AutoCueGenerator {
     userId: string;
     selectedPrenoteIds?: string[];
     selectedPrenoteText?: string;
+    signal?: AbortSignal;
   }): Promise<AutoCueSession | null>;
   generate(input: AutoCueGeneratorInput): Promise<AutoCueGenerationResult>;
   commitCanonicalTurn?(input: {
     session: AutoCueSession;
     question: string;
     result: AutoCueGenerationResult;
+    signal?: AbortSignal;
   }): Promise<void>;
   endSession?(session: AutoCueSession): Promise<void>;
 }
@@ -212,11 +214,13 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
     userId: string;
     selectedPrenoteIds?: string[];
     selectedPrenoteText?: string;
+    signal?: AbortSignal;
   }): Promise<AutoCueSession> {
     const session: OpenAiConversationSession = await this.conversationClient.createSession({
       seed: buildAutoCueSessionSeed(input.selectedPrenoteText),
       localConversationId: input.localConversationId,
       userId: input.userId,
+      signal: input.signal,
     });
     return {
       providerConversationId: session.id,
@@ -292,11 +296,13 @@ export class OpenAiAutoCueGenerator implements AutoCueGenerator {
     session: AutoCueSession;
     question: string;
     result: AutoCueGenerationResult;
+    signal?: AbortSignal;
   }): Promise<void> {
     await this.conversationClient.commitCanonicalTurn({
       conversationId: input.session.providerConversationId,
       question: input.question,
       answerJson: JSON.stringify(input.result.data),
+      signal: input.signal,
     });
   }
 
@@ -471,7 +477,7 @@ export function buildAutoCueTurnPrompt(input: AutoCueGeneratorInput): string {
       ? `A local timing model returned no_cue with probability ${input.router.probability.toFixed(3)}. This is only a weak signal: still answer a complete question or request.`
       : "The timing model is unavailable. Decide from the current question or request.";
   return [
-    "Use only this turn's current question, recent valid transcript, selected context cards, and timing signal. The provider conversation already contains any conversation-level prenote.",
+    "Use only this turn's current question, recent valid transcript, selected context cards, selected prenote, and timing signal.",
     routerInstruction,
     "",
     input.contextSnapshot,

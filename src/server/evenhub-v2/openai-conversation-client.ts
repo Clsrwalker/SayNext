@@ -27,9 +27,11 @@ export class OpenAiConversationClient {
     seed: string;
     localConversationId: string;
     userId: string;
+    signal?: AbortSignal;
   }): Promise<OpenAiConversationSession> {
     const result = await this.request("/v1/conversations", {
       method: "POST",
+      signal: input.signal,
       body: JSON.stringify({
         items: [{
           type: "message",
@@ -52,9 +54,11 @@ export class OpenAiConversationClient {
     conversationId: string;
     question: string;
     answerJson: string;
+    signal?: AbortSignal;
   }): Promise<void> {
     await this.request(`/v1/conversations/${encodeURIComponent(input.conversationId)}/items`, {
       method: "POST",
+      signal: input.signal,
       body: JSON.stringify({
         items: [
           {
@@ -75,29 +79,48 @@ export class OpenAiConversationClient {
     });
   }
 
-  async deleteSession(conversationId: string): Promise<void> {
+  async deleteSession(conversationId: string, signal?: AbortSignal): Promise<void> {
     await this.request(`/v1/conversations/${encodeURIComponent(conversationId)}`, {
       method: "DELETE",
+      signal,
     });
   }
 
   private async request(path: string, init: RequestInit): Promise<unknown> {
     if (!this.apiKey) throw new Error("OPENAI_API_KEY is not configured");
     const controller = new AbortController();
+    const abortFromExternalSignal = () => controller.abort(init.signal?.reason);
+    if (init.signal?.aborted) abortFromExternalSignal();
+    else init.signal?.addEventListener("abort", abortFromExternalSignal, { once: true });
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-        ...(init.headers || {}),
-      },
-    }).finally(() => clearTimeout(timeout));
-    if (!response.ok) {
-      throw new Error(`OpenAI conversation request failed: ${response.status} ${await response.text()}`);
+    let rejectAborted!: () => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAborted = () => reject(controller.signal.reason);
+      controller.signal.addEventListener("abort", rejectAborted, { once: true });
+    });
+    try {
+      controller.signal.throwIfAborted();
+      return await Promise.race([aborted, (async () => {
+        const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+          ...init,
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+            ...(init.headers || {}),
+          },
+        });
+        controller.signal.throwIfAborted();
+        if (!response.ok) {
+          throw new Error(`OpenAI conversation request failed: ${response.status} ${await response.text()}`);
+        }
+        const text = await response.text();
+        return text ? JSON.parse(text) : {};
+      })()]);
+    } finally {
+      clearTimeout(timeout);
+      controller.signal.removeEventListener("abort", rejectAborted);
+      init.signal?.removeEventListener("abort", abortFromExternalSignal);
     }
-    const text = await response.text();
-    return text ? JSON.parse(text) : {};
   }
 }

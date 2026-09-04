@@ -61,7 +61,7 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
 
   const model = options.model || getSessionMemoryOpenAiModel();
   const controller = new AbortController();
-  const abortFromExternalSignal = () => controller.abort();
+  const abortFromExternalSignal = () => controller.abort(options.signal?.reason);
   if (options.signal?.aborted) abortFromExternalSignal();
   else options.signal?.addEventListener("abort", abortFromExternalSignal, { once: true });
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -99,34 +99,48 @@ export async function generateOpenAiJson<T>(options: OpenAiJsonGenerateOptions):
   }
 
   const baseUrl = (options.baseUrl || "https://api.openai.com").replace(/\/$/, "");
-  const response = await (options.fetchImpl || fetch)(`${baseUrl}/v1/responses`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    signal: controller.signal,
-    body: JSON.stringify(body),
-  }).finally(() => {
-    clearTimeout(timeout);
-    options.signal?.removeEventListener("abort", abortFromExternalSignal);
+  let rejectAborted!: () => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAborted = () => reject(controller.signal.reason);
+    controller.signal.addEventListener("abort", rejectAborted, { once: true });
   });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI JSON request failed: ${response.status} ${await response.text()}`);
-  }
-
-  const raw = await response.json();
-  const text = extractResponseText(raw);
-  const jsonText = extractJsonObject(text) ?? text;
-
   try {
-    return {
-      data: JSON.parse(jsonText) as T,
-      rawText: text,
-      model,
-    };
-  } catch (error) {
-    throw new Error(`Failed to parse OpenAI JSON: ${error instanceof Error ? error.message : String(error)}\nRaw response: ${text}`);
+    controller.signal.throwIfAborted();
+    // The deadline includes headers AND the body, including HTTP error bodies.
+    // Racing also bounds custom transports whose body reader ignores abort.
+    return await Promise.race([aborted, (async () => {
+      const response = await (options.fetchImpl || fetch)(`${baseUrl}/v1/responses`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify(body),
+      });
+      controller.signal.throwIfAborted();
+    
+      if (!response.ok) {
+        throw new Error(`OpenAI JSON request failed: ${response.status} ${await response.text()}`);
+      }
+    
+      const raw = await response.json();
+      const text = extractResponseText(raw);
+      const jsonText = extractJsonObject(text) ?? text;
+    
+      try {
+        return {
+          data: JSON.parse(jsonText) as T,
+          rawText: text,
+          model,
+        };
+      } catch (error) {
+        throw new Error(`Failed to parse OpenAI JSON: ${error instanceof Error ? error.message : String(error)}\nRaw response: ${text}`);
+      }
+    })()]);
+  } finally {
+    clearTimeout(timeout);
+    controller.signal.removeEventListener("abort", rejectAborted);
+    options.signal?.removeEventListener("abort", abortFromExternalSignal);
   }
 }

@@ -99,12 +99,15 @@ export type EvenHubV2CuePayload = {
 export type EvenHubV2ServerMessage =
   | EvenHubV2Envelope<"ready", {
       conversationId: string | null;
+      lastConversationId?: string | null;
+      startedAt?: string;
       conversationStatus: ConversationStatus;
       audioStatus: AudioStatus;
       settings: EvenHubV2Settings;
     }>
   | EvenHubV2Envelope<"conversation_started", {
       conversationId: string;
+      startedAt?: string;
       conversationStatus: ConversationStatus;
       audioStatus: AudioStatus;
     }>

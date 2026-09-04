@@ -57,3 +57,94 @@ test("OpenAI conversation client commits only an accepted canonical question and
     },
   ]);
 });
+
+for (const phase of ["headers", "success body", "error body"] as const) {
+  test(`OpenAI conversation deadline covers hanging ${phase}`, async () => {
+    let observedSignal: AbortSignal | null | undefined;
+    const client = new OpenAiConversationClient({
+      apiKey: "test-key", timeoutMs: 10,
+      fetchImpl: async (_input, init) => {
+        observedSignal = init?.signal;
+        if (phase === "headers") return new Promise<Response>(() => {});
+        return {
+          ok: phase === "success body", status: phase === "success body" ? 200 : 500,
+          text: () => new Promise(() => {}),
+        } as unknown as Response;
+      },
+    });
+    await expect(client.createSession({ seed: "seed", localConversationId: "local", userId: "user" }))
+      .rejects.toHaveProperty("name", "AbortError");
+    expect(observedSignal?.aborted).toBe(true);
+  });
+}
+
+for (const operation of ["create", "commit", "delete"] as const) {
+  for (const ok of [true, false]) {
+    test(`OpenAI conversation ${operation} externally cancels a hanging ${ok ? "success" : "error"} body`, async () => {
+      const external = new AbortController();
+      let readingBody!: () => void;
+      const enteredBody = new Promise<void>((resolve) => { readingBody = resolve; });
+      const client = new OpenAiConversationClient({
+        apiKey: "test-key", timeoutMs: 1000,
+        fetchImpl: async () => ({
+          ok, status: ok ? 200 : 500, text: () => { readingBody(); return new Promise(() => {}); },
+        }) as unknown as Response,
+      });
+      const request = operation === "create"
+        ? client.createSession({ seed: "seed", localConversationId: "local", userId: "user", signal: external.signal })
+        : operation === "commit"
+          ? client.commitCanonicalTurn({ conversationId: "test", question: "q", answerJson: "{}", signal: external.signal })
+          : client.deleteSession("test", external.signal);
+      await enteredBody;
+      external.abort();
+      await expect(request).rejects.toHaveProperty("name", "AbortError");
+    });
+  }
+}
+
+for (const outcome of ["success", "sync throw", "async reject", "bad json", "http error"] as const) {
+  test(`OpenAI conversation cleans cancellation and deadline after ${outcome}`, async () => {
+    const external = new AbortController();
+    let activeListeners = 0;
+    const add = external.signal.addEventListener.bind(external.signal);
+    const remove = external.signal.removeEventListener.bind(external.signal);
+    external.signal.addEventListener = ((...args: Parameters<typeof add>) => {
+      if (args[0] === "abort") activeListeners += 1;
+      return add(...args);
+    }) as typeof add;
+    external.signal.removeEventListener = ((...args: Parameters<typeof remove>) => {
+      if (args[0] === "abort") activeListeners -= 1;
+      return remove(...args);
+    }) as typeof remove;
+    let observedSignal: AbortSignal | null | undefined;
+    const client = new OpenAiConversationClient({
+      apiKey: "test-key", timeoutMs: 10,
+      fetchImpl: (_input, init) => {
+        observedSignal = init?.signal;
+        if (outcome === "sync throw") throw new Error("sync failure");
+        if (outcome === "async reject") return Promise.reject(new Error("async failure"));
+        return Promise.resolve(new Response(outcome === "bad json" ? "invalid" : "{}", {
+          status: outcome === "http error" ? 500 : 200,
+        }));
+      },
+    });
+    const request = client.deleteSession("test", external.signal);
+    if (outcome === "success") await request;
+    else await expect(request).rejects.toBeInstanceOf(Error);
+    expect(activeListeners).toBe(0);
+    external.abort();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(observedSignal?.aborted).toBe(false);
+  });
+}
+
+test("OpenAI conversation pre-aborted requests never call the transport", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  const client = new OpenAiConversationClient({
+    apiKey: "test-key", fetchImpl: async () => { calls += 1; return new Response(); },
+  });
+  await expect(client.deleteSession("test", controller.signal)).rejects.toHaveProperty("name", "AbortError");
+  expect(calls).toBe(0);
+});

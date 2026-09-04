@@ -5,7 +5,7 @@ import type { AutoCueCategory, EvenHubV2Settings } from "./protocol";
 
 const DEFAULT_DB_PATH = join(process.cwd(), "data", "saynext.sqlite");
 
-export type StoredConversationStatus = "active" | "ended" | "abandoned";
+export type StoredConversationStatus = "active" | "ending" | "ended" | "abandoned";
 export type StoredAttemptStatus = "queued" | "running" | "created" | "skipped" | "failed" | "stale";
 export type StoredSummaryStatus = "queued" | "running" | "ready" | "failed";
 
@@ -187,6 +187,7 @@ export type UpsertUserSettingsInput = {
 };
 
 export type CompleteSummaryInput = {
+  claim?: { attemptCount: number; startedAt: string };
   conversationId: string;
   title: string;
   overview: string;
@@ -204,6 +205,7 @@ export type CompleteSummaryInput = {
 };
 
 export type FailSummaryInput = {
+  claim?: { attemptCount: number; startedAt: string };
   conversationId: string;
   model?: string;
   promptVersion?: string;
@@ -445,12 +447,29 @@ export class EvenHubV2Store {
     endedAt: string;
     durationMs: number;
     lastPartialAtEnd?: string;
+    status?: "ended" | "abandoned";
   }): void {
     this.getDb().query(`
       UPDATE evenhub_v2_conversations
-      SET status = 'ended', ended_at = ?, duration_ms = ?, last_partial_at_end = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(input.endedAt, input.durationMs, input.lastPartialAtEnd || "", input.conversationId);
+      SET status = ?, ended_at = ?, duration_ms = ?, last_partial_at_end = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status IN ('active', 'ending')
+    `).run(input.status || "ended", input.endedAt, input.durationMs, input.lastPartialAtEnd || "", input.conversationId);
+  }
+
+  markConversationEnding(conversationId: string): void {
+    this.getDb().query("UPDATE evenhub_v2_conversations SET status = 'ending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'active'").run(conversationId);
+  }
+
+  recoverAbandonedConversations(endedAt = new Date().toISOString()): EvenHubV2ConversationRecord[] {
+    const rows = this.getDb().query("SELECT * FROM evenhub_v2_conversations WHERE status IN ('active', 'ending')").all() as any[];
+    const conversations = rows.map(EvenHubV2ConversationRecordMapper);
+    this.getDb().transaction(() => {
+      for (const conversation of conversations) {
+        this.endConversation({ conversationId: conversation.id, endedAt, durationMs: Math.max(0, Date.parse(endedAt) - Date.parse(conversation.startedAt)), status: "abandoned" });
+        this.getDb().query("UPDATE evenhub_v2_auto_cue_attempts SET status = 'stale', skipped_reason = 'server_restarted', updated_at = CURRENT_TIMESTAMP WHERE conversation_id = ? AND status IN ('queued', 'running')").run(conversation.id);
+      }
+    })();
+    return conversations;
   }
 
   updateOpenAiConversationState(input: {
@@ -494,8 +513,9 @@ export class EvenHubV2Store {
   deleteConversation(userId: string, conversationId: string): boolean {
     const conversation = this.getConversation(conversationId);
     if (!conversation || conversation.userId !== userId) return false;
+    if (conversation.status === "active" || conversation.status === "ending") throw new Error("conversation_active");
     this.getDb()
-      .query("DELETE FROM evenhub_v2_conversations WHERE id = ? AND user_id = ?")
+      .query("DELETE FROM evenhub_v2_conversations WHERE id = ? AND user_id = ? AND status NOT IN ('active', 'ending')")
       .run(conversationId, userId);
     return true;
   }
@@ -680,12 +700,13 @@ export class EvenHubV2Store {
     return rows.map(EvenHubV2SummaryRecordMapper);
   }
 
-  resetStaleRunningSummaries(cutoffStartedAt: string): EvenHubV2SummaryRecord[] {
+  resetStaleRunningSummaries(cutoffStartedAt: string, excludedConversationIds: ReadonlySet<string> = new Set()): EvenHubV2SummaryRecord[] {
     const stale = this.getDb()
       .query("SELECT * FROM evenhub_v2_summaries WHERE status = 'running' AND started_at != '' AND started_at < ? ORDER BY started_at ASC")
       .all(cutoffStartedAt) as any[];
     const summaries = stale.map(EvenHubV2SummaryRecordMapper);
     for (const summary of summaries) {
+      if (excludedConversationIds.has(summary.conversationId)) continue;
       this.getDb().query(`
         UPDATE evenhub_v2_summaries
         SET status = 'queued',
@@ -695,11 +716,20 @@ export class EvenHubV2Store {
           AND status = 'running'
       `).run(summary.conversationId);
     }
-    return summaries;
+    return summaries.filter((summary) => !excludedConversationIds.has(summary.conversationId));
+  }
+
+  retryFailedSummary(conversationId: string, userId: string, queuedAt: string): boolean {
+    const result = this.getDb().query(`
+      UPDATE evenhub_v2_summaries SET status = 'queued', queued_at = ?, started_at = '', completed_at = '', error = '', updated_at = CURRENT_TIMESTAMP
+      WHERE conversation_id = ? AND user_id = ? AND status = 'failed'
+      AND EXISTS (SELECT 1 FROM evenhub_v2_conversations WHERE id = ? AND user_id = ? AND status IN ('ended', 'abandoned'))
+    `).run(queuedAt, conversationId, userId, conversationId, userId);
+    return result.changes === 1;
   }
 
   completeSummary(input: CompleteSummaryInput): EvenHubV2SummaryRecord | null {
-    this.getDb().query(`
+    const result = this.getDb().query(`
       UPDATE evenhub_v2_summaries
       SET status = 'ready',
           title = ?,
@@ -718,6 +748,7 @@ export class EvenHubV2Store {
           completed_at = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE conversation_id = ?
+        AND (? IS NULL OR (status = 'running' AND attempt_count = ? AND started_at = ?))
     `).run(
       input.title,
       input.overview,
@@ -733,7 +764,11 @@ export class EvenHubV2Store {
       input.inputTruncated ? 1 : 0,
       input.completedAt,
       input.conversationId,
+      input.claim?.attemptCount ?? null,
+      input.claim?.attemptCount ?? null,
+      input.claim?.startedAt ?? null,
     );
+    if (!result.changes) return null;
     if (input.title.trim()) {
       this.getDb().query(`
         UPDATE evenhub_v2_conversations
@@ -747,7 +782,7 @@ export class EvenHubV2Store {
   }
 
   failSummary(input: FailSummaryInput): EvenHubV2SummaryRecord | null {
-    this.getDb().query(`
+    const result = this.getDb().query(`
       UPDATE evenhub_v2_summaries
       SET status = 'failed',
           model = ?,
@@ -761,6 +796,7 @@ export class EvenHubV2Store {
           completed_at = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE conversation_id = ?
+        AND (? IS NULL OR (status = 'running' AND attempt_count = ? AND started_at = ?))
     `).run(
       input.model || "",
       input.promptVersion || "",
@@ -772,7 +808,11 @@ export class EvenHubV2Store {
       input.inputTruncated ? 1 : 0,
       input.completedAt,
       input.conversationId,
+      input.claim?.attemptCount ?? null,
+      input.claim?.attemptCount ?? null,
+      input.claim?.startedAt ?? null,
     );
+    if (!result.changes) return null;
     return this.getSummary(input.conversationId);
   }
 
